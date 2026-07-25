@@ -751,6 +751,35 @@ Three decisions it forced, none of them recoverable from the diff:
   `int` still needs `int`'s class the moment a type error asks for a name. The only root
   the heap contributes on its own behalf.
 
+### A type's name belongs to the type
+
+`let string = "x"` used to work, and silently won: a global is bound by name, so the type
+was replaced and every later mention of `string` meant a string. Worse, this was already
+true of classes a program declared — `class Point {}` then `let Point = 5` stole the name
+long before the builtin types were values, and nothing complained.
+
+So a name that belongs to a type is not available to anything else, checked in the resolver
+before the program starts. `declare` is the single choke point every binding form passes
+through — `let`, `final`, `const`, `fn`, a parameter, a loop variable — so one check covers
+all of them, and a test names them all to keep it that way.
+
+Two details worth keeping. The resolver reads a statement list's `class` declarations
+before any of its bindings, so the collision is refused whichever order the two were
+written in; without that pass only the half written second would be caught. And `resolve`
+now runs `declare_all` over the top level, which it never did — the top level has no scope,
+so `scoped` never reached it, which is exactly why globals were stealable. Slots are
+unaffected: `declare_slot` returns early without a scope, because a global is still bound
+by name at run time.
+
+The reserved set is flat and never popped, so a class declared inside a function reserves
+its name for the rest of the program. Over-broad, deliberately, on `declare`'s own
+reasoning: an error can be relaxed later, a semantics cannot.
+
+`print` and `len` stay shadowable. The rule is about the type vocabulary, not about every
+name the language happens to bind first — a function is a value a program may reasonably
+want to replace, and a type is what `int(5)` and a future `extend int` have to be able to
+read without asking what is in scope.
+
 Two things ruled out rather than deferred. `type(x)` keeps returning a **string**: it is
 tempting to hand back the class once `int` is a value, but `Error`'s constructor does
 `self.kind = type(self)` and the corpus asserts a string, so the change would break

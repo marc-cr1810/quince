@@ -14,15 +14,30 @@
 //! is allowed to call a function declared further down the file, so neither can
 //! be pinned to a slot.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::{self, Block, Expr, ExprKind, FnDecl, Slot, Stmt, StmtKind};
+use crate::class::BUILTINS;
 use crate::error::QuinceError;
 use crate::token::Span;
 
 /// Resolves a whole program in place.
 pub fn resolve(program: &mut [Stmt]) -> Result<(), QuinceError> {
-    Resolver::default().stmts(program)
+    let mut resolver = Resolver::default();
+    // The top level has no scope, so `scoped` never runs over it — which is why
+    // nothing used to register the classes declared there or look at the names
+    // its bindings take. Slots are unaffected: `declare_slot` returns early
+    // without a scope, because a global is bound by name at run time.
+    resolver.declare_all(program, &[])?;
+    resolver.stmts(program)
+}
+
+/// Whether `name` is one of the types the language defines.
+///
+/// Read off the same list the globals are bound from, so a builtin type added
+/// later is reserved without this file being touched.
+fn is_builtin_type(name: &str) -> bool {
+    BUILTINS.iter().any(|builtin| builtin.name() == name)
 }
 
 #[derive(Debug)]
@@ -42,6 +57,15 @@ struct Scope {
 #[derive(Default)]
 struct Resolver {
     scopes: Vec<Scope>,
+    /// Names that belong to a type, and so are not available to anything else.
+    ///
+    /// Flat rather than per-scope, and never popped: a type name means the type
+    /// everywhere, which is what lets `int(5)` and a future `extend int` be read
+    /// without asking what is in scope at that point. Over-broad for a class
+    /// declared inside a function — its name is reserved for the rest of the
+    /// program — and deliberately so, on the same reasoning as `declare`: an
+    /// error can be relaxed later, a semantics cannot.
+    types: HashSet<String>,
 }
 
 impl Resolver {
@@ -71,6 +95,16 @@ impl Resolver {
         stmts: &mut [Stmt],
         predeclare: &[(String, bool, Span)],
     ) -> Result<(), QuinceError> {
+        // Classes first, so that a `let` stealing a type's name is refused
+        // whichever order the two were written in. Without this pass the check
+        // below would only catch the half of the mistake that happens to come
+        // second in the file.
+        for stmt in stmts.iter() {
+            if let StmtKind::Class { name, .. } = &stmt.kind {
+                self.declare_type(name, stmt.span)?;
+            }
+        }
+
         for (name, mutable, span) in predeclare {
             self.declare(name, *mutable, *span)?;
         }
@@ -80,21 +114,65 @@ impl Resolver {
                     self.declare(name, bind.mutable(), stmt.span)?
                 }
                 StmtKind::Fn { decl, .. } => self.declare(&decl.name, false, stmt.span)?,
-                StmtKind::Class { name, .. } => self.declare(name, false, stmt.span)?,
+                StmtKind::Class { name, .. } => self.declare_slot(name, false, stmt.span)?,
                 _ => {}
             }
         }
         Ok(())
     }
 
-    /// Reserves a slot in the innermost scope.
+    /// Records that `name` belongs to a type, refusing the builtin type names.
+    ///
+    /// `class int { … }` is the mistake this catches. Shadowing a builtin type is
+    /// refused for the same reason shadowing it with a `let` is: every mention of
+    /// `int` after that line would mean something the language did not choose.
+    fn declare_type(&mut self, name: &str, span: Span) -> Result<(), QuinceError> {
+        if is_builtin_type(name) {
+            return Err(QuinceError::new(
+                format!("`{name}` is a type built into the language"),
+                span,
+            )
+            .with_help("pick another name for this class"));
+        }
+        self.types.insert(name.to_string());
+        Ok(())
+    }
+
+    /// Reserves a slot for a binding, refusing one that would take a type's name.
+    ///
+    /// The check is here rather than in the evaluator because it is decidable
+    /// without running anything, and because at the top level there is no slot to
+    /// collide with — a global is bound by name, so `let string = "x"` used to
+    /// replace the type silently and every later mention of `string` meant a
+    /// string. That is the whole reason this exists.
+    fn declare(&mut self, name: &str, mutable: bool, span: Span) -> Result<(), QuinceError> {
+        if is_builtin_type(name) || self.types.contains(name) {
+            let what = match is_builtin_type(name) {
+                true => "a type built into the language",
+                false => "a class in this program",
+            };
+            return Err(
+                QuinceError::new(format!("`{name}` is the name of {what}"), span).with_help(
+                    format!(
+                        "a type's name cannot also be a variable — rename this one, not `{name}`"
+                    ),
+                ),
+            );
+        }
+        self.declare_slot(name, mutable, span)
+    }
+
+    /// Reserves a slot in the innermost scope, with no opinion about the name.
     ///
     /// Redeclaring a name in the same scope is an error rather than silent
     /// shadowing: with slots the two would be separate storage, so a closure
     /// made between them would quietly keep the older one. Shadowing across
     /// nested scopes is untouched. This is the restrictive choice on purpose —
     /// an error can be relaxed later, a semantics cannot.
-    fn declare(&mut self, name: &str, mutable: bool, span: Span) -> Result<(), QuinceError> {
+    ///
+    /// Called directly only for a `class`, whose name *is* the type and so
+    /// cannot be refused for being one.
+    fn declare_slot(&mut self, name: &str, mutable: bool, span: Span) -> Result<(), QuinceError> {
         let Some(scope) = self.scopes.last_mut() else {
             return Ok(()); // top level: a global, bound by name at run time
         };
@@ -430,6 +508,69 @@ mod tests {
         resolve(&mut program)
             .expect_err("should fail to resolve")
             .message
+    }
+
+    #[test]
+    fn a_type_name_is_not_available_to_a_binding() {
+        // Every declaration form, because `declare` is the one choke point they
+        // all pass through and this is what says so.
+        for src in [
+            "let string = 1",
+            "final string = 1",
+            "const string = 1",
+            "fn string() {\n}",
+            "fn f(string) {\n}",
+            "for string in [1] {\n}",
+            "fn f() {\n let string = 1\n}",
+        ] {
+            assert_eq!(
+                resolve_err(src),
+                "`string` is the name of a type built into the language",
+                "`{src}` should be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_class_name_is_not_available_either_whichever_order_they_come_in() {
+        // The pre-pass exists for the first of these: without it only the
+        // mistake written second in the file would be caught.
+        for src in [
+            "let Point = 1\nclass Point {\n}",
+            "class Point {\n}\nlet Point = 1",
+            "class Point {\n}\nfn f() {\n let Point = 1\n}",
+        ] {
+            assert_eq!(
+                resolve_err(src),
+                "`Point` is the name of a class in this program",
+                "`{src}` should be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_class_may_not_be_named_after_a_builtin_type() {
+        assert_eq!(
+            resolve_err("class int {\n}"),
+            "`int` is a type built into the language"
+        );
+    }
+
+    #[test]
+    fn a_type_name_still_resolves_to_a_global_everywhere() {
+        // The point of reserving the name: `int` inside a function is the same
+        // `int` as outside, with nothing in between able to have taken it.
+        let program = resolved("fn f() {\n return int\n}");
+        let StmtKind::Fn { decl, .. } = &program[0].kind else {
+            panic!("expected a function");
+        };
+        let StmtKind::Return(Some(expr)) = &decl.body.stmts[0].kind else {
+            panic!("expected a return with a value");
+        };
+        let ExprKind::Var(var) = &expr.kind else {
+            panic!("expected a variable");
+        };
+        assert_eq!(var.slot, Some(Slot::Global));
     }
 
     /// The slot a variable reference was given.

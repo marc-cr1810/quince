@@ -1,0 +1,5 @@
+# A type's name is not available to anything else. Before this was checked, the
+# binding silently won and every later mention of `string` meant a string — the
+# type had no way to complain, because a global is bound by name.
+let string = "not the type"
+print(string)

@@ -8,5 +8,4 @@ HI
 ["a", "b"]
 [1, 2, 3]
 true
-9
-<class int>
+true

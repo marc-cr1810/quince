@@ -23,10 +23,9 @@ print(xs)
 # Bound and unbound reach the same method.
 print("hi".upper() == string.upper("hi"))
 
-# A type name is an ordinary immutable global, so it shadows like one.
-fn shadow() {
-    let int = 9
+# A type's name belongs to the type at every depth, so `int` here is the same
+# `int` as at the top level — nothing between could have taken the name.
+fn inner() {
     return int
 }
-print(shadow())
-print(int)
+print(inner() == int)

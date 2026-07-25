@@ -1,0 +1,10 @@
+# The same rule for a class a program declared. Refused whichever order the two
+# were written in, which is why the resolver reads the class declarations of a
+# statement list before any of its bindings.
+let Point = 5
+
+class Point {
+    op init(x) {
+        self.x = x
+    }
+}
