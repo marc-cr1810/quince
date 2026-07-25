@@ -12,7 +12,44 @@ use crate::value::{BoundMethod, Function, Native, Value};
 
 /// Guards against a runaway recursion taking the process down with a native
 /// stack overflow, which a language should never expose to its users.
+///
+/// This is only a guarantee in combination with [`STACK_SIZE`]. On its own it
+/// is a number that has to be *smaller* than what the host stack can hold, and
+/// a host stack is not something a program gets to assume: 8 MiB on a typical
+/// Linux main thread, 2 MiB for a spawned one, 128 KiB under musl. Run the
+/// interpreter through [`with_stack`] and the pair means something.
 const MAX_DEPTH: usize = 250;
+
+/// The stack the interpreter is entitled to assume.
+///
+/// Sized against measurement, not taste. `MAX_DEPTH` levels of Quince recursion
+/// cost under 3 MiB of native stack in a debug build — the expensive profile,
+/// since release frames are smaller — so this leaves roughly five times the
+/// worst case observed. The margin is deliberately fat: what a frame costs
+/// moves with edits to `eval` that have nothing to do with recursion, and it
+/// moved by half once already. Overshooting costs nothing that matters, as
+/// thread stacks are reserved lazily; undershooting is a SIGSEGV in place of an
+/// error message.
+pub const STACK_SIZE: usize = 16 * 1024 * 1024;
+
+/// Runs `f` on a thread with [`STACK_SIZE`] available.
+///
+/// Every entry point into the language should go through this, and it wraps the
+/// whole pipeline rather than just evaluation: the parser and the resolver
+/// recurse per nesting level too, and dropping a deeply nested AST recurses
+/// even when nothing else does.
+pub fn with_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(STACK_SIZE)
+            .spawn_scoped(scope, f)
+            .expect("should be able to spawn the interpreter thread")
+            .join()
+            // Propagates the original panic instead of wrapping it, so a
+            // failure reads the same as it would have without the thread.
+            .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
+    })
+}
 
 /// Why a statement stopped executing.
 enum Flow {

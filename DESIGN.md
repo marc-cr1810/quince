@@ -488,14 +488,36 @@ The receiver counts as `args[0]`, so a method's declared arity is one more than 
 site writes. Arity errors subtract it back out; reporting the declared number would ask
 for an argument that has no syntax.
 
-One thing to know before touching `eval` again: adding the method-call arm raised the
-native stack a single Quince call frame consumes by roughly half, in debug builds, with
-no change to the size of `Value` or `Object`. `MAX_DEPTH` is a fixed 250 and is not
-calibrated against any actual stack, so that shifted the corpus test from a clean
-"recursion limit exceeded" to a SIGSEGV. The test now runs on a thread whose size it
-states. **The production gap is still open**: on a small-stack platform, 250 frames can
-overflow before the limit fires, and `MAX_DEPTH`'s promise is only kept by the main
-thread happening to be large enough.
+### The recursion limit was never a guarantee
+
+Adding the method-call arm raised the native stack one Quince call frame consumes by
+roughly half, in a debug build, with no change to the size of `Value` or `Object`. That
+was enough to turn the recursion-limit case from a clean error into a SIGSEGV — which
+exposed something older and worse than the regression itself.
+
+`MAX_DEPTH` promised, in its own doc comment, to keep a runaway recursion from taking
+the process down with a native stack overflow. It could not keep that promise. It is a
+count of interpreter frames; whether those frames fit is a question about a stack nobody
+had chosen. A Linux main thread gets 8 MiB and the limit fires comfortably. A spawned
+thread gets 2 MiB. Under musl the default is 128 KiB, where `quince run` aborted with no
+diagnostic at all — and with `ulimit -s 256`, so did glibc.
+
+The fix is to stop inheriting that number. `with_stack` runs the pipeline on a thread
+sized by `STACK_SIZE`, so `MAX_DEPTH` is calibrated against a known quantity on every
+platform and in both profiles. It wraps parsing and resolution as well as evaluation,
+since recursive descent recurses per nesting level and dropping a deeply nested AST
+recurses even when nothing else does.
+
+Two numbers that must stay in step are a standing hazard, so a test holds them there: it
+runs a non-terminating recursion from a 128 KiB thread and requires the limit to report
+it. That test fails by aborting the process, which is the correct volume for this
+failure.
+
+The margin is deliberately large — 250 frames measured under 3 MiB, `STACK_SIZE` is
+16 MiB. Thread stacks are reserved lazily, so overshooting costs nothing that matters,
+and the thing being defended against is a frame size that moves when someone edits a
+match arm in `eval` for reasons that have nothing to do with recursion. It moved by half
+once already, which is how this was found.
 
 ## Roadmap
 

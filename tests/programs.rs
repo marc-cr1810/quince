@@ -42,29 +42,16 @@ fn run(source: &str) -> Result<String, String> {
     }
 }
 
-/// Runs the corpus on a thread whose stack size this test chooses.
+/// Runs the corpus the way the binary does.
 ///
-/// `err_recursion.qn` deliberately recurses until the interpreter's own limit
-/// stops it, and how much native stack those 250 frames cost moves with the
-/// build profile and with edits to `eval` that have nothing to do with
-/// recursion. Relying on whatever the test harness happens to default to means
-/// an unrelated change turns a clean error message into a SIGSEGV, which is
-/// what it did. 8 MiB is what the main thread of a real `quince run` gets.
-///
-/// This makes the *test* honest about what it needs. It does not give the
-/// interpreter that guarantee in production — see `MAX_DEPTH` in `interp.rs`.
+/// Through `with_stack` rather than a size of its own, so the test exercises
+/// the configuration real programs get. `err_recursion.qn` recurses until the
+/// interpreter's limit stops it, which is only a clean error if the stack is
+/// large enough to reach that limit — so this is the case that would catch
+/// `STACK_SIZE` and `MAX_DEPTH` drifting apart.
 #[test]
 fn cases_produce_their_expected_output() {
-    let checker = std::thread::Builder::new()
-        .stack_size(8 * 1024 * 1024)
-        .spawn(check_cases)
-        .expect("should be able to spawn a thread");
-
-    // Propagates the original panic rather than a wrapper, so a failing case
-    // still reports which case and why.
-    if let Err(payload) = checker.join() {
-        std::panic::resume_unwind(payload);
-    }
+    quince::interp::with_stack(check_cases);
 }
 
 fn check_cases() {
@@ -125,6 +112,38 @@ fn check_cases() {
         "{} of {checked} cases failed:\n\n{}",
         failures.len(),
         failures.join("\n\n")
+    );
+}
+
+/// The recursion limit has to fire *before* the native stack runs out, and it
+/// has to do that on whatever stack the host gave the caller.
+///
+/// Run from a thread far too small to hold 250 interpreter frames, so the test
+/// fails — by crashing the process, loudly — if `with_stack` ever stops
+/// supplying a stack of its own. Without it this program aborts on a 256 KiB
+/// main stack rather than reporting anything.
+#[test]
+fn the_recursion_limit_fires_on_a_stack_too_small_to_reach_it() {
+    let message = std::thread::Builder::new()
+        .stack_size(128 * 1024)
+        .spawn(|| {
+            quince::interp::with_stack(|| {
+                let program = quince::compile("fn deep() { return deep() }\ndeep()")
+                    .expect("the program should compile");
+                let mut interp = Interp::with_output(Box::new(Vec::new()));
+                interp
+                    .run(&program)
+                    .expect_err("recursing forever should fail")
+                    .message
+            })
+        })
+        .expect("should be able to spawn a small thread")
+        .join()
+        .expect("the run should not panic");
+
+    assert!(
+        message.contains("recursion limit"),
+        "expected the limit to stop it, got: {message}"
     );
 }
 

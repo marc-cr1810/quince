@@ -16,13 +16,16 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        // Both paths run on a thread Quince sizes itself rather than on
+        // whatever stack the platform handed `main`. See `STACK_SIZE`.
         Command::Run { file, dump } => {
             let source = std::fs::read_to_string(&file)
                 .with_context(|| format!("could not read {}", file.display()))?;
-            run(&source, &file.display().to_string(), dump);
+            let path = file.display().to_string();
+            quince::interp::with_stack(|| run(&source, &path, dump));
             Ok(())
         }
-        Command::Repl => repl(),
+        Command::Repl => quince::interp::with_stack(repl),
     }
 }
 
