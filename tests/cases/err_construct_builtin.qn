@@ -1,0 +1,4 @@
+# Calling a type is refused rather than allowed to mean nothing. An `int` has no
+# `op init` to run and nowhere to keep a field, so constructing one would hand
+# back an object no other int in the program resembles.
+int(5)

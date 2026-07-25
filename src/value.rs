@@ -2,7 +2,7 @@ use std::fmt;
 use std::rc::Rc;
 
 use crate::ast::FnDecl;
-use crate::class::{self, Class};
+use crate::class::Builtin;
 use crate::color::Style;
 use crate::error::QuinceError;
 use crate::heap::{Heap, ObjId};
@@ -104,28 +104,29 @@ impl Value {
     /// This is the one place that decision is recorded, and it is also where
     /// methods are found.
     ///
-    /// The heap is needed only for an instance, whose class is a handle rather
-    /// than a static — the one case that costs every other arm a parameter it
-    /// ignores.
-    pub fn class(&self, heap: &Heap) -> Class {
+    /// A handle for every value, not just an instance: the builtin types are
+    /// class objects like any other, so the match picks an index into the heap's
+    /// table rather than a `&'static`. That is what a program needs in order to
+    /// name `int` at all, and eventually to extend it.
+    pub fn class(&self, heap: &Heap) -> ObjId {
         let builtin = match self {
-            Value::Nil => &class::NIL,
-            Value::Bool(_) => &class::BOOL,
-            Value::Int(_) => &class::INT,
-            Value::Float(_) => &class::FLOAT,
-            Value::Str(_) => &class::STR,
-            Value::List(_) => &class::LIST,
-            Value::Dict(_) => &class::DICT,
-            Value::Function(_) | Value::Native(_) | Value::BoundMethod(_) => &class::FUNCTION,
-            Value::Class(_) => &class::CLASS,
-            Value::Instance(id) => return Class::User(heap.instance(*id).class),
+            Value::Nil => Builtin::Nil,
+            Value::Bool(_) => Builtin::Bool,
+            Value::Int(_) => Builtin::Int,
+            Value::Float(_) => Builtin::Float,
+            Value::Str(_) => Builtin::Str,
+            Value::List(_) => Builtin::List,
+            Value::Dict(_) => Builtin::Dict,
+            Value::Function(_) | Value::Native(_) | Value::BoundMethod(_) => Builtin::Function,
+            Value::Class(_) => Builtin::Class,
+            Value::Instance(id) => return heap.instance(*id).class,
         };
-        Class::Builtin(builtin)
+        heap.builtin_class(builtin)
     }
 
     /// The name used in type errors and by `type(x)`.
     pub fn type_name<'h>(&self, heap: &'h Heap) -> &'h str {
-        self.class(heap).name(heap)
+        &heap.class(self.class(heap)).name
     }
 
     /// Python-style truthiness: `nil`, `false`, zero, and empty collections are
@@ -411,7 +412,6 @@ impl From<&str> for Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::class::BuiltinType;
     use crate::dict::Dict;
     use crate::heap::Object;
 
@@ -421,10 +421,10 @@ mod tests {
         func: |_interp, _args, _span| Ok(Value::Nil),
     };
 
-    /// Whether `value` belongs to exactly `expected`, compared by address so
-    /// that two types sharing a name would still fail.
-    fn is_builtin(value: &Value, expected: &'static BuiltinType, heap: &Heap) -> bool {
-        matches!(value.class(heap), Class::Builtin(found) if std::ptr::eq(found, expected))
+    /// Whether `value` belongs to exactly `expected`, compared by handle so that
+    /// two types sharing a name would still fail.
+    fn is_builtin(value: &Value, expected: Builtin, heap: &Heap) -> bool {
+        value.class(heap) == heap.builtin_class(expected)
     }
 
     #[test]
@@ -451,10 +451,10 @@ mod tests {
         let list = Value::List(heap.alloc(Object::List(vec![])));
         let dict = Value::Dict(heap.alloc(Object::Dict(Dict::new())));
 
-        assert!(is_builtin(&Value::Int(1), &class::INT, &heap));
-        assert!(is_builtin(&list, &class::LIST, &heap));
-        assert!(is_builtin(&dict, &class::DICT, &heap));
-        assert!(!is_builtin(&list, &class::DICT, &heap));
+        assert!(is_builtin(&Value::Int(1), Builtin::Int, &heap));
+        assert!(is_builtin(&list, Builtin::List, &heap));
+        assert!(is_builtin(&dict, Builtin::Dict, &heap));
+        assert!(!is_builtin(&list, Builtin::Dict, &heap));
     }
 
     #[test]
@@ -463,7 +463,7 @@ mod tests {
         // they must not report different types.
         let heap = Heap::new();
         assert_eq!(Value::Native(&DUMMY).type_name(&heap), "function");
-        assert!(is_builtin(&Value::Native(&DUMMY), &class::FUNCTION, &heap));
+        assert!(is_builtin(&Value::Native(&DUMMY), Builtin::Function, &heap));
     }
 
     #[test]

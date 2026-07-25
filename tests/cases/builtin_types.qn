@@ -1,0 +1,32 @@
+# A type built into the language is a class like any other, and a value like any
+# other: nameable, printable, comparable.
+
+print(int)
+print(type(int))
+print(int == int)
+print(int == float)
+
+# `type(x)` still answers with a name, unchanged by any of this.
+print(type(1), type(1.5), type("s"), type([]), type({}), type(print))
+
+# Methods reach through the type, unbound, with the receiver written out — the
+# same way a class declared in Quince has always handed its methods back. That it
+# now works for a builtin is the whole point of there being one representation.
+print(string.upper("hi"))
+print(string.split("a,b,c", ","))
+print(dict.keys({"a": 1, "b": 2}))
+
+let xs = [1, 2]
+list.push(xs, 3)
+print(xs)
+
+# Bound and unbound reach the same method.
+print("hi".upper() == string.upper("hi"))
+
+# A type name is an ordinary immutable global, so it shadows like one.
+fn shadow() {
+    let int = 9
+    return int
+}
+print(shadow())
+print(int)

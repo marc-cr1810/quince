@@ -2,12 +2,14 @@
 //!
 //! Every value names a type, and a type is where behaviour that cannot be
 //! decided by matching on a `Value` will hang — methods first, then the
-//! protocol slots a user-defined class overrides. Builtin types are static, so
-//! naming one costs nothing and allocates nothing.
+//! protocol slots a class overrides.
 //!
-//! A class defined in Quince is an object instead, which is the only difference
-//! [`Class`] exists to absorb. Protocol slots — indexing, iteration, `len`,
-//! `in` — are still matches on `Value`; see Dispatch in DESIGN.md for why.
+//! There is one representation. A type built into the language and a class
+//! written in Quince are the same kind of object, differing only in who filled
+//! the method table, because anything a user class can do a builtin has to be
+//! able to do too — see One class representation in DESIGN.md. The static
+//! [`BuiltinType`] tables survive as *seed* data, read once at startup to build
+//! the nine class objects, and never consulted again.
 
 use std::collections::HashMap;
 
@@ -19,88 +21,142 @@ use crate::interp::{
 };
 use crate::value::{Native, Value};
 
-/// The type a value belongs to.
-///
-/// Two representations rather than one, because a builtin type is known at
-/// compile time and allocates nothing, while a user class is an object with a
-/// lifetime. Method lookup is the only thing that has to care about the
-/// difference, and it collapses them immediately — see [`Class::method`].
-#[derive(Clone, Copy, Debug)]
-pub enum Class {
-    Builtin(&'static BuiltinType),
-    User(ObjId),
-}
-
-impl Class {
-    pub fn name<'h>(&self, heap: &'h Heap) -> &'h str {
-        match self {
-            Class::Builtin(builtin) => builtin.name,
-            Class::User(id) => &heap.class(*id).name,
-        }
-    }
-
-    /// The method `name`, ready to be bound to a receiver.
-    ///
-    /// Both arms hand back a `Value`, so everything downstream — binding,
-    /// calling, printing, comparing — has one case to handle rather than two.
-    pub fn method(&self, name: &str, heap: &Heap) -> Option<Value> {
-        match self {
-            Class::Builtin(builtin) => builtin.method(name).map(Value::Native),
-            Class::User(id) => heap.class(*id).method(name, heap),
-        }
-    }
-}
-
 /// A type built into the language.
+///
+/// An enum rather than a bare list of statics because this is what
+/// [`Value::class`](crate::value::Value::class) matches on to find a value's
+/// type: a variant is an index into the heap's table of class objects, so the
+/// lookup is an array read rather than a name hashed on every method call and
+/// every type error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Builtin {
+    Nil,
+    Bool,
+    Int,
+    Float,
+    Str,
+    List,
+    Dict,
+    Function,
+    Class,
+}
+
+/// Every builtin type, in the order their class objects are allocated.
+///
+/// Maintained by hand, and what a stale entry costs is worth being precise
+/// about: a variant missing here has no class object, so the first value of that
+/// type to have its type asked for panics on an out-of-bounds read. Loud and
+/// immediate, unlike the silent REPL gap the old hand-written list risked, and
+/// `builtins_covers_every_type_a_value_can_have` reaches it from every `Value`
+/// variant there is.
+pub static BUILTINS: &[Builtin] = &[
+    Builtin::Nil,
+    Builtin::Bool,
+    Builtin::Int,
+    Builtin::Float,
+    Builtin::Str,
+    Builtin::List,
+    Builtin::Dict,
+    Builtin::Function,
+    Builtin::Class,
+];
+
+impl Builtin {
+    /// The static table this type's class object is built from.
+    ///
+    /// Exhaustive, so a new variant fails to compile until it has a name and a
+    /// method table — the two things it needs to be a type at all.
+    pub fn seed(self) -> &'static BuiltinType {
+        match self {
+            Builtin::Nil => &NIL,
+            Builtin::Bool => &BOOL,
+            Builtin::Int => &INT,
+            Builtin::Float => &FLOAT,
+            Builtin::Str => &STR,
+            Builtin::List => &LIST,
+            Builtin::Dict => &DICT,
+            Builtin::Function => &FUNCTION,
+            Builtin::Class => &CLASS,
+        }
+    }
+
+    /// What the type is called in error messages, in `type(x)`, and as a global.
+    pub fn name(self) -> &'static str {
+        self.seed().name
+    }
+
+    /// Where this type's class object sits in the heap's table.
+    pub fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// Seed data for one builtin type: what it is called and what it can do.
+///
+/// Read once, by [`Class::builtin`]. Nothing looks a method up in here at run
+/// time — by then the entries are in a real class, beside any a program added.
 #[derive(Debug)]
 pub struct BuiltinType {
-    /// What the type is called in error messages and in `type(x)`.
     pub name: &'static str,
-    /// The methods callable on a value of this type, looked up by name.
-    ///
-    /// A slice rather than a map: these are single digits long, a linear scan
-    /// over contiguous memory beats hashing at that size, and a `static` needs
-    /// no construction at startup.
+    /// A slice rather than a map: these are single digits long, and a `static`
+    /// needs no construction at startup.
     pub methods: &'static [(&'static str, &'static Native)],
 }
 
-impl BuiltinType {
-    pub fn method(&self, name: &str) -> Option<&'static Native> {
-        self.methods
-            .iter()
-            .find(|(method, _)| *method == name)
-            .map(|(_, native)| *native)
-    }
-}
-
-/// A class defined in Quince.
-///
-/// Unlike a [`BuiltinType`] the method table is a map: a class body has no
-/// practical size limit, and its entries are `String`s that have to be built at
-/// run time regardless.
+/// A type, whether the language defined it or a program did.
 #[derive(Clone, Debug)]
-pub struct UserClass {
+pub struct Class {
     pub name: String,
-    /// Each entry is a [`crate::value::Function`] handle, closed over the scope
-    /// the class was declared in — which, for a subclass, is the scope holding
-    /// `super`.
-    pub methods: HashMap<String, ObjId>,
+    /// The methods callable on a value of this type.
+    ///
+    /// Values rather than function handles, which is what lets one table hold
+    /// both kinds of method: a [`Value::Native`] is a `&'static` pointer holding
+    /// no handle, so `string`'s `upper` and a Quince `fn` sit side by side and
+    /// everything downstream — binding, calling, printing — has one case.
+    ///
+    /// Entries a Quince class declared are [`Value::Function`] handles, closed
+    /// over the scope the class was declared in — which, for a subclass, is the
+    /// scope holding `super`.
+    pub methods: HashMap<String, Value>,
     pub parent: Option<ObjId>,
     /// The `op init` construction runs, or the one inherited from an ancestor.
     ///
     /// Resolved once when the class is built rather than looked up by name on
     /// every `Point(1, 2)`, and copied down from the parent so no chain is
     /// walked at construction time. That copy is safe for the same reason
-    /// [`UserClass::method`]'s loop terminates: a parent is fully built before
-    /// the class naming it exists.
+    /// [`Class::method`]'s loop terminates: a parent is fully built before the
+    /// class naming it exists.
     ///
     /// Held beside `methods` rather than instead of an entry in it, because the
     /// method is still reachable by name — `super.init(msg)` is how a subclass
     /// constructor delegates.
-    pub init: Option<ObjId>,
+    pub init: Option<Value>,
+    /// `Some` if the language defined this type, which is what makes `int(5)` an
+    /// error instead of an instance of `int`.
+    ///
+    /// A builtin has no `op init` and no fields to put anything in, so
+    /// construction has nothing to do and the honest answer is to refuse. It is
+    /// also where a conversion — `int("5")` — would eventually hang.
+    pub builtin: Option<Builtin>,
 }
 
-impl UserClass {
+impl Class {
+    /// The class object for a builtin type, built from its seed table.
+    pub fn builtin(builtin: Builtin) -> Class {
+        let seed = builtin.seed();
+        Class {
+            name: seed.name.to_string(),
+            methods: seed
+                .methods
+                .iter()
+                .map(|(name, native)| (name.to_string(), Value::Native(native)))
+                .collect(),
+            parent: None,
+            init: None,
+            builtin: Some(builtin),
+        }
+    }
+
     /// The method `name`, searching this class and then its ancestors.
     ///
     /// Overriding falls out of the order rather than being implemented: the
@@ -113,20 +169,25 @@ impl UserClass {
     pub fn method(&self, name: &str, heap: &Heap) -> Option<Value> {
         let mut class = self;
         loop {
-            if let Some(id) = class.methods.get(name) {
-                return Some(Value::Function(*id));
+            if let Some(method) = class.methods.get(name) {
+                return Some(method.clone());
             }
             class = heap.class(class.parent?);
         }
     }
 
     pub fn trace(&self, worklist: &mut Vec<ObjId>) {
-        worklist.extend(self.methods.values().copied());
+        worklist.extend(self.methods.values().filter_map(Value::handle));
         worklist.extend(self.parent);
+        // Always also an entry in `methods`, so no test can fail without this
+        // line. It stays for the reason `trace` traces a bound method's callee:
+        // the contract is every handle this object holds, not every handle
+        // something else happens to reach.
+        worklist.extend(self.init.as_ref().and_then(Value::handle));
     }
 }
 
-/// An object of a user-defined class.
+/// An object of a class written in Quince.
 #[derive(Clone, Debug)]
 pub struct Instance {
     pub class: ObjId,
@@ -193,24 +254,6 @@ pub static CLASS: BuiltinType = BuiltinType {
     methods: &[],
 };
 
-/// Every builtin type, for the tools that need to enumerate rather than look up.
-///
-/// [`Value::class`](crate::value::Value::class) maps a value to its type, which
-/// is the direction the evaluator needs and the direction that cannot be walked
-/// backwards — there is no way to ask Rust for every `static BuiltinType`. So
-/// this list is maintained by hand, and the honest question is what a stale one
-/// costs.
-///
-/// Forgetting a type here means its methods go unoffered by REPL completion.
-/// Forgetting to update a hand-written list of method *names* meant the REPL
-/// offering methods that do not exist, which is how this list came to be. One
-/// failure is a gap and the other is a lie, and the lie was the one being told
-/// every time a method was added or renamed. Types are added once and rarely;
-/// methods are added constantly.
-pub static BUILTINS: &[&BuiltinType] = &[
-    &NIL, &BOOL, &INT, &FLOAT, &STR, &LIST, &DICT, &FUNCTION, &CLASS,
-];
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,9 +269,9 @@ mod tests {
     #[test]
     fn builtins_covers_every_type_a_value_can_have() {
         // `Value::class` is the exhaustive match, so anything missing from
-        // BUILTINS is a type some value can name and no tool can enumerate.
+        // BUILTINS is a type some value can name and no class object exists for.
         // `Instance` is the one variant with no entry here, by definition: its
-        // type is a user class, not a builtin.
+        // type is a class a program wrote, not a builtin.
         let mut heap = Heap::new();
         let values = [
             Value::Nil,
@@ -239,33 +282,58 @@ mod tests {
             Value::List(heap.alloc(Object::List(vec![]))),
             Value::Dict(heap.alloc(Object::Dict(Dict::new()))),
             Value::Native(&DUMMY),
-            Value::Class(heap.alloc(Object::Class(UserClass {
+            Value::Class(heap.alloc(Object::Class(Class {
                 name: "C".to_string(),
                 methods: HashMap::new(),
                 parent: None,
                 init: None,
+                builtin: None,
             }))),
         ];
 
         for value in values {
             let name = value.type_name(&heap);
             assert!(
-                BUILTINS.iter().any(|builtin| builtin.name == name),
+                BUILTINS.iter().any(|builtin| builtin.name() == name),
                 "{name} is missing from BUILTINS"
             );
         }
     }
 
     #[test]
-    fn every_listed_method_is_reachable_by_name() {
+    fn every_seeded_method_is_reachable_on_the_class() {
+        // Reaches through the real lookup rather than the seed table, so this
+        // covers the copy at startup as well as the listing.
+        let heap = Heap::new();
         for builtin in BUILTINS {
-            for (name, _) in builtin.methods {
+            let class = heap.class(heap.builtin_class(*builtin));
+            for (name, _) in builtin.seed().methods {
                 assert!(
-                    builtin.method(name).is_some(),
-                    "{}.{name} is listed but does not look up",
-                    builtin.name
+                    class.method(name, &heap).is_some(),
+                    "{}.{name} is seeded but does not look up",
+                    builtin.name()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn every_builtin_sits_at_its_own_index() {
+        // `Value::class` reads the heap's table by this index, so a variant
+        // ordered differently from BUILTINS would silently report another type.
+        for (index, builtin) in BUILTINS.iter().enumerate() {
+            assert_eq!(builtin.index(), index, "{} is misplaced", builtin.name());
+        }
+    }
+
+    #[test]
+    fn no_two_builtins_share_a_name() {
+        for builtin in BUILTINS {
+            let same = BUILTINS
+                .iter()
+                .filter(|other| other.name() == builtin.name())
+                .count();
+            assert_eq!(same, 1, "{} is named twice", builtin.name());
         }
     }
 }

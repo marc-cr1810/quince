@@ -1,4 +1,4 @@
-use crate::class::{Instance, UserClass};
+use crate::class::{BUILTINS, Builtin, Class, Instance};
 use crate::dict::Dict;
 use crate::env::{Env, Globals};
 use crate::value::{BoundMethod, Function, Value};
@@ -22,7 +22,7 @@ pub enum Object {
     Globals(Globals),
     Function(Function),
     BoundMethod(BoundMethod),
-    Class(UserClass),
+    Class(Class),
     Instance(Instance),
 }
 
@@ -58,18 +58,43 @@ pub struct Heap {
     threshold: usize,
     /// How many collections have run. Exposed for tests and `--stats`.
     pub collections: usize,
+    /// The class object for each builtin type, indexed by [`Builtin::index`].
+    ///
+    /// Here rather than on the interpreter because
+    /// [`Value::class`](crate::value::Value::class) takes only a `&Heap`, and it
+    /// is what every type error in the language goes through — putting the table
+    /// anywhere else would mean threading an `&Interp` into all of them.
+    ///
+    /// Nothing outside the heap holds these handles, so the heap roots them
+    /// itself; see [`Heap::collect`].
+    builtin_classes: Vec<ObjId>,
 }
 
 impl Heap {
     pub fn new() -> Self {
-        Heap {
+        let mut heap = Heap {
             objects: Vec::new(),
             frozen: Vec::new(),
             free: Vec::new(),
             live: 0,
             threshold: MIN_THRESHOLD,
             collections: 0,
-        }
+            builtin_classes: Vec::new(),
+        };
+        // Before anything else, so the order matches `Builtin::index` and needs
+        // no interpreter: a name and a table of natives is all a builtin class
+        // is, and both come from a `static`.
+        let classes = BUILTINS
+            .iter()
+            .map(|builtin| heap.alloc(Object::Class(Class::builtin(*builtin))))
+            .collect();
+        heap.builtin_classes = classes;
+        heap
+    }
+
+    /// The class object for a builtin type.
+    pub fn builtin_class(&self, builtin: Builtin) -> ObjId {
+        self.builtin_classes[builtin.index()]
     }
 
     pub fn alloc(&mut self, object: Object) -> ObjId {
@@ -127,9 +152,19 @@ impl Heap {
     /// `roots` are the handles reachable from outside the heap. Anything not
     /// reachable from one of them is freed, so an incomplete root set is a
     /// use-after-free — see the safe-point rules in `interp.rs`.
+    ///
+    /// The builtin classes are added to whatever the caller passes. They are
+    /// permanently live and reachable from nowhere the caller can see: a program
+    /// that never mentions `int` still needs `int`'s class the moment it adds two
+    /// numbers wrong and the error asks for a type name. This is the only root
+    /// the heap contributes on its own behalf.
     pub fn collect(&mut self, roots: &[ObjId]) -> usize {
         let mut marked = vec![false; self.objects.len()];
-        let mut worklist: Vec<ObjId> = roots.to_vec();
+        let mut worklist: Vec<ObjId> = roots
+            .iter()
+            .chain(self.builtin_classes.iter())
+            .copied()
+            .collect();
 
         // Marking on pop rather than on push is what makes cycles terminate: a
         // handle may be queued many times, but its children are traced once.
@@ -251,7 +286,7 @@ impl Heap {
         }
     }
 
-    pub fn class(&self, id: ObjId) -> &UserClass {
+    pub fn class(&self, id: ObjId) -> &Class {
         match self.get(id) {
             Object::Class(class) => class,
             other => panic!("expected a class, found {other:?}"),
@@ -362,13 +397,20 @@ fn reachable_data(object: &Object, worklist: &mut Vec<ObjId>) {
 mod tests {
     use super::*;
 
+    /// What a fresh heap already holds: one class object per builtin type,
+    /// permanently live. Counted rather than written down so that adding a
+    /// builtin does not have to edit every assertion below.
+    fn base() -> usize {
+        Heap::new().live()
+    }
+
     #[test]
     fn alloc_returns_distinct_handles() {
         let mut heap = Heap::new();
         let a = heap.alloc(Object::List(vec![]));
         let b = heap.alloc(Object::List(vec![]));
         assert_ne!(a, b);
-        assert_eq!(heap.live(), 2);
+        assert_eq!(heap.live(), base() + 2);
     }
 
     #[test]
@@ -409,7 +451,7 @@ mod tests {
         heap.alloc(Object::List(vec![]));
 
         assert_eq!(heap.collect(&[kept]), 1);
-        assert_eq!(heap.live(), 1);
+        assert_eq!(heap.live(), base() + 1);
         assert!(heap.list(kept).is_empty());
     }
 
@@ -420,7 +462,7 @@ mod tests {
         let outer = heap.alloc(Object::List(vec![Value::List(inner)]));
 
         assert_eq!(heap.collect(&[outer]), 0);
-        assert_eq!(heap.live(), 2);
+        assert_eq!(heap.live(), base() + 2);
     }
 
     #[test]
@@ -434,7 +476,7 @@ mod tests {
             .push(Value::List(b));
 
         assert_eq!(heap.collect(&[]), 2);
-        assert_eq!(heap.live(), 0);
+        assert_eq!(heap.live(), base(), "everything the test allocated is gone");
     }
 
     #[test]
@@ -446,7 +488,7 @@ mod tests {
             .push(Value::List(id));
 
         assert_eq!(heap.collect(&[id]), 0);
-        assert_eq!(heap.live(), 1);
+        assert_eq!(heap.live(), base() + 1);
     }
 
     #[test]
@@ -458,7 +500,18 @@ mod tests {
 
         let fresh = heap.alloc(Object::List(vec![Value::Int(1)]));
         assert_eq!(fresh, stale, "the free slot should have been reused");
-        assert_eq!(heap.live(), 2);
+        assert_eq!(heap.live(), base() + 2);
+    }
+
+    #[test]
+    fn the_builtin_classes_survive_a_collection_with_no_roots() {
+        // Nothing outside the heap holds these handles, so a collector that took
+        // `roots` at its word would free every type in the language — and the
+        // next type error to ask for a name would read a collected object.
+        let mut heap = Heap::new();
+        assert_eq!(heap.collect(&[]), 0, "no builtin class was reclaimed");
+        assert_eq!(heap.live(), base());
+        assert_eq!(Value::Int(1).type_name(&heap), "int");
     }
 
     #[test]

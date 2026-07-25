@@ -4,12 +4,12 @@ use std::rc::Rc;
 
 use crate::ast::Slot;
 use crate::ast::{BinaryOp, Block, Expr, ExprKind, LogicalOp, Op, Stmt, StmtKind, UnaryOp, Var};
-use crate::class::{Instance, UserClass};
+use crate::class::{BUILTINS as BUILTIN_TYPES, Class, Instance};
 use crate::dict::{Dict, Key, NotAKey};
 use crate::env::{self, AssignError, Env, Globals};
 use crate::error::{ERROR_KINDS, ErrorKind, QuinceError};
 use crate::heap::{Heap, ObjId, Object};
-use crate::token::Span;
+use crate::token::{Span, TokenKind};
 use crate::value::{BoundMethod, Function, Native, Value};
 
 /// Guards against a runaway recursion taking the process down with a native
@@ -146,6 +146,24 @@ impl Interp {
         for native in BUILTINS {
             heap.globals_mut(globals)
                 .declare(native.name, Value::Native(native), false);
+        }
+        // The types themselves, so a program can name one: print it, reach a
+        // method through it, and in time extend it. Immutable, exactly as
+        // `print` is.
+        //
+        // A name the lexer has already claimed is skipped rather than the two
+        // cases being written out, because the reason is the lexer's and it can
+        // change: `nil` and `class` are keywords, so nothing could ever read a
+        // global under those names. Their class objects still exist and still
+        // answer method calls — they just cannot be spelled.
+        for builtin in BUILTIN_TYPES {
+            let name = builtin.name();
+            if TokenKind::keyword(name).is_some() {
+                continue;
+            }
+            let class = heap.builtin_class(*builtin);
+            heap.globals_mut(globals)
+                .declare(name, Value::Class(class), false);
         }
         let mut interp = Interp {
             heap,
@@ -334,7 +352,7 @@ impl Interp {
             } => {
                 // Read before the class's own name is bound, so `class A extends
                 // A` is an undefined variable rather than a cycle in the chain
-                // that `UserClass::method` walks.
+                // that `Class::method` walks.
                 let parent = match parent {
                     Some(parent) => match self.read(parent, env, stmt.span)? {
                         Value::Class(id) => Some(id),
@@ -371,12 +389,12 @@ impl Interp {
                 let mut table = HashMap::with_capacity(methods.len());
                 let mut own_init = None;
                 for decl in methods {
-                    let func = self.heap.alloc(Object::Function(Function {
+                    let func = Value::Function(self.heap.alloc(Object::Function(Function {
                         decl: Rc::clone(decl),
                         env: enclosing,
-                    }));
+                    })));
                     if decl.op == Some(Op::Init) {
-                        own_init = Some(func);
+                        own_init = Some(func.clone());
                     }
                     table.insert(decl.name.clone(), func);
                 }
@@ -384,13 +402,15 @@ impl Interp {
                 // Inherited rather than searched for: a class that declares no
                 // `op init` of its own constructs with its parent's, which is
                 // what `class TypeError extends Error {}` relies on.
-                let init = own_init.or_else(|| parent.and_then(|id| self.heap.class(id).init));
+                let init =
+                    own_init.or_else(|| parent.and_then(|id| self.heap.class(id).init.clone()));
 
-                let class = self.heap.alloc(Object::Class(UserClass {
+                let class = self.heap.alloc(Object::Class(Class {
                     name: name.clone(),
                     methods: table,
                     parent,
                     init,
+                    builtin: None,
                 }));
                 self.bind(slot, name, Value::Class(class), false, env);
                 Ok(Flow::Normal)
@@ -658,7 +678,7 @@ impl Interp {
 
     /// Whether `class` is `Error` or descends from it.
     ///
-    /// Walks the same parent chain `UserClass::method` does, and terminates for
+    /// Walks the same parent chain `Class::method` does, and terminates for
     /// the same reason: a parent is evaluated before the class naming it is
     /// bound, so the chain cannot contain a cycle.
     fn descends_from_error(&self, class: ObjId) -> bool {
@@ -1195,6 +1215,24 @@ impl Interp {
             // is why `init` returns nothing useful: the object already exists
             // by the time it runs.
             Value::Class(id) => {
+                // A builtin type is a class like any other, but nothing a
+                // program wrote put it there: it has no `op init` to run and an
+                // int has nowhere to keep a field, so `int(5)` would hand back
+                // an instance of `int` that no other int in the program
+                // resembles. Refused rather than allowed to mean nothing — and
+                // this is where a conversion would eventually go.
+                if let Some(builtin) = self.heap.class(id).builtin {
+                    return Err(QuinceError::new(
+                        format!("cannot construct `{}`", builtin.name()),
+                        span,
+                    )
+                    .with_kind(ErrorKind::Type)
+                    .with_help(format!(
+                        "`{}` is a type built into the language, not a class declared in a program",
+                        builtin.name()
+                    )));
+                }
+
                 let instance = Value::Instance(self.heap.alloc(Object::Instance(Instance {
                     class: id,
                     fields: Dict::new(),
@@ -1203,7 +1241,7 @@ impl Interp {
                 // The `op init` the class resolved when it was built, not a
                 // lookup of the name `init` — a method merely *called* `init` is
                 // an ordinary method, and construction must not reach it.
-                match self.heap.class(id).init.map(Value::Function) {
+                match self.heap.class(id).init.clone() {
                     // `init` runs Quince code, so it reaches safe points, and
                     // the instance needs no root here: it sits in slot 0 of the
                     // constructor's scope, which `exec_scoped` roots for the
@@ -1352,7 +1390,8 @@ impl Interp {
             };
         }
 
-        match receiver.class(&self.heap).method(name, &self.heap) {
+        let class = receiver.class(&self.heap);
+        match self.heap.class(class).method(name, &self.heap) {
             Some(method) => Ok(Attr::Method(method)),
             None => Err(self.no_attr(receiver, name, span)),
         }

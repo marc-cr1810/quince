@@ -13,13 +13,8 @@ use quince::class;
 use quince::color::Style;
 use quince::interp::Interp;
 use quince::lexer::Lexer;
-use quince::token::TokenKind;
+use quince::token::{KEYWORDS, TokenKind};
 use quince::value::Value;
-
-const KEYWORDS: &[&str] = &[
-    "fn", "op", "class", "extends", "self", "super", "let", "final", "const", "if", "else",
-    "while", "for", "in", "return", "try", "catch", "throw", "true", "false", "nil",
-];
 
 const META_COMMANDS: &[&str] = &[
     ":help", ":vars", ":type", ":ast", ":tokens", ":clear", ":load", ":time",
@@ -30,7 +25,7 @@ const META_COMMANDS: &[&str] = &[
 fn method_names() -> Vec<&'static str> {
     let mut names: Vec<&'static str> = class::BUILTINS
         .iter()
-        .flat_map(|builtin| builtin.methods.iter().map(|(name, _)| *name))
+        .flat_map(|builtin| builtin.seed().methods.iter().map(|(name, _)| *name))
         .collect();
     names.sort_unstable();
     names.dedup();
@@ -365,24 +360,12 @@ fn push_plain_or_bracket(
 
 fn highlight_token(kind: TokenKind, text: &str, use_color: bool) -> String {
     match kind {
-        TokenKind::Fn
-        | TokenKind::Op
-        | TokenKind::Class
-        | TokenKind::Extends
-        | TokenKind::Let
-        | TokenKind::Final
-        | TokenKind::Const
-        | TokenKind::If
-        | TokenKind::Else
-        | TokenKind::While
-        | TokenKind::For
-        | TokenKind::In
-        | TokenKind::Return => Style::BOLD_MAGENTA.paint(text, use_color),
-
         TokenKind::SelfKw | TokenKind::Super => Style::BOLD_CYAN.paint(text, use_color),
 
         TokenKind::True | TokenKind::False => Style::YELLOW.paint(text, use_color),
         TokenKind::Nil => Style::DIM.paint(text, use_color),
+
+        _ if TokenKind::keyword(text).is_some() => Style::BOLD_MAGENTA.paint(text, use_color),
 
         TokenKind::Int(_) | TokenKind::Float(_) => Style::CYAN.paint(text, use_color),
 
@@ -548,6 +531,24 @@ mod tests {
             "len",
         ] {
             assert!(!names.contains(&fake), "{fake} is not a method");
+        }
+    }
+
+    #[test]
+    fn all_keywords_are_highlighted() {
+        for kw in KEYWORDS {
+            if let Some(kind) = TokenKind::keyword(kw) {
+                let styled = highlight_token(kind.clone(), kw, true);
+                if kw == &"self" || kw == &"super" {
+                    assert!(styled.contains("\x1b[1;36m"), "{kw} should be bold cyan");
+                } else if kw == &"true" || kw == &"false" {
+                    assert!(styled.contains("\x1b[33m"), "{kw} should be yellow");
+                } else if kw == &"nil" {
+                    assert!(styled.contains("\x1b[2m"), "{kw} should be dim");
+                } else {
+                    assert!(styled.contains("\x1b[1;35m"), "{kw} should be bold magenta");
+                }
+            }
         }
     }
 }

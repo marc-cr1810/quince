@@ -627,7 +627,7 @@ Lox uses and which needs no new keyword — and which reads, in a language that 
 has `<` as a comparison, like `Dog` is *less than* `Animal`. A reserved word is the
 cheaper of the two costs.
 
-Overriding is not implemented so much as fallen out of. `UserClass::method` walks the
+Overriding is not implemented so much as fallen out of. `Class::method` walks the
 parent chain and returns the first table holding the name, so a subclass shadows what it
 redefines and inherits what it does not. `init` goes through the same lookup, which is
 why a subclass that declares none uses its parent's. The loop needs no cycle guard: a
@@ -715,15 +715,41 @@ what the linear-scan decision above was protecting.
 So a slot is a field on the class, resolved once when the class is built, and a builtin
 whose slot is `None` falls through to the match that already exists — costing nothing
 until someone extends it. Inheritance is a copy-down at creation rather than a chain walk
-at use, which is safe for the same reason `UserClass::method`'s loop terminates: a parent
+at use, which is safe for the same reason `Class::method`'s loop terminates: a parent
 is fully built before the class naming it exists.
 
-### The guard already existed
+### The guard was already there
 
-Once `int` is a global holding a mutable class, `int.bool = fn() { … }` is expressible and
-would make `0` truthy program-wide. Builtin classes therefore ship frozen — the freeze is
-a property of the object, and `FrozenError` is already a kind with a class, so that line
-raises a good error without a guard being written for it.
+Once `int` is a global holding a class, `int.bool = fn() { … }` looks expressible, and it
+would make `0` truthy program-wide. The first plan was to ship builtin classes frozen.
+
+The guard protects nothing. Assigning to a field of a class — *any* class, one a program
+declared included — already raises `cannot set a field on class`. Freezing would have been
+a check on a path nothing can reach: the same dead weight as the declaration-time arity
+check written for `op` and deleted before it shipped, and caught the same way, by probing
+instead of reasoning.
+
+The refusal is load-bearing in the other direction. Because `=` cannot reach a class,
+extension has to arrive as a deliberate construct rather than as a side effect of
+assignment — which is what lets it validate anything at all.
+
+### What the collapse settled
+
+Three decisions it forced, none of them recoverable from the diff:
+
+- **Calling a type is refused.** `int(5)` would otherwise build an `Object::Instance` whose
+  class is `int`: an object reporting a builtin type name that no arithmetic path accepts
+  and no other int resembles. `cannot construct \`int\`` instead — and that is where a
+  conversion would eventually hang, which is the likeliest thing someone writing it meant.
+- **`nil` and `class` are not bound.** Both are keywords, so nothing could ever read a
+  global under those names. The skip is taken from `TokenKind::keyword` rather than written
+  out, so a type name that becomes a keyword later self-corrects. Their class objects exist
+  and answer method calls; they cannot be spelled, and so cannot be extended — meaningless
+  for `nil`, and a much larger question for the metaclass.
+- **The heap roots its own classes.** `collect` adds them to whatever the caller passes.
+  They are reachable from nowhere the caller can see, and a program that never mentions
+  `int` still needs `int`'s class the moment a type error asks for a name. The only root
+  the heap contributes on its own behalf.
 
 Two things ruled out rather than deferred. `type(x)` keeps returning a **string**: it is
 tempting to hand back the class once `int` is a value, but `Error`'s constructor does
@@ -731,6 +757,60 @@ tempting to hand back the class once `int` is a value, but `Error`'s constructor
 working code for a nicety. And `extends` on a builtin is refused at class-definition
 time — it becomes syntactically expressible and is semantically empty, since a subclass
 instance is an `Object::Instance` that no arithmetic path reaches.
+
+### `extend`, and the one thing it must not do
+
+The feature this was all for:
+
+```quince
+extend int {
+    fn double() { return self * 2 }
+}
+print(7.double())   # 14
+```
+
+`extend` rather than `extends`, which already means inheritance in a class header; reusing
+it for a block that declares nothing would be a pun on a keyword that has a job.
+
+Most of it already works. `5.foo` lexes — the number lexer only takes `.` as a decimal
+point when a digit follows — and reaches method lookup today, which is what
+`int has no method \`foo\`` is. `BoundMethod.receiver` is a `Value`, not a handle, so a
+method can bind to an `int`. `self` is argument zero, so a body already runs with a
+non-object receiver: `class C { fn twice() { return self * 2 } }` then `C.twice(5)` returns
+`10` on a build with no extension support in it at all. The single missing piece was a
+method table that can grow, which is what the collapse above delivered.
+
+**But `extend` must not insert into the class's own table.** C# 14's extension members
+resolve statically and never touch the type, so an extension is visible only where its
+namespace was imported. Quince cannot copy the mechanism — `x.example()` has no
+compile-time receiver type, and that is what being dynamically typed means — but the
+*scoping* is separable from the resolution, and it is the part worth keeping reachable.
+So extensions live in a table keyed by class and name, consulted after the class's own
+methods. Identical behaviour today, one extra lookup on a miss, and when the module system
+lands that table can become per-module. Mutating `methods` directly is faster and cheaper
+to write, and it forecloses scoping permanently: once an extension is indistinguishable
+from a declared method there is nothing left to scope. This is the one place worth paying
+a lookup to keep an option open.
+
+Three refusals, and `op` is what makes the second one mechanical:
+
+- **Shadowing an existing method.** Every caller that relied on the real one becomes
+  silently wrong.
+- **Defining an `op`.** `extend int { op bool() { … } }` would change what `if 0` means
+  program-wide. An extension may add to a type; it may not change how the language
+  dispatches on it.
+- **Setting a field.** Already refused — `cannot set a field on int` — and correctly: an
+  int has nowhere to put one, and extension should not invent storage.
+
+The collision rule diverges from C#, which silently prefers the real member. That choice is
+driven by a BCL that must keep growing without breaking callers; Quince has nine builtin
+types with single-digit method counts, so a loud error whose fix is a rename beats a silent
+behaviour change. Worth revisiting only if the builtin surface ever gets large.
+
+The honest cost, recorded so it is not rediscovered: until modules exist, `extend int` in
+any file changes `int` for the whole program, with no scoping and no undo. That is the
+bargain Ruby and Objective-C made. The extension table keeps the door open; it does not
+close the gap today.
 
 ## `op` marks what the language calls
 
@@ -1006,7 +1086,7 @@ implementation's choosing; adding `throw` afterwards means user values arrive at
 and whatever `e` was before has to change to accommodate them. That is a language break
 dressed as a feature addition, and the corpus grows every week.
 
-So `Error` is a class, allocated as a `UserClass` at startup and bound as a global. That is
+So `Error` is a class, allocated as a `Class` at startup and bound as a global. That is
 not a compromise for want of better machinery — it is what makes `class MyError extends
 Error` work with no new machinery at all, reusing the `extends` chain and method lookup
 that v0.4 already built. `QuinceError` carries an optional payload for the user-thrown
@@ -1272,9 +1352,14 @@ that validates a closed set of operations wants to exist while that set has one 
 that every operation after the first is a line added to a list which already checks
 itself. It also moved `init` while the corpus was 8 classes.
 
-What v0.5 still owes, in order: **one class representation**, then the slots themselves,
-then the diagnostics sweep. Collapsing `Class` goes first because slots written against
-the enum would be rewritten by it — see One class representation above.
+One class representation landed next, and first, because slots written against the enum
+would have been rewritten by it — see One class representation above. It is deliberately
+behaviour-neutral apart from the seven type globals it binds: `type(x)` still answers with
+a string, no slot moved, and `string.upper("hi")` works with nothing written for it, which
+is the cheapest available proof that the two kinds of type really are one thing now.
+
+What v0.5 still owes, in order: the slots themselves, then `extend`, then the diagnostics
+sweep.
 
 `final` and `const` landed here first, out of order, because they were a rename with a
 feature hiding inside it — see Bindings above. Renaming a keyword only gets cheaper the

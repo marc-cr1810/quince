@@ -93,6 +93,11 @@ pub enum TokenKind {
     Eof,
 }
 
+pub const KEYWORDS: &[&str] = &[
+    "fn", "op", "class", "extends", "self", "super", "let", "final", "const", "if", "else",
+    "while", "for", "in", "return", "try", "catch", "throw", "true", "false", "nil",
+];
+
 impl TokenKind {
     /// Maps an identifier to its keyword, if it is one.
     pub fn keyword(word: &str) -> Option<TokenKind> {
