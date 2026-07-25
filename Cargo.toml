@@ -7,3 +7,5 @@ description = "A dynamically-typed scripting language"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+rustyline = "14"
+
