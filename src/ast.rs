@@ -147,9 +147,20 @@ pub struct Param {
     pub span: Span,
 }
 
+/// The receiver's name inside a method body.
+///
+/// `self` is bound as an ordinary parameter that the parser inserts, rather
+/// than as something the evaluator injects. Everything downstream then treats
+/// it as a local: the resolver gives it a slot, a closure nested in a method
+/// captures it through the scope chain like any other name, and `read` needs no
+/// special case. What the keyword buys is the error when it is used outside a
+/// method, which would otherwise read `undefined variable`.
+pub const SELF: &str = "self";
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct FnDecl {
     pub name: String,
+    /// For a method, `self` is `params[0]`; see [`SELF`].
     pub params: Vec<Param>,
     pub body: Block,
 }
@@ -177,6 +188,14 @@ pub enum StmtKind {
     Fn {
         decl: Rc<FnDecl>,
         /// Where the function's own name is bound, as for `Let`.
+        slot: Option<Slot>,
+    },
+    /// A class declaration. The methods are ordinary functions whose first
+    /// parameter is the receiver, so nothing about calling one is special.
+    Class {
+        name: String,
+        methods: Vec<Rc<FnDecl>>,
+        /// Where the class's own name is bound, as for `Let`.
         slot: Option<Slot>,
     },
     If {

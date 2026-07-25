@@ -1,0 +1,101 @@
+# A class is a value bound to its name, and calling it builds an instance.
+class Point {
+    fn init(x, y) {
+        self.x = x
+        self.y = y
+    }
+    fn sum() {
+        return self.x + self.y
+    }
+    fn scaled(k) {
+        return Point(self.x * k, self.y * k)
+    }
+}
+
+let p = Point(3, 4)
+print(p.x, p.y)
+print(p.sum())
+
+# A method returning a new instance, so `init` is reachable from inside a method.
+let q = p.scaled(2)
+print(q.x, q.y)
+print(p.x, p.y)
+
+# `self` is a parameter the parser wrote, so it is an ordinary local. That is
+# what lets a closure nested in a method capture it.
+class Counter {
+    fn init() {
+        self.n = 0
+    }
+    fn stepper() {
+        fn step() {
+            self.n = self.n + 1
+            return self.n
+        }
+        return step
+    }
+}
+
+let c = Counter()
+let step = c.stepper()
+print(step(), step(), step())
+print(c.n)
+
+# Fields are created by assignment, so one can be added from outside the class.
+p.z = 99
+print(p.z)
+
+# Printing and types.
+print(p)
+print(Point)
+print(type(p), type(Point), type(p.sum))
+
+# A method is an ordinary value: bindable, storable, callable later.
+let m = p.sum
+print(m())
+print(m)
+print(p.sum == p.sum)
+print(p.sum == q.sum)
+
+# Reached through the class, a method is just a function with the receiver
+# written out.
+print(Point.sum(p))
+
+# Instances compare by identity, not by their fields.
+print(Point(1, 1) == Point(1, 1))
+print(p == p)
+
+# A class with no `init` takes no arguments.
+class Empty {
+    fn describe() {
+        return "nothing here"
+    }
+}
+print(Empty().describe())
+
+# A field shadows a method of the same name, and is called without a receiver.
+class Shadow {
+    fn init() {
+        self.value = fn_two
+    }
+    fn value() {
+        return "the method"
+    }
+}
+fn fn_two() {
+    return "the field"
+}
+print(Shadow().value())
+
+# Classes are values, so they go in collections and get passed around.
+let shapes = [Point(1, 2), Point(3, 4)]
+let total = 0
+for shape in shapes {
+    total = total + shape.sum()
+}
+print(total)
+
+fn build(kind, a, b) {
+    return kind(a, b)
+}
+print(build(Point, 5, 6).sum())

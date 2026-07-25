@@ -1,0 +1,6 @@
+class C {
+    fn m() {
+        return 1
+    }
+}
+print(C().nope)

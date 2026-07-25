@@ -1,3 +1,4 @@
+use crate::class::{Instance, UserClass};
 use crate::dict::Dict;
 use crate::env::{Env, Globals};
 use crate::value::{BoundMethod, Function, Value};
@@ -21,6 +22,8 @@ pub enum Object {
     Globals(Globals),
     Function(Function),
     BoundMethod(BoundMethod),
+    Class(UserClass),
+    Instance(Instance),
 }
 
 /// Live objects at which a collection is worth doing. Below this the mark phase
@@ -195,6 +198,27 @@ impl Heap {
         }
     }
 
+    pub fn class(&self, id: ObjId) -> &UserClass {
+        match self.get(id) {
+            Object::Class(class) => class,
+            other => panic!("expected a class, found {other:?}"),
+        }
+    }
+
+    pub fn instance(&self, id: ObjId) -> &Instance {
+        match self.get(id) {
+            Object::Instance(instance) => instance,
+            other => panic!("expected an instance, found {other:?}"),
+        }
+    }
+
+    pub fn instance_mut(&mut self, id: ObjId) -> &mut Instance {
+        match self.get_mut(id) {
+            Object::Instance(instance) => instance,
+            other => panic!("expected an instance, found {other:?}"),
+        }
+    }
+
     /// Objects currently allocated. Not the arena's size — freed slots are
     /// still there, waiting to be reused.
     pub fn live(&self) -> usize {
@@ -222,7 +246,23 @@ fn trace(object: &Object, worklist: &mut Vec<ObjId>) {
         Object::Function(func) => worklist.push(func.env),
         // A bound method is often the only thing holding its receiver alive:
         // in `[1, 2].push`, the list is reachable from nowhere else.
-        Object::BoundMethod(bound) => worklist.extend(bound.receiver.handle()),
+        //
+        // The method itself is a different matter. Today it is always reachable
+        // anyway — it was found on the receiver's class, and the receiver above
+        // reaches that class — so no test can be written that fails without the
+        // second line. It stays because `trace`'s contract is "every handle
+        // this object holds", not "every handle nothing else happens to reach":
+        // the latter is an invariant living in two files at once, and the whole
+        // point of the arena is that forgetting to trace something produces
+        // bugs that cannot be found.
+        Object::BoundMethod(bound) => {
+            worklist.extend(bound.receiver.handle());
+            worklist.extend(bound.method.handle());
+        }
+        Object::Class(class) => class.trace(worklist),
+        // An instance keeps its class alive, which is what lets a class be
+        // reachable only through the objects it made.
+        Object::Instance(instance) => instance.trace(worklist),
     }
 }
 

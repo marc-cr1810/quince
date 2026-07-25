@@ -3,6 +3,7 @@ use std::rc::Rc;
 
 use crate::ast::Slot;
 use crate::ast::{BinaryOp, Block, Expr, ExprKind, LogicalOp, Stmt, StmtKind, UnaryOp, Var};
+use crate::class::{self, Instance, UserClass};
 use crate::dict::{Dict, Key, NotAKey};
 use crate::env::{self, AssignError, Env, Globals};
 use crate::error::QuinceError;
@@ -55,6 +56,24 @@ pub fn with_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
 enum Flow {
     Normal,
     Return(Value),
+}
+
+/// What `x.name` found.
+///
+/// The distinction is only about the receiver: a method gets one prepended when
+/// called, a field does not. Every other difference between them — how they are
+/// printed, whether they are callable at all — is a property of the value.
+enum Attr {
+    Field(Value),
+    Method(Value),
+}
+
+impl Attr {
+    fn value(&self) -> &Value {
+        match self {
+            Attr::Field(value) | Attr::Method(value) => value,
+        }
+    }
 }
 
 pub struct Interp {
@@ -194,6 +213,33 @@ impl Interp {
                 Ok(Flow::Normal)
             }
 
+            StmtKind::Class {
+                name,
+                methods,
+                slot,
+            } => {
+                // Methods close over the scope the class is declared in, exactly
+                // as a `fn` at that position would. Nothing here reaches a safe
+                // point, so the functions are safe unrooted until the class that
+                // owns them exists.
+                let table = methods
+                    .iter()
+                    .map(|decl| {
+                        let func = self.heap.alloc(Object::Function(Function {
+                            decl: Rc::clone(decl),
+                            env,
+                        }));
+                        (decl.name.clone(), func)
+                    })
+                    .collect();
+                let class = self.heap.alloc(Object::Class(UserClass {
+                    name: name.clone(),
+                    methods: table,
+                }));
+                self.bind(slot, name, Value::Class(class), false, env);
+                Ok(Flow::Normal)
+            }
+
             StmtKind::If {
                 cond,
                 then,
@@ -250,7 +296,7 @@ impl Interp {
             Value::Dict(id) => self.heap.dict(id).keys().collect(),
             other => {
                 return Err(QuinceError::new(
-                    format!("cannot iterate over {}", other.type_name()),
+                    format!("cannot iterate over {}", other.type_name(&self.heap)),
                     iter.span,
                 ));
             }
@@ -422,7 +468,7 @@ impl Interp {
                 for pair in values.chunks_exact(2) {
                     // A repeated key overwrites, as in Python — the literal is
                     // just a run of insertions.
-                    dict.insert(key_of(&pair[0], expr.span)?, pair[1].clone());
+                    dict.insert(key_of(&self.heap, &pair[0], expr.span)?, pair[1].clone());
                 }
                 Ok(Value::Dict(self.heap.alloc(Object::Dict(dict))))
             }
@@ -503,13 +549,16 @@ impl Interp {
             // ordinary value rather than syntax that works in one position.
             ExprKind::Field { target, name } => {
                 let receiver = self.eval(target, env)?;
-                let method = method_of(&receiver, name, expr.span)?;
-                // Nothing between here and the allocation is a safe point, so
-                // the receiver needs no rooting on the way in; once it is
-                // inside, `trace` keeps it alive.
-                Ok(Value::BoundMethod(self.heap.alloc(Object::BoundMethod(
-                    BoundMethod { receiver, method },
-                ))))
+                match self.attr(&receiver, name, expr.span)? {
+                    Attr::Field(value) => Ok(value),
+                    // Nothing between here and the allocation is a safe point,
+                    // so the receiver needs no rooting on the way in; once it
+                    // is inside, `trace` keeps it alive.
+                    Attr::Method(method) => Ok(Value::BoundMethod(
+                        self.heap
+                            .alloc(Object::BoundMethod(BoundMethod { receiver, method })),
+                    )),
+                }
             }
 
             ExprKind::Assign { target, value } => {
@@ -597,7 +646,7 @@ impl Interp {
                     // past the end of a list stays an error: a list's indices
                     // are positions, and there is no meaningful gap to fill.
                     Value::Dict(id) => {
-                        let key = key_of(&index, target.span)?;
+                        let key = key_of(&self.heap, &index, target.span)?;
                         self.heap.dict_mut(*id).insert(key, value.clone());
                     }
                     _ => {
@@ -608,7 +657,33 @@ impl Interp {
                 Ok(value)
             }
 
-            // The parser only admits assignable targets, so this is a field.
+            // Assigning to a field creates it if it is not there, which is the
+            // only way an instance ever gets one — there is no declaration
+            // form, so `init` assigning to `self.x` is what defines `x`.
+            ExprKind::Field {
+                target: object,
+                name,
+            } => {
+                let mark = self.temps.len();
+                self.temps.push(value.clone());
+                let object = self.eval(object, env);
+                self.temps.truncate(mark);
+
+                match object? {
+                    Value::Instance(id) => {
+                        self.heap
+                            .instance_mut(id)
+                            .fields
+                            .insert(Key::Str(Rc::from(name.as_str())), value.clone());
+                        Ok(value)
+                    }
+                    other => Err(QuinceError::new(
+                        format!("cannot set a field on {}", other.type_name(&self.heap)),
+                        target.span,
+                    )),
+                }
+            }
+
             _ => Err(QuinceError::new(
                 "cannot assign to this expression",
                 target.span,
@@ -620,7 +695,7 @@ impl Interp {
     fn index_get(&self, target: &Value, index: &Value, span: Span) -> Result<Value, QuinceError> {
         match target {
             Value::Dict(id) => {
-                let key = key_of(index, span)?;
+                let key = key_of(&self.heap, index, span)?;
                 self.heap.dict(*id).get(&key).cloned().ok_or_else(|| {
                     QuinceError::new(
                         format!("key {} is not in the dict", index.repr(&self.heap)),
@@ -633,7 +708,7 @@ impl Interp {
             // indefensible. The cost is a walk, since the storage is UTF-8.
             Value::Str(text) => {
                 let chars: Vec<char> = text.chars().collect();
-                let offset = resolve_index(index, chars.len(), "string", span)?;
+                let offset = resolve_index(&self.heap, index, chars.len(), "string", span)?;
                 Ok(Value::Str(Rc::from(chars[offset].to_string())))
             }
 
@@ -655,18 +730,19 @@ impl Interp {
         match target {
             Value::Str(text) => {
                 let chars: Vec<char> = text.chars().collect();
-                let (from, to) = slice_bounds(start, end, chars.len(), span)?;
+                let (from, to) = slice_bounds(&self.heap, start, end, chars.len(), span)?;
                 Ok(Value::Str(Rc::from(
                     chars[from..to].iter().collect::<String>(),
                 )))
             }
             Value::List(id) => {
-                let (from, to) = slice_bounds(start, end, self.heap.list(*id).len(), span)?;
+                let (from, to) =
+                    slice_bounds(&self.heap, start, end, self.heap.list(*id).len(), span)?;
                 let items = self.heap.list(*id)[from..to].to_vec();
                 Ok(Value::List(self.heap.alloc(Object::List(items))))
             }
             other => Err(QuinceError::new(
-                format!("cannot slice {}", other.type_name()),
+                format!("cannot slice {}", other.type_name(&self.heap)),
                 span,
             )),
         }
@@ -681,11 +757,11 @@ impl Interp {
     ) -> Result<(ObjId, usize), QuinceError> {
         let Value::List(id) = target else {
             return Err(QuinceError::new(
-                format!("cannot index {}", target.type_name()),
+                format!("cannot index {}", target.type_name(&self.heap)),
                 span,
             ));
         };
-        let offset = resolve_index(index, self.heap.list(*id).len(), "list", span)?;
+        let offset = resolve_index(&self.heap, index, self.heap.list(*id).len(), "list", span)?;
         Ok((*id, offset))
     }
 
@@ -737,8 +813,39 @@ impl Interp {
                 self.call_method(bound.receiver, bound.method, args, span)
             }
 
+            // Calling a class builds an instance and hands it to `init`, which
+            // is why `init` returns nothing useful: the object already exists
+            // by the time it runs.
+            Value::Class(id) => {
+                let instance = Value::Instance(self.heap.alloc(Object::Instance(Instance {
+                    class: id,
+                    fields: Dict::new(),
+                })));
+
+                match self.heap.class(id).method(class::INIT, &self.heap) {
+                    Some(init) => {
+                        // `init` runs Quince code, so it reaches a safe point,
+                        // and the only other reference to the instance is the
+                        // copy in its `self` slot — which the body is free to
+                        // overwrite. Rooting it here is what makes returning it
+                        // afterwards safe.
+                        let mark = self.temps.len();
+                        self.temps.push(instance.clone());
+                        let result = self.call_method(instance.clone(), init, args, span);
+                        self.temps.truncate(mark);
+                        result?;
+                    }
+                    // No constructor, so the only correct call passes nothing.
+                    None => {
+                        let name = self.heap.class(id).name.clone();
+                        check_arity(&name, 0, args.len(), span)?;
+                    }
+                }
+                Ok(instance)
+            }
+
             other => Err(QuinceError::new(
-                format!("{} is not callable", other.type_name()),
+                format!("{} is not callable", other.type_name(&self.heap)),
                 span,
             )),
         }
@@ -760,45 +867,109 @@ impl Interp {
         span: Span,
     ) -> Result<Value, QuinceError> {
         let receiver = self.eval(target, env)?;
-        let method = method_of(&receiver, name, callee_span)?;
+        let attr = self.attr(&receiver, name, callee_span)?;
 
         // The receiver is held across every argument, any of which can reach a
         // safe point — the same hazard as an ordinary callee, and the same fix.
+        // The attribute needs it too: a field holding a function is reachable
+        // only through that field, which an argument is free to overwrite.
         let mark = self.temps.len();
-        if receiver.handle().is_some() {
-            self.temps.push(receiver.clone());
+        for value in [&receiver, attr.value()] {
+            if value.handle().is_some() {
+                self.temps.push(value.clone());
+            }
         }
         let values = self.eval_seq(args, env);
         self.temps.truncate(mark);
+        let values = values?;
 
-        self.call_method(receiver, method, values?, span)
+        match attr {
+            Attr::Method(method) => self.call_method(receiver, method, values, span),
+            // A field that happens to hold a function; it never took a receiver.
+            Attr::Field(value) => self.call(value, values, span),
+        }
     }
 
-    /// Calls a builtin with `receiver` occupying `args[0]`.
+    /// Calls `method` with `receiver` in front of `args`.
     ///
-    /// Passing the receiver in the argument list is what lets one `Native`
-    /// serve as both a free function and a method, so the method table holds
-    /// the type the interpreter already had.
+    /// The receiver is passed as argument zero for both kinds of method, which
+    /// is what lets one `Native` serve as a free function and a method at once,
+    /// and what lets a user method be an ordinary function whose first
+    /// parameter the parser wrote.
     fn call_method(
         &mut self,
         receiver: Value,
-        method: &'static Native,
-        args: Vec<Value>,
+        method: Value,
+        mut args: Vec<Value>,
         span: Span,
     ) -> Result<Value, QuinceError> {
-        if let Some(arity) = method.arity {
-            // Reported against what the call site can actually write. The
-            // receiver is one of the declared arguments but has no syntax as
-            // one, so quoting the declared arity would ask for an argument the
-            // user has no way to supply. Every method has a receiver, making
-            // the subtraction safe.
-            check_arity(method.name, arity.saturating_sub(1), args.len(), span)?;
+        // Arity is reported against what the call site can actually write. The
+        // receiver is one of the declared arguments but has no syntax as one,
+        // so quoting the declared count would ask for an argument the user has
+        // no way to supply. Every method has a receiver, making the subtraction
+        // safe.
+        let declared = match &method {
+            Value::Native(native) => native.arity,
+            Value::Function(id) => Some(self.heap.function(*id).decl.params.len()),
+            // `attr` only ever produces the two above.
+            other => panic!("expected a method, found {other:?}"),
+        };
+        if let Some(arity) = declared {
+            check_arity(
+                method.callable_name(&self.heap),
+                arity.saturating_sub(1),
+                args.len(),
+                span,
+            )?;
         }
 
-        let mut full = Vec::with_capacity(args.len() + 1);
-        full.push(receiver);
-        full.extend(args);
-        (method.func)(self, &full, span)
+        args.insert(0, receiver);
+        self.call(method, args, span)
+    }
+
+    /// Looks up `name` on `receiver`, without calling anything.
+    ///
+    /// Fields shadow methods, following Python: a field is per-object and a
+    /// method is per-class, so the more specific one wins. It also means a
+    /// field holding a function is called as an ordinary function rather than
+    /// silently acquiring a receiver it was never written to take.
+    fn attr(&self, receiver: &Value, name: &str, span: Span) -> Result<Attr, QuinceError> {
+        if let Value::Instance(id) = receiver
+            && let Some(value) = self
+                .heap
+                .instance(*id)
+                .fields
+                .get(&Key::Str(Rc::from(name)))
+        {
+            return Ok(Attr::Field(value.clone()));
+        }
+
+        // A class hands back its methods unbound, so `Point.dist(p)` works and
+        // a method really is a function with the receiver written out.
+        if let Value::Class(id) = receiver {
+            return match self.heap.class(*id).method(name, &self.heap) {
+                Some(method) => Ok(Attr::Field(method)),
+                None => Err(self.no_attr(receiver, name, span)),
+            };
+        }
+
+        match receiver.class(&self.heap).method(name, &self.heap) {
+            Some(method) => Ok(Attr::Method(method)),
+            None => Err(self.no_attr(receiver, name, span)),
+        }
+    }
+
+    fn no_attr(&self, receiver: &Value, name: &str, span: Span) -> QuinceError {
+        // An instance can grow fields at run time, so a missing name there is a
+        // different mistake from a missing method on a builtin type.
+        let what = match receiver {
+            Value::Instance(_) => "no field or method",
+            _ => "no method",
+        };
+        QuinceError::new(
+            format!("{} has {what} `{name}`", receiver.type_name(&self.heap)),
+            span,
+        )
     }
 
     // -- operators ---------------------------------------------------------
@@ -812,7 +983,7 @@ impl Interp {
                 .ok_or_else(|| QuinceError::new("integer overflow", span)),
             (UnaryOp::Neg, Value::Float(n)) => Ok(Value::Float(-n)),
             (UnaryOp::Neg, other) => Err(QuinceError::new(
-                format!("cannot negate {}", other.type_name()),
+                format!("cannot negate {}", other.type_name(&self.heap)),
                 span,
             )),
         }
@@ -854,7 +1025,7 @@ impl Interp {
                 Le => Ok(Value::Bool(a <= b)),
                 Gt => Ok(Value::Bool(a > b)),
                 Ge => Ok(Value::Bool(a >= b)),
-                _ => Err(type_error(op, &lhs, &rhs, span)),
+                _ => Err(type_error(&self.heap, op, &lhs, &rhs, span)),
             };
         }
 
@@ -870,7 +1041,7 @@ impl Interp {
                 float_op(op, a, b, span)
             }
 
-            _ => Err(type_error(op, &lhs, &rhs, span)),
+            _ => Err(type_error(&self.heap, op, &lhs, &rhs, span)),
         }
     }
 
@@ -881,7 +1052,10 @@ impl Interp {
     /// mistake in the program, and answering `false` would hide it.
     fn contains(&self, haystack: &Value, needle: &Value, span: Span) -> Result<Value, QuinceError> {
         let found = match haystack {
-            Value::Dict(id) => self.heap.dict(*id).contains(&key_of(needle, span)?),
+            Value::Dict(id) => self
+                .heap
+                .dict(*id)
+                .contains(&key_of(&self.heap, needle, span)?),
             Value::List(id) => self
                 .heap
                 .list(*id)
@@ -891,14 +1065,17 @@ impl Interp {
                 Value::Str(part) => text.contains(part.as_ref()),
                 other => {
                     return Err(QuinceError::new(
-                        format!("cannot look for {} in a string", other.type_name()),
+                        format!(
+                            "cannot look for {} in a string",
+                            other.type_name(&self.heap)
+                        ),
                         span,
                     ));
                 }
             },
             other => {
                 return Err(QuinceError::new(
-                    format!("cannot use `in` on {}", other.type_name()),
+                    format!("cannot use `in` on {}", other.type_name(&self.heap)),
                     span,
                 ));
             }
@@ -920,12 +1097,13 @@ fn resolved(slot: &Option<Slot>) -> Slot {
 }
 
 /// Converts a value to a dict key, explaining why if it cannot be one.
-fn key_of(value: &Value, span: Span) -> Result<Key, QuinceError> {
+fn key_of(heap: &Heap, value: &Value, span: Span) -> Result<Key, QuinceError> {
     Key::from_value(value).map_err(|reason| {
         let message = match reason {
-            NotAKey::Unhashable(name) => {
-                format!("a {name} cannot be a dict key, because it is compared by identity")
-            }
+            NotAKey::Unhashable => format!(
+                "a {} cannot be a dict key, because it is compared by identity",
+                value.type_name(heap)
+            ),
             NotAKey::Nan => "NaN cannot be a dict key, because it is not equal to itself".into(),
         };
         QuinceError::new(message, span)
@@ -1014,7 +1192,7 @@ fn float_op(op: BinaryOp, a: f64, b: f64, span: Span) -> Result<Value, QuinceErr
     Ok(value)
 }
 
-fn type_error(op: BinaryOp, lhs: &Value, rhs: &Value, span: Span) -> QuinceError {
+fn type_error(heap: &Heap, op: BinaryOp, lhs: &Value, rhs: &Value, span: Span) -> QuinceError {
     use BinaryOp::*;
     let verb = match op {
         Add => "add",
@@ -1026,7 +1204,11 @@ fn type_error(op: BinaryOp, lhs: &Value, rhs: &Value, span: Span) -> QuinceError
         Eq | Ne | In => unreachable!("handled before the numeric dispatch"),
     };
     QuinceError::new(
-        format!("cannot {verb} {} and {}", lhs.type_name(), rhs.type_name()),
+        format!(
+            "cannot {verb} {} and {}",
+            lhs.type_name(heap),
+            rhs.type_name(heap)
+        ),
         span,
     )
 }
@@ -1035,10 +1217,19 @@ fn type_error(op: BinaryOp, lhs: &Value, rhs: &Value, span: Span) -> QuinceError
 ///
 /// Shared by lists and strings so the two cannot drift apart on what `-1`
 /// means or on how an out-of-range index reads.
-fn resolve_index(index: &Value, len: usize, what: &str, span: Span) -> Result<usize, QuinceError> {
+fn resolve_index(
+    heap: &Heap,
+    index: &Value,
+    len: usize,
+    what: &str,
+    span: Span,
+) -> Result<usize, QuinceError> {
     let Value::Int(raw) = index else {
         return Err(QuinceError::new(
-            format!("{what} index must be an int, found {}", index.type_name()),
+            format!(
+                "{what} index must be an int, found {}",
+                index.type_name(heap)
+            ),
             span,
         ));
     };
@@ -1061,6 +1252,7 @@ fn resolve_index(index: &Value, len: usize, what: &str, span: Span) -> Result<us
 /// only be a mistake. An inverted range yields nothing rather than erroring,
 /// for the same reason.
 fn slice_bounds(
+    heap: &Heap,
     start: Option<&Value>,
     end: Option<&Value>,
     len: usize,
@@ -1073,7 +1265,7 @@ fn slice_bounds(
         };
         let Value::Int(raw) = bound else {
             return Err(QuinceError::new(
-                format!("slice bounds must be ints, found {}", bound.type_name()),
+                format!("slice bounds must be ints, found {}", bound.type_name(heap)),
                 span,
             ));
         };
@@ -1083,16 +1275,6 @@ fn slice_bounds(
     let from = resolve(start, 0)?.clamp(0, len);
     let to = resolve(end, len)?.clamp(0, len);
     Ok((from as usize, to.max(from) as usize))
-}
-
-/// Finds a method on a value, or explains that the type has none by that name.
-fn method_of(receiver: &Value, name: &str, span: Span) -> Result<&'static Native, QuinceError> {
-    receiver.class().method(name).ok_or_else(|| {
-        QuinceError::new(
-            format!("{} has no method `{name}`", receiver.type_name()),
-            span,
-        )
-    })
 }
 
 fn check_arity(name: &str, expected: usize, found: usize, span: Span) -> Result<(), QuinceError> {
@@ -1136,7 +1318,7 @@ static LEN: Native = Native {
         Value::List(id) => Ok(Value::Int(interp.heap.list(*id).len() as i64)),
         Value::Dict(id) => Ok(Value::Int(interp.heap.dict(*id).len() as i64)),
         other => Err(QuinceError::new(
-            format!("`len` does not apply to {}", other.type_name()),
+            format!("`len` does not apply to {}", other.type_name(&interp.heap)),
             span,
         )),
     },
@@ -1155,7 +1337,10 @@ pub static PUSH: Native = Native {
             Ok(Value::Nil)
         }
         other => Err(QuinceError::new(
-            format!("`push` needs a list, but was given {}", other.type_name()),
+            format!(
+                "`push` needs a list, but was given {}",
+                other.type_name(&interp.heap)
+            ),
             span,
         )),
     },
@@ -1170,7 +1355,10 @@ pub static KEYS: Native = Native {
             Ok(Value::List(interp.heap.alloc(Object::List(keys))))
         }
         other => Err(QuinceError::new(
-            format!("`keys` needs a dict, but was given {}", other.type_name()),
+            format!(
+                "`keys` needs a dict, but was given {}",
+                other.type_name(&interp.heap)
+            ),
             span,
         )),
     },
@@ -1185,7 +1373,10 @@ pub static VALUES: Native = Native {
             Ok(Value::List(interp.heap.alloc(Object::List(values))))
         }
         other => Err(QuinceError::new(
-            format!("`values` needs a dict, but was given {}", other.type_name()),
+            format!(
+                "`values` needs a dict, but was given {}",
+                other.type_name(&interp.heap)
+            ),
             span,
         )),
     },
@@ -1198,7 +1389,7 @@ pub static REMOVE: Native = Native {
     arity: Some(2),
     func: |interp, args, span| match &args[0] {
         Value::Dict(id) => {
-            let key = key_of(&args[1], span)?;
+            let key = key_of(&interp.heap, &args[1], span)?;
             interp.heap.dict_mut(*id).remove(&key).ok_or_else(|| {
                 QuinceError::new(
                     format!("key {} is not in the dict", args[1].repr(&interp.heap)),
@@ -1207,7 +1398,10 @@ pub static REMOVE: Native = Native {
             })
         }
         other => Err(QuinceError::new(
-            format!("`remove` needs a dict, but was given {}", other.type_name()),
+            format!(
+                "`remove` needs a dict, but was given {}",
+                other.type_name(&interp.heap)
+            ),
             span,
         )),
     },
@@ -1222,18 +1416,24 @@ pub static REMOVE: Native = Native {
 fn text(args: &[Value]) -> &Rc<str> {
     match &args[0] {
         Value::Str(text) => text,
-        other => unreachable!("a string method received {}", other.type_name()),
+        other => unreachable!("a string method received {other:?}"),
     }
 }
 
 /// A string argument, or an error naming what arrived instead.
-fn text_arg(args: &[Value], at: usize, name: &str, span: Span) -> Result<Rc<str>, QuinceError> {
+fn text_arg(
+    heap: &Heap,
+    args: &[Value],
+    at: usize,
+    name: &str,
+    span: Span,
+) -> Result<Rc<str>, QuinceError> {
     match &args[at] {
         Value::Str(text) => Ok(Rc::clone(text)),
         other => Err(QuinceError::new(
             format!(
                 "`{name}` needs a string, but was given {}",
-                other.type_name()
+                other.type_name(heap)
             ),
             span,
         )),
@@ -1261,8 +1461,8 @@ pub static TRIM: Native = Native {
 pub static STARTS_WITH: Native = Native {
     name: "starts_with",
     arity: Some(2),
-    func: |_interp, args, span| {
-        let prefix = text_arg(args, 1, "starts_with", span)?;
+    func: |interp, args, span| {
+        let prefix = text_arg(&interp.heap, args, 1, "starts_with", span)?;
         Ok(Value::Bool(text(args).starts_with(prefix.as_ref())))
     },
 };
@@ -1270,8 +1470,8 @@ pub static STARTS_WITH: Native = Native {
 pub static ENDS_WITH: Native = Native {
     name: "ends_with",
     arity: Some(2),
-    func: |_interp, args, span| {
-        let suffix = text_arg(args, 1, "ends_with", span)?;
+    func: |interp, args, span| {
+        let suffix = text_arg(&interp.heap, args, 1, "ends_with", span)?;
         Ok(Value::Bool(text(args).ends_with(suffix.as_ref())))
     },
 };
@@ -1279,15 +1479,15 @@ pub static ENDS_WITH: Native = Native {
 pub static REPLACE: Native = Native {
     name: "replace",
     arity: Some(3),
-    func: |_interp, args, span| {
-        let from = text_arg(args, 1, "replace", span)?;
+    func: |interp, args, span| {
+        let from = text_arg(&interp.heap, args, 1, "replace", span)?;
         if from.is_empty() {
             return Err(QuinceError::new(
                 "`replace` needs something to look for, but was given \"\"".to_string(),
                 span,
             ));
         }
-        let to = text_arg(args, 2, "replace", span)?;
+        let to = text_arg(&interp.heap, args, 2, "replace", span)?;
         Ok(Value::Str(Rc::from(
             text(args).replace(from.as_ref(), to.as_ref()),
         )))
@@ -1300,7 +1500,7 @@ pub static SPLIT: Native = Native {
     name: "split",
     arity: Some(2),
     func: |interp, args, span| {
-        let sep = text_arg(args, 1, "split", span)?;
+        let sep = text_arg(&interp.heap, args, 1, "split", span)?;
         if sep.is_empty() {
             return Err(QuinceError::new(
                 "`split` needs a separator, but was given \"\" — use `chars` instead".to_string(),
@@ -1335,7 +1535,10 @@ pub static JOIN: Native = Native {
     func: |interp, args, span| {
         let Value::List(id) = &args[1] else {
             return Err(QuinceError::new(
-                format!("`join` needs a list, but was given {}", args[1].type_name()),
+                format!(
+                    "`join` needs a list, but was given {}",
+                    args[1].type_name(&interp.heap)
+                ),
                 span,
             ));
         };
@@ -1348,7 +1551,7 @@ pub static JOIN: Native = Native {
                     return Err(QuinceError::new(
                         format!(
                             "`join` needs a list of strings, but found {}",
-                            other.type_name()
+                            other.type_name(&interp.heap)
                         ),
                         span,
                     ));
@@ -1362,7 +1565,7 @@ pub static JOIN: Native = Native {
 static TYPE: Native = Native {
     name: "type",
     arity: Some(1),
-    func: |_interp, args, _span| Ok(Value::Str(Rc::from(args[0].type_name()))),
+    func: |interp, args, _span| Ok(Value::Str(Rc::from(args[0].type_name(&interp.heap)))),
 };
 
 #[cfg(test)]
@@ -1537,6 +1740,100 @@ mod tests {
             4,
             "the push should have landed"
         );
+    }
+
+    #[test]
+    fn an_instance_survives_its_own_constructor() {
+        // `init` is free to overwrite `self`, and once it has, the slot the
+        // instance was bound into no longer names it. The only other reference
+        // is the Rust local in `call` waiting to return it, so without rooting
+        // there the collector reclaims the object mid-construction and `C(7)`
+        // evaluates to a handle pointing at whatever reused the slot.
+        let interp = run(&format!(
+            "{}\
+             class C {{\n\
+             fn init(n) {{\n\
+             self.n = n\n\
+             self = nil\n\
+             let junk = churn()\n\
+             }}\n\
+             }}\n\
+             let c = C(7)\n\
+             let kept = c.n",
+            churn("0")
+        ));
+
+        assert!(interp.heap.collections > 0, "the collector never ran");
+        assert_eq!(global(&interp, "kept"), Some(Value::Int(7)));
+    }
+
+    #[test]
+    fn a_class_survives_the_instance_that_is_all_that_names_it() {
+        // Nothing refers to the class but the instance's `class` handle: the
+        // name it was declared under went out of scope with `mk`. Reaching it
+        // is what `type` and every later method lookup depend on.
+        let interp = run(&format!(
+            "fn mk() {{\n\
+             class Hidden {{ fn who() {{ return 42 }} }}\n\
+             return Hidden()\n\
+             }}\n\
+             let obj = mk()\n\
+             {}\
+             let junk = churn()\n\
+             let kept = obj.who()\n\
+             let name = type(obj)",
+            churn("0")
+        ));
+
+        assert!(interp.heap.collections > 0, "the collector never ran");
+        assert_eq!(global(&interp, "kept"), Some(Value::Int(42)));
+        assert_eq!(global(&interp, "name"), Some(Value::from("Hidden")));
+    }
+
+    #[test]
+    fn a_field_survives_collection_with_its_instance() {
+        // The list is reachable only through the field, so this is the instance
+        // half of what `Dict::trace` already does for a dict.
+        let interp = run(&format!(
+            "class Box {{ fn init() {{ self.items = [1, 2, 3] }} }}\n\
+             let b = Box()\n\
+             {}\
+             let junk = churn()\n\
+             let kept = len(b.items)",
+            churn("0")
+        ));
+
+        assert!(interp.heap.collections > 0, "the collector never ran");
+        assert_eq!(global(&interp, "kept"), Some(Value::Int(3)));
+    }
+
+    #[test]
+    fn a_method_held_in_a_field_survives_evaluating_the_arguments() {
+        // A field holding a function is reachable only through that field, and
+        // an argument is free to overwrite it. A *method* is safe without this
+        // — the rooted receiver reaches its class, and the class its methods —
+        // so the hazard belongs to fields alone. The closure has to be a local
+        // one: a top-level `fn` is a global, and globals are always rooted.
+        let interp = run(&format!(
+            "class Holder {{}}\n\
+             fn build() {{\n\
+             fn seven(n) {{ return 7 }}\n\
+             let h = Holder()\n\
+             h.f = seven\n\
+             return h\n\
+             }}\n\
+             {}\
+             fn clear(h) {{\n\
+             h.f = nil\n\
+             return churn()\n\
+             }}\n\
+             let h = build()\n\
+             let kept = h.f(clear(h))",
+            churn("0")
+        ));
+
+        assert!(interp.heap.collections > 0, "the collector never ran");
+        assert_eq!(global(&interp, "kept"), Some(Value::Int(7)));
     }
 
     #[test]

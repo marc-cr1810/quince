@@ -2,7 +2,7 @@ use std::fmt;
 use std::rc::Rc;
 
 use crate::ast::FnDecl;
-use crate::class::{self, BuiltinType};
+use crate::class::{self, Class};
 use crate::error::QuinceError;
 use crate::heap::{Heap, ObjId};
 use crate::interp::Interp;
@@ -36,7 +36,10 @@ pub type NativeFn = fn(&mut Interp, &[Value], Span) -> Result<Value, QuinceError
 #[derive(Clone, Debug)]
 pub struct BoundMethod {
     pub receiver: Value,
-    pub method: &'static Native,
+    /// A `Native` for a builtin type's method, a `Function` for a user class's.
+    /// Holding the `Value` rather than either concrete type is what keeps one
+    /// bound-method object serving both.
+    pub method: Value,
 }
 
 /// A function implemented in Rust.
@@ -70,6 +73,10 @@ pub enum Value {
     /// Heap-allocated because it holds a receiver, which may be a handle the
     /// collector has to follow.
     BoundMethod(ObjId),
+    /// A class, which is a value: it can be bound, passed, and called to build
+    /// an instance.
+    Class(ObjId),
+    Instance(ObjId),
 }
 
 impl Value {
@@ -79,9 +86,12 @@ impl Value {
     /// keep anything alive.
     pub fn handle(&self) -> Option<ObjId> {
         match self {
-            Value::List(id) | Value::Dict(id) | Value::Function(id) | Value::BoundMethod(id) => {
-                Some(*id)
-            }
+            Value::List(id)
+            | Value::Dict(id)
+            | Value::Function(id)
+            | Value::BoundMethod(id)
+            | Value::Class(id)
+            | Value::Instance(id) => Some(*id),
             _ => None,
         }
     }
@@ -90,10 +100,14 @@ impl Value {
     ///
     /// Many-to-one, and deliberately so: a Quince function and a builtin are
     /// both `function`, because nothing a program can do distinguishes them.
-    /// This is the one place that decision is recorded, and once methods exist
-    /// it is also where they are found.
-    pub fn class(&self) -> &'static BuiltinType {
-        match self {
+    /// This is the one place that decision is recorded, and it is also where
+    /// methods are found.
+    ///
+    /// The heap is needed only for an instance, whose class is a handle rather
+    /// than a static — the one case that costs every other arm a parameter it
+    /// ignores.
+    pub fn class(&self, heap: &Heap) -> Class {
+        let builtin = match self {
             Value::Nil => &class::NIL,
             Value::Bool(_) => &class::BOOL,
             Value::Int(_) => &class::INT,
@@ -102,12 +116,15 @@ impl Value {
             Value::List(_) => &class::LIST,
             Value::Dict(_) => &class::DICT,
             Value::Function(_) | Value::Native(_) | Value::BoundMethod(_) => &class::FUNCTION,
-        }
+            Value::Class(_) => &class::CLASS,
+            Value::Instance(id) => return Class::User(heap.instance(*id).class),
+        };
+        Class::Builtin(builtin)
     }
 
     /// The name used in type errors and by `type(x)`.
-    pub fn type_name(&self) -> &'static str {
-        self.class().name
+    pub fn type_name<'h>(&self, heap: &'h Heap) -> &'h str {
+        self.class(heap).name(heap)
     }
 
     /// Python-style truthiness: `nil`, `false`, zero, and empty collections are
@@ -122,6 +139,10 @@ impl Value {
             Value::List(id) => !heap.list(*id).is_empty(),
             Value::Dict(id) => !heap.dict(*id).is_empty(),
             Value::Function(_) | Value::Native(_) | Value::BoundMethod(_) => true,
+            // An instance is truthy regardless of its fields. Letting a class
+            // decide otherwise is a protocol slot, which arrives with the rest
+            // of them or not at all.
+            Value::Class(_) | Value::Instance(_) => true,
         }
     }
 
@@ -170,8 +191,14 @@ impl Value {
                     return true;
                 }
                 let (a, b) = (heap.bound_method(*a), heap.bound_method(*b));
-                std::ptr::eq(a.method, b.method) && a.receiver == b.receiver
+                a.method == b.method && a.receiver == b.receiver
             }
+            // Classes and instances compare by identity. Two separately built
+            // `Point(1, 1)`s are different objects, and saying otherwise would
+            // require deciding that fields are all that a class is — which is
+            // false the moment one of them is mutable.
+            (Value::Class(a), Value::Class(b)) => a == b,
+            (Value::Instance(a), Value::Instance(b)) => a == b,
             _ => false,
         }
     }
@@ -206,10 +233,22 @@ impl Value {
                 let bound = heap.bound_method(*id);
                 format!(
                     "<method {} of {}>",
-                    bound.method.name,
-                    bound.receiver.type_name()
+                    bound.method.callable_name(heap),
+                    bound.receiver.type_name(heap)
                 )
             }
+            Value::Class(id) => format!("<class {}>", heap.class(*id).name),
+            Value::Instance(_) => format!("<{} instance>", self.type_name(heap)),
+        }
+    }
+
+    /// The name to print for something callable, which is the only thing the
+    /// three callable forms have in common.
+    pub fn callable_name<'h>(&self, heap: &'h Heap) -> &'h str {
+        match self {
+            Value::Native(native) => native.name,
+            Value::Function(id) => &heap.function(*id).decl.name,
+            other => other.type_name(heap),
         }
     }
 
@@ -239,6 +278,8 @@ impl PartialEq for Value {
             (Value::Function(a), Value::Function(b)) => a == b,
             (Value::Native(a), Value::Native(b)) => std::ptr::eq(*a, *b),
             (Value::BoundMethod(a), Value::BoundMethod(b)) => a == b,
+            (Value::Class(a), Value::Class(b)) => a == b,
+            (Value::Instance(a), Value::Instance(b)) => a == b,
             _ => false,
         }
     }
@@ -253,6 +294,7 @@ impl From<&str> for Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::class::BuiltinType;
     use crate::dict::Dict;
     use crate::heap::Object;
 
@@ -262,19 +304,25 @@ mod tests {
         func: |_interp, _args, _span| Ok(Value::Nil),
     };
 
+    /// Whether `value` belongs to exactly `expected`, compared by address so
+    /// that two types sharing a name would still fail.
+    fn is_builtin(value: &Value, expected: &'static BuiltinType, heap: &Heap) -> bool {
+        matches!(value.class(heap), Class::Builtin(found) if std::ptr::eq(found, expected))
+    }
+
     #[test]
     fn type_names_are_stable() {
         let mut heap = Heap::new();
-        assert_eq!(Value::Nil.type_name(), "nil");
-        assert_eq!(Value::Bool(true).type_name(), "bool");
-        assert_eq!(Value::Int(1).type_name(), "int");
-        assert_eq!(Value::Float(1.0).type_name(), "float");
-        assert_eq!(Value::from("a").type_name(), "string");
+        assert_eq!(Value::Nil.type_name(&heap), "nil");
+        assert_eq!(Value::Bool(true).type_name(&heap), "bool");
+        assert_eq!(Value::Int(1).type_name(&heap), "int");
+        assert_eq!(Value::Float(1.0).type_name(&heap), "float");
+        assert_eq!(Value::from("a").type_name(&heap), "string");
 
         let list = Value::List(heap.alloc(Object::List(vec![])));
         let dict = Value::Dict(heap.alloc(Object::Dict(Dict::new())));
-        assert_eq!(list.type_name(), "list");
-        assert_eq!(dict.type_name(), "dict");
+        assert_eq!(list.type_name(&heap), "list");
+        assert_eq!(dict.type_name(&heap), "dict");
     }
 
     #[test]
@@ -286,21 +334,19 @@ mod tests {
         let list = Value::List(heap.alloc(Object::List(vec![])));
         let dict = Value::Dict(heap.alloc(Object::Dict(Dict::new())));
 
-        assert!(std::ptr::eq(Value::Int(1).class(), &class::INT));
-        assert!(std::ptr::eq(list.class(), &class::LIST));
-        assert!(std::ptr::eq(dict.class(), &class::DICT));
-        assert!(!std::ptr::eq(list.class(), dict.class()));
+        assert!(is_builtin(&Value::Int(1), &class::INT, &heap));
+        assert!(is_builtin(&list, &class::LIST, &heap));
+        assert!(is_builtin(&dict, &class::DICT, &heap));
+        assert!(!is_builtin(&list, &class::DICT, &heap));
     }
 
     #[test]
     fn builtins_and_quince_functions_share_one_type() {
         // The many-to-one case: nothing a program can do tells them apart, so
         // they must not report different types.
-        assert_eq!(Value::Native(&DUMMY).type_name(), "function");
-        assert!(std::ptr::eq(
-            Value::Native(&DUMMY).class(),
-            &class::FUNCTION
-        ));
+        let heap = Heap::new();
+        assert_eq!(Value::Native(&DUMMY).type_name(&heap), "function");
+        assert!(is_builtin(&Value::Native(&DUMMY), &class::FUNCTION, &heap));
     }
 
     #[test]

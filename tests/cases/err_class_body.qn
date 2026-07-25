@@ -1,0 +1,3 @@
+class C {
+    let x = 1
+}

@@ -556,6 +556,63 @@ and the thing being defended against is a frame size that moves when someone edi
 match arm in `eval` for reasons that have nothing to do with recursion. It moved by half
 once already, which is how this was found.
 
+## Classes
+
+The prediction above held. `Class` arrived as the two-variant enum it was sketched as,
+`class()` took its `&Heap`, and inheritance will hang off `Class::method` rather than
+being bolted beside it. What the sketch understated is the reach of `type_name`: `class()`
+did have one call site, but the name it produces has twenty-six, so widening it touched
+every error message that mentions a type, plus three free functions that had never needed
+the heap before. Mechanical, and an afternoon of nothing — but "one call site" was the
+wrong thing to have counted.
+
+### `self` is a parameter the parser writes
+
+The receiver is implicit at the call site and at the declaration — `fn init(x, y)`, not
+`fn init(self, x, y)` — and the parser closes the gap by inserting `self` as parameter
+zero of every method. Below the parser there is no such thing as a method: the resolver
+gives `self` a slot like any parameter, `read` has no special case, and a closure nested
+in a method captures the receiver through the ordinary scope chain because the receiver
+is an ordinary local in an enclosing scope.
+
+The alternative — binding `self` in the evaluator when a method is called — needs a rule
+for what `self` means inside a nested function, and either answer is a new mechanism.
+Here the question does not arise.
+
+`self` is still a keyword, and that buys exactly one thing: using it outside a method is
+a resolver error naming the mistake, rather than `undefined variable \`self\`` naming the
+symptom. It costs the ability to have a variable called `self`, which is not a loss.
+
+### One receiver convention, two kinds of method
+
+A builtin method takes its receiver as `args[0]`. A user method takes it as slot zero of
+its scope. These are the same thing: `call_method` prepends the receiver and hands the
+whole list to `call`, which binds arguments to slots in order. So the arity subtraction
+that natives already needed applies unchanged, and `BoundMethod` holds a `Value` rather
+than a `&'static Native` — one bound-method object, both kinds of callee.
+
+That is also why `Point.dist(p)` works. Reached through the class rather than an
+instance, a method is handed back unbound, and it really is a function whose first
+parameter is written out.
+
+### What a class does not get
+
+Fields are created by assignment, never declared, so `init` is the only reason an
+instance has any. Fields shadow methods, as in Python: a field is per-object and a
+method is per-class, so the more specific one wins — and a field holding a function is
+called without a receiver it was never written to take.
+
+Instances compare by identity. Structural equality would mean deciding that an object is
+its fields, which stops being true the moment one of them is mutable. `is_truthy`,
+`display`, and the indexing and iteration protocols stay matches on `Value` with one
+instance arm each; letting a class override them is the protocol-slot work, and it
+arrives whole or not at all.
+
+`init` cannot return anything useful, because the instance already exists by the time it
+runs. That has a collector consequence: `self` is an assignable parameter, so a body that
+writes `self = nil` drops the only heap-visible reference to the object under
+construction, and `call` has to root it across the constructor to hand it back.
+
 ## Roadmap
 
 **v0.1 — walking skeleton**
@@ -584,7 +641,7 @@ and `in`. Adding them turned up a use-after-free in the collector that had been
 there since it landed — see Collection — so the root set grew to cover intermediate
 expression values at the same time.
 
-Still missing: `try`/`catch` and classes. `push`, `keys`, `values`, and `remove`
+Still missing: `try`/`catch`. `push`, `keys`, `values`, and `remove`
 began as free functions standing in for methods; dispatch landed and they moved onto
 their types, leaving `print`, `len`, and `type` as the only globals. There are no
 tuples, which is why iterating a dict yields keys rather than pairs. The REPL is
@@ -617,6 +674,10 @@ optional ints would have been the worse trade.
 
 **v0.4 — objects**
 Classes, methods, inheritance, `self`.
+
+Classes, methods, fields, and `self` are done — see Classes above. A class is a value:
+callable to build an instance, storable in a list, passable to a function. Inheritance
+is the remaining piece.
 
 **v0.5 — robustness**
 `try`/`catch` and span-accurate diagnostics everywhere. GC is done.

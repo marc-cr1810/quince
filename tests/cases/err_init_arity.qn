@@ -1,0 +1,7 @@
+class Point {
+    fn init(x, y) {
+        self.x = x
+        self.y = y
+    }
+}
+Point(1)

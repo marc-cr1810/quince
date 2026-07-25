@@ -34,10 +34,10 @@ pub enum Key {
     Str(Rc<str>),
 }
 
-/// Why a value cannot be a key. Rendered by the caller, which has the span.
+/// Why a value cannot be a key. Rendered by the caller, which has the span —
+/// and, for `Unhashable`, the heap needed to name the offending type.
 pub enum NotAKey {
-    /// The type name, for values that are never hashable.
-    Unhashable(&'static str),
+    Unhashable,
     Nan,
 }
 
@@ -62,7 +62,7 @@ impl Key {
                 Key::Int(*n as i64)
             }
             Value::Float(n) => Key::Float(n.to_bits()),
-            other => return Err(NotAKey::Unhashable(other.type_name())),
+            _ => return Err(NotAKey::Unhashable),
         };
         Ok(key)
     }
@@ -204,10 +204,7 @@ mod tests {
     #[test]
     fn mutable_and_identity_values_are_rejected() {
         let list = Value::List(crate::heap::Heap::new().alloc(crate::heap::Object::List(vec![])));
-        assert!(matches!(
-            Key::from_value(&list),
-            Err(NotAKey::Unhashable("list"))
-        ));
+        assert!(matches!(Key::from_value(&list), Err(NotAKey::Unhashable)));
     }
 
     #[test]

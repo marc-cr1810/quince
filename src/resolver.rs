@@ -16,7 +16,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{Block, Expr, ExprKind, FnDecl, Slot, Stmt, StmtKind};
+use crate::ast::{self, Block, Expr, ExprKind, FnDecl, Slot, Stmt, StmtKind};
 use crate::error::QuinceError;
 use crate::token::Span;
 
@@ -78,6 +78,7 @@ impl Resolver {
             match &stmt.kind {
                 StmtKind::Let { name, mutable, .. } => self.declare(name, *mutable, stmt.span)?,
                 StmtKind::Fn { decl, .. } => self.declare(&decl.name, false, stmt.span)?,
+                StmtKind::Class { name, .. } => self.declare(name, false, stmt.span)?,
                 _ => {}
             }
         }
@@ -161,6 +162,20 @@ impl Resolver {
                 self.function(decl)
             }
 
+            StmtKind::Class {
+                name,
+                methods,
+                slot,
+            } => {
+                *slot = Some(self.slot_of(name));
+                for decl in methods {
+                    let decl = std::rc::Rc::get_mut(decl)
+                        .expect("the parser hands out unshared declarations");
+                    self.function(decl)?;
+                }
+                Ok(())
+            }
+
             StmtKind::If {
                 cond,
                 then,
@@ -230,6 +245,17 @@ impl Resolver {
             | ExprKind::Nil => Ok(()),
 
             ExprKind::Var(var) => {
+                // `self` is a parameter of the enclosing method, so failing to
+                // find it locally means there is no enclosing method. Left to
+                // run time it would fall through to a global lookup and report
+                // `undefined variable`, which describes the symptom rather than
+                // the mistake.
+                if var.name == ast::SELF && self.find(ast::SELF).is_none() {
+                    return Err(QuinceError::new(
+                        "`self` is only valid inside a method",
+                        expr.span,
+                    ));
+                }
                 var.slot = Some(self.slot_of(&var.name));
                 Ok(())
             }
@@ -440,6 +466,63 @@ mod tests {
             panic!("expected a return");
         };
         assert_eq!(var(expr), Slot::Local { hops: 1, index: 1 });
+    }
+
+    #[test]
+    fn self_is_the_first_slot_of_a_method() {
+        // It is a parameter, so it takes slot 0 and the written parameters
+        // follow. Nothing in the evaluator has to know it was a keyword.
+        let program = resolved("class C {\n fn m(a) { return self }\n}");
+        let StmtKind::Class { methods, .. } = &program[0].kind else {
+            panic!("expected a class");
+        };
+        assert_eq!(methods[0].body.slot_count, 2, "`self` and `a`");
+
+        let StmtKind::Return(Some(expr)) = &methods[0].body.stmts[0].kind else {
+            panic!("expected a return");
+        };
+        assert_eq!(var(expr), Slot::Local { hops: 0, index: 0 });
+    }
+
+    #[test]
+    fn a_closure_inside_a_method_captures_self_by_hops() {
+        // The reason `self` is a parameter rather than something injected at
+        // call time: the existing scope chain carries it inwards for free.
+        let program = resolved("class C {\n fn m() {\n fn inner() { return self }\n}\n}");
+        let StmtKind::Class { methods, .. } = &program[0].kind else {
+            panic!("expected a class");
+        };
+        let StmtKind::Fn { decl, .. } = &methods[0].body.stmts[0].kind else {
+            panic!("expected a nested function");
+        };
+        let StmtKind::Return(Some(expr)) = &decl.body.stmts[0].kind else {
+            panic!("expected a return");
+        };
+        assert_eq!(var(expr), Slot::Local { hops: 1, index: 0 });
+    }
+
+    #[test]
+    fn self_outside_a_method_is_caught_before_running() {
+        // Left to the evaluator this would fall through to a global lookup and
+        // report `undefined variable`, naming the symptom rather than the
+        // mistake.
+        assert_eq!(
+            resolve_err("fn f() { return self }"),
+            "`self` is only valid inside a method"
+        );
+        assert_eq!(
+            resolve_err("print(self)"),
+            "`self` is only valid inside a method"
+        );
+    }
+
+    #[test]
+    fn a_class_binds_its_own_name() {
+        let program = resolved("fn f() {\n class C {}\n return C\n}");
+        let StmtKind::Class { slot, .. } = &body(&program[0]).stmts[0].kind else {
+            panic!("expected a class");
+        };
+        assert_eq!(*slot, Some(Slot::Local { hops: 0, index: 0 }));
     }
 
     #[test]

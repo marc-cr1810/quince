@@ -35,6 +35,10 @@ pub enum TokenKind {
     Ident(String),
 
     Fn,
+    Class,
+    /// A keyword rather than an identifier so that using it outside a method is
+    /// caught by the resolver, with a message that says why.
+    SelfKw,
     Let,
     Const,
     If,
@@ -85,6 +89,8 @@ impl TokenKind {
     pub fn keyword(word: &str) -> Option<TokenKind> {
         let kind = match word {
             "fn" => TokenKind::Fn,
+            "class" => TokenKind::Class,
+            "self" => TokenKind::SelfKw,
             "let" => TokenKind::Let,
             "const" => TokenKind::Const,
             "if" => TokenKind::If,
@@ -111,6 +117,8 @@ impl fmt::Display for TokenKind {
             TokenKind::Ident(name) => write!(f, "{name}"),
 
             TokenKind::Fn => write!(f, "fn"),
+            TokenKind::Class => write!(f, "class"),
+            TokenKind::SelfKw => write!(f, "self"),
             TokenKind::Let => write!(f, "let"),
             TokenKind::Const => write!(f, "const"),
             TokenKind::If => write!(f, "if"),

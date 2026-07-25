@@ -1,5 +1,5 @@
 use crate::ast::{
-    BinaryOp, Block, Expr, ExprKind, FnDecl, LogicalOp, Param, Stmt, StmtKind, UnaryOp, Var,
+    self, BinaryOp, Block, Expr, ExprKind, FnDecl, LogicalOp, Param, Stmt, StmtKind, UnaryOp, Var,
 };
 use crate::error::QuinceError;
 use crate::token::{Span, Token, TokenKind};
@@ -65,6 +65,7 @@ impl Parser {
         match self.peek().kind {
             TokenKind::Let | TokenKind::Const => self.let_stmt(),
             TokenKind::Fn => self.fn_stmt(),
+            TokenKind::Class => self.class_stmt(),
             TokenKind::If => self.if_stmt(),
             TokenKind::While => self.while_stmt(),
             TokenKind::For => self.for_stmt(),
@@ -103,11 +104,35 @@ impl Parser {
     }
 
     fn fn_stmt(&mut self) -> Result<Stmt, QuinceError> {
-        let start = self.advance().span;
-        let (name, _) = self.expect_ident("after `fn`")?;
+        let start = self.peek().span;
+        let decl = self.fn_decl(false)?;
+        Ok(Stmt {
+            span: start.to(decl.body.span),
+            kind: StmtKind::Fn {
+                decl: std::rc::Rc::new(decl),
+                slot: None,
+            },
+        })
+    }
+
+    /// Parses `fn name(params) { … }`, starting at the `fn`.
+    ///
+    /// A method gets `self` inserted as its first parameter, which is the whole
+    /// of what makes the receiver implicit — see [`ast::SELF`]. Its span is the
+    /// method's name, since there is no source text to point at and an error
+    /// about `self` should land on the method that has one.
+    fn fn_decl(&mut self, method: bool) -> Result<FnDecl, QuinceError> {
+        self.advance();
+        let (name, name_span) = self.expect_ident("after `fn`")?;
         self.expect(TokenKind::LParen, "after the function name")?;
 
         let mut params = Vec::new();
+        if method {
+            params.push(Param {
+                name: ast::SELF.to_string(),
+                span: name_span,
+            });
+        }
         while !self.check(&TokenKind::RParen) {
             let (name, span) = self.expect_ident("in the parameter list")?;
             params.push(Param { name, span });
@@ -118,13 +143,33 @@ impl Parser {
         self.expect(TokenKind::RParen, "after the parameter list")?;
 
         let body = self.block()?;
-        let span = start.to(body.span);
+        Ok(FnDecl { name, params, body })
+    }
+
+    fn class_stmt(&mut self) -> Result<Stmt, QuinceError> {
+        let start = self.advance().span;
+        let (name, _) = self.expect_ident("after `class`")?;
+        self.expect(TokenKind::LBrace, "after the class name")?;
+
+        let mut methods = Vec::new();
+        while !self.check(&TokenKind::RBrace) && !self.at_end() {
+            if !self.check(&TokenKind::Fn) {
+                return Err(QuinceError::new(
+                    format!("expected a method, found {}", self.peek().kind),
+                    self.peek().span,
+                ));
+            }
+            methods.push(std::rc::Rc::new(self.fn_decl(true)?));
+        }
+        let end = self.expect(TokenKind::RBrace, "after the class body")?.span;
+
         Ok(Stmt {
-            kind: StmtKind::Fn {
-                decl: std::rc::Rc::new(FnDecl { name, params, body }),
+            kind: StmtKind::Class {
+                name,
+                methods,
                 slot: None,
             },
-            span,
+            span: start.to(end),
         })
     }
 
@@ -394,6 +439,10 @@ impl Parser {
             TokenKind::False => ExprKind::Bool(false),
             TokenKind::Nil => ExprKind::Nil,
             TokenKind::Ident(name) => ExprKind::Var(Var::new(name)),
+            // An ordinary variable reference from here on. The parser put the
+            // binding in place as a parameter, so nothing else has to know that
+            // this name arrived as a keyword.
+            TokenKind::SelfKw => ExprKind::Var(Var::new(ast::SELF)),
 
             TokenKind::LParen => {
                 let inner = self.expression()?;
@@ -945,6 +994,62 @@ mod tests {
         assert_eq!(
             &src[stmts[0].span.start as usize..stmts[0].span.end as usize],
             src
+        );
+    }
+
+    #[test]
+    fn a_method_gets_self_as_its_first_parameter() {
+        // The whole of what makes the receiver implicit: everything downstream
+        // sees an ordinary parameter list.
+        let stmts = parse_ok("class C {\n fn m(a, b) { return a }\n}");
+        let StmtKind::Class { name, methods, .. } = &stmts[0].kind else {
+            panic!("expected a class");
+        };
+        assert_eq!(name, "C");
+        assert_eq!(methods.len(), 1);
+
+        let params: Vec<_> = methods[0].params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(params, ["self", "a", "b"]);
+    }
+
+    #[test]
+    fn a_plain_function_gets_no_self() {
+        let stmts = parse_ok("fn f(a) { return a }");
+        let StmtKind::Fn { decl, .. } = &stmts[0].kind else {
+            panic!("expected a function");
+        };
+        let params: Vec<_> = decl.params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(params, ["a"]);
+    }
+
+    #[test]
+    fn self_parses_as_an_ordinary_variable() {
+        let stmts = parse_ok("class C {\n fn m() { return self.x }\n}");
+        let StmtKind::Class { methods, .. } = &stmts[0].kind else {
+            panic!("expected a class");
+        };
+        let StmtKind::Return(Some(expr)) = &methods[0].body.stmts[0].kind else {
+            panic!("expected a return");
+        };
+        assert_eq!(sexpr(expr), "(. self x)");
+    }
+
+    #[test]
+    fn an_empty_class_is_allowed() {
+        let stmts = parse_ok("class C {}");
+        let StmtKind::Class { methods, .. } = &stmts[0].kind else {
+            panic!("expected a class");
+        };
+        assert!(methods.is_empty());
+    }
+
+    #[test]
+    fn a_class_body_holds_only_methods() {
+        // A `let` in a class body would otherwise parse as a statement and then
+        // silently do nothing, since there is nowhere for it to go.
+        assert_eq!(
+            parse_err("class C {\n let x = 1\n}").message,
+            "expected a method, found let"
         );
     }
 
