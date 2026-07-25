@@ -361,6 +361,101 @@ Rust and imaginary here, and deciding it when dicts actually landed — rather t
 pre-emptively adopting Rust's restriction — is what avoided importing a limitation
 Quince had no reason to have.
 
+## Dispatch — where behaviour lives
+
+Written before the code, which is unusual for this document and deliberate here.
+Methods, string operations, and classes all need the same mechanism, and it is far
+cheaper to agree on its shape once than to grow three versions of it and reconcile
+them. The section directly above is the argument for *not* deciding early; the
+difference is that this decision has three known callers rather than one imagined one.
+
+Two questions get conflated, and separating them settles most of the design:
+
+- Can Quince programs define new types? — a language question.
+- Can new types be added to the Rust source easily? — an implementation question.
+
+**They are independent, and only the first one matters to users.** Every user-defined
+type shares a single Rust representation:
+
+```rust
+Value::Instance(ObjId)   // Object::Instance { class: ObjId, fields: Dict }
+Value::Class(ObjId)      // Object::Class(Class)
+```
+
+Two `Object` variants, and the language above them can define types without limit.
+`Dict` is already the right field store, and `trace` for both is a handful of lines.
+So the closed enum costs user types nothing, while keeping the property that makes the
+collector safe: adding an `Object` variant fails to compile until `trace` handles it.
+
+### The cost that is real
+
+Adding dicts touched eighteen lines naming `Value::Dict` or `Object::Dict` across
+`value.rs`, `heap.rs`, and `interp.rs`, outside `dict.rs` itself. None of it was hard;
+it was simply everywhere. That is affordable at five builtin types and stops being
+affordable the moment behaviour has to be looked up rather than matched on — which is
+what a user-defined type is.
+
+The missing indirection is one that methods need anyway: **every value must be able to
+name its type as a value.**
+
+```rust
+pub enum Class {
+    Builtin(&'static BuiltinType),   // known statically, allocates nothing
+    User(ObjId),                     // Object::Class, with parent: Option<ObjId>
+}
+
+pub struct BuiltinType {
+    pub name: &'static str,
+    pub methods: &'static [(&'static str, &'static Native)],
+}
+
+impl Value {
+    pub fn class(&self) -> Class { /* one exhaustive match */ }
+}
+```
+
+`type_name` collapses into this rather than sitting beside it. Method lookup becomes a
+single path: a linear scan of a static slice for builtins — at this size that beats a
+`HashMap` and stays const-constructible — and a map lookup walking `parent` for user
+classes. Inheritance falls out of the lookup instead of being bolted onto it later,
+which is the reason to fix the table's shape *before* classes rather than after.
+
+`NativeFn` already takes `&[Value]`, so a method is a native whose receiver is
+`args[0]`. Free functions and methods share one signature, and the table holds the
+`Native` that already exists.
+
+### What stays a match
+
+Not everything should move into the table. `handle`, `is_truthy`, `equals`, `display`,
+and `trace` are small, total, and exhaustively checked. Turning them into function
+pointers would buy nothing — their behaviour genuinely is known statically for every
+builtin — and would cost the compile error that appears when a variant is added.
+Exhaustiveness is the feature; spending it for symmetry is a bad trade. When user
+classes want to override equality or printing, that is one arm inside an existing
+match, not a redesign.
+
+Indexing, iteration, `len`, and `in` are the genuine judgment call, since they are
+protocols a user class will eventually want to implement. They stay matches until
+classes exist, and then gain protocol slots on `Class` alone, leaving the builtin path
+untouched.
+
+### The signature that has to break
+
+`NativeFn` receives `&mut Heap` but not the interpreter, so a builtin cannot call back
+into Quince. Nothing today needs to. `sort(list, key)`, `map`, `filter`, any
+user-supplied comparator, and every method on a user class all do. The parameter wants
+to become `&mut Interp`, with output reachable through it.
+
+That change is cheap across seven builtins and expensive across a populated method
+table, so it belongs to the same work that introduces the table — not before it, and
+not after.
+
+### Sequencing
+
+None of this gets built speculatively. It arrives as the machinery that makes
+`x.push(1)` work, with `Class::User` present from the start as a variant that nothing
+constructs yet, so that classes slot into a shape already built to hold them.
+
 ## Roadmap
 
 **v0.1 — walking skeleton**
@@ -408,7 +503,8 @@ Control flow (`if`/`while`/`for`), functions, closures, proper scoping.
 Lists, dicts, strings with methods, indexing, iteration.
 
 Lists and dicts are done, with indexing, iteration, concatenation, and membership.
-Methods are the remainder, and they need dispatch before anything else.
+Methods are the remainder, and they need dispatch before anything else — see Dispatch
+above, which is written ahead of the code precisely because v0.4 reuses all of it.
 
 **v0.4 — objects**
 Classes, methods, inheritance, `self`.
