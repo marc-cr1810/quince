@@ -81,6 +81,11 @@ impl Globals {
         self.vars.get(name).map(|binding| &binding.value)
     }
 
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &Value)> {
+        self.vars.iter().map(|(name, binding)| (name.as_str(), &binding.value))
+    }
+
+
     pub fn assign(&mut self, name: &str, value: Value) -> Result<(), AssignError> {
         match self.vars.get_mut(name) {
             None => Err(AssignError::Undefined),

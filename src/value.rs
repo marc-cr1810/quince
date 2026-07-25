@@ -271,6 +271,70 @@ impl Value {
         }
     }
 
+    /// How a value prints with multiline formatting for large or nested collections.
+    pub fn display_pretty(&self, heap: &Heap, color: bool) -> String {
+        let single = self.display_styled(heap, color);
+        if single.len() <= 60 {
+            return single;
+        }
+        match self {
+            Value::List(_) | Value::Dict(_) => self.format_pretty(heap, color, 0),
+            _ => single,
+        }
+    }
+
+    fn format_pretty(&self, heap: &Heap, color: bool, indent: usize) -> String {
+        let pad = "    ".repeat(indent);
+        let inner_pad = "    ".repeat(indent + 1);
+        match self {
+            Value::List(id) => {
+                let items = heap.list(*id);
+                if items.is_empty() {
+                    return format!("{}{}", Style::BOLD.paint("[", color), Style::BOLD.paint("]", color));
+                }
+                let mut lines = Vec::new();
+                for item in items {
+                    let formatted = match item {
+                        Value::List(_) | Value::Dict(_) => item.format_pretty(heap, color, indent + 1),
+                        _ => format!("{inner_pad}{}", item.repr_styled(heap, color)),
+                    };
+                    lines.push(formatted);
+                }
+                format!(
+                    "{}\n{}\n{}{}",
+                    Style::BOLD.paint("[", color),
+                    lines.join(",\n"),
+                    pad,
+                    Style::BOLD.paint("]", color)
+                )
+            }
+            Value::Dict(id) => {
+                let dict = heap.dict(*id);
+                if dict.is_empty() {
+                    return format!("{}{}", Style::BOLD.paint("{", color), Style::BOLD.paint("}", color));
+                }
+                let mut lines = Vec::new();
+                for (key, val) in dict.iter() {
+                    let key_str = key.to_value().repr_styled(heap, color);
+                    let val_str = match val {
+                        Value::List(_) | Value::Dict(_) => val.format_pretty(heap, color, indent + 1),
+                        _ => val.repr_styled(heap, color),
+                    };
+                    lines.push(format!("{inner_pad}{key_str}: {val_str}"));
+                }
+                format!(
+                    "{}\n{}\n{}{}",
+                    Style::BOLD.paint("{", color),
+                    lines.join(",\n"),
+                    pad,
+                    Style::BOLD.paint("}", color)
+                )
+            }
+            _ => format!("{pad}{}", self.display_styled(heap, color)),
+        }
+    }
+
+
     /// The name to print for something callable, which is the only thing the
     /// three callable forms have in common.
     pub fn callable_name<'h>(&self, heap: &'h Heap) -> &'h str {

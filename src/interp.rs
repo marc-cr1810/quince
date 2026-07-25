@@ -152,6 +152,15 @@ impl Interp {
         Ok(last)
     }
 
+    pub fn get_globals(&self) -> Vec<(String, Value)> {
+        self.heap
+            .globals(self.globals)
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    }
+
+
     // -- garbage collection ------------------------------------------------
 
     /// Collects, if the heap has grown enough to be worth it.
