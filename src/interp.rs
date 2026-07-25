@@ -292,6 +292,74 @@ impl Interp {
 
     // -- expressions -------------------------------------------------------
 
+    /// Evaluates several expressions in order, keeping the results already
+    /// computed rooted while the remaining ones run.
+    ///
+    /// Every sub-expression after the first can reach a safe point — one
+    /// argument that calls a function is enough — and until the caller stores
+    /// them, the values computed so far exist only in this Rust frame. Without
+    /// this, `[mk(), churn()]` collects `mk()`'s list and hands back a handle
+    /// into a reused slot.
+    ///
+    /// The caller gets the values back unrooted, so it must consume them
+    /// without reaching another safe point. Every caller allocates or binds
+    /// immediately, which is what makes that safe.
+    ///
+    /// Only values that carry a handle are rooted. An `int` or a `bool` is
+    /// inline and cannot be collected, and a string is reference counted
+    /// outside the heap — so the common arithmetic path pays a discriminant
+    /// check and nothing more.
+    fn eval_seq<'e>(
+        &mut self,
+        exprs: impl IntoIterator<Item = &'e Expr>,
+        env: ObjId,
+    ) -> Result<Vec<Value>, QuinceError> {
+        let exprs = exprs.into_iter();
+        let mark = self.temps.len();
+        let mut values = Vec::with_capacity(exprs.size_hint().0);
+        for expr in exprs {
+            match self.eval(expr, env) {
+                Ok(value) => {
+                    if value.handle().is_some() {
+                        self.temps.push(value.clone());
+                    }
+                    values.push(value);
+                }
+                Err(err) => {
+                    self.temps.truncate(mark);
+                    return Err(err);
+                }
+            }
+        }
+        self.temps.truncate(mark);
+        Ok(values)
+    }
+
+    /// [`Interp::eval_seq`] for the two-operand case, which is every binary
+    /// operator and every subscript.
+    ///
+    /// Spelled out rather than delegating, because the `Vec` that version
+    /// returns would be a heap allocation on every single arithmetic operation.
+    fn eval_pair(
+        &mut self,
+        first: &Expr,
+        second: &Expr,
+        env: ObjId,
+    ) -> Result<(Value, Value), QuinceError> {
+        let first = self.eval(first, env)?;
+
+        // Only the second operand can reach a safe point, and only a handle can
+        // be collected once it does.
+        let mark = self.temps.len();
+        if first.handle().is_some() {
+            self.temps.push(first.clone());
+        }
+        let second = self.eval(second, env);
+        self.temps.truncate(mark);
+
+        Ok((first, second?))
+    }
+
     fn eval(&mut self, expr: &Expr, env: ObjId) -> Result<Value, QuinceError> {
         match &expr.kind {
             ExprKind::Int(n) => Ok(Value::Int(*n)),
@@ -303,10 +371,7 @@ impl Interp {
             ExprKind::Var(var) => self.read(var, env, expr.span),
 
             ExprKind::List(items) => {
-                let values = items
-                    .iter()
-                    .map(|item| self.eval(item, env))
-                    .collect::<Result<Vec<_>, _>>()?;
+                let values = self.eval_seq(items, env)?;
                 Ok(Value::List(self.heap.alloc(Object::List(values))))
             }
 
@@ -316,8 +381,7 @@ impl Interp {
             }
 
             ExprKind::Binary { op, lhs, rhs } => {
-                let lhs = self.eval(lhs, env)?;
-                let rhs = self.eval(rhs, env)?;
+                let (lhs, rhs) = self.eval_pair(lhs, rhs, env)?;
                 self.binary(*op, lhs, rhs, expr.span)
             }
 
@@ -338,17 +402,22 @@ impl Interp {
 
             ExprKind::Call { callee, args } => {
                 let target = self.eval(callee, env)?;
-                let values = args
-                    .iter()
-                    .map(|arg| self.eval(arg, env))
-                    .collect::<Result<Vec<_>, _>>()?;
-                self.call(target, values, expr.span)
+                // The callee is held across every argument, any of which can
+                // reach a safe point, and a closure built by an expression is
+                // reachable from nowhere else. Kept out of `eval_seq` so the
+                // argument vector stays exactly as long as the call needs.
+                let mark = self.temps.len();
+                if target.handle().is_some() {
+                    self.temps.push(target.clone());
+                }
+                let values = self.eval_seq(args, env);
+                self.temps.truncate(mark);
+                self.call(target, values?, expr.span)
             }
 
             ExprKind::Index { target, index } => {
-                let target_value = self.eval(target, env)?;
-                let index_value = self.eval(index, env)?;
-                let (id, offset) = self.list_index(&target_value, &index_value, expr.span)?;
+                let (target, index) = self.eval_pair(target, index, env)?;
+                let (id, offset) = self.list_index(&target, &index, expr.span)?;
                 Ok(self.heap.list(id)[offset].clone())
             }
 
@@ -432,8 +501,14 @@ impl Interp {
                 target: list,
                 index,
             } => {
-                let list_value = self.eval(list, env)?;
-                let index_value = self.eval(index, env)?;
+                // `value` was evaluated by the caller and is held across two
+                // more evaluations, either of which can reach a safe point.
+                let mark = self.temps.len();
+                self.temps.push(value.clone());
+                let evaluated = self.eval_pair(list, index, env);
+                self.temps.truncate(mark);
+                let (list_value, index_value) = evaluated?;
+
                 let (id, offset) = self.list_index(&list_value, &index_value, target.span)?;
                 self.heap.list_mut(id)[offset] = value.clone();
                 Ok(value)
@@ -813,6 +888,94 @@ mod tests {
 
         assert!(interp.heap.collections > 0, "the collector never ran");
         assert_eq!(global(&interp, "total"), Some(Value::Int(3)));
+    }
+
+    /// Churns enough objects to force several collections, then returns `value`.
+    fn churn(value: &str) -> String {
+        format!(
+            "fn churn() {{\n\
+             let i = 0\n\
+             while i < 3000 {{ let junk = [0]; i = i + 1 }}\n\
+             return {value}\n\
+             }}\n"
+        )
+    }
+
+    #[test]
+    fn a_list_element_survives_evaluating_a_later_one() {
+        // `mk()`'s list lives only in `eval_seq`'s Rust-local `Vec` while
+        // `churn()` runs. Unrooted, its slot was reused by a scope and `len`
+        // panicked with "expected a list, found Env".
+        let interp = run(&format!(
+            "fn mk() {{ return [1, 2, 3] }}\n\
+             {}\
+             let pair = [mk(), churn()]\n\
+             let kept = len(pair[0])",
+            churn("0")
+        ));
+
+        assert!(interp.heap.collections > 0, "the collector never ran");
+        assert_eq!(global(&interp, "kept"), Some(Value::Int(3)));
+    }
+
+    #[test]
+    fn an_operand_survives_evaluating_the_other() {
+        // Structural equality reads both lists out of the heap, so a collected
+        // left operand is a panic rather than a wrong answer.
+        let interp = run(&format!(
+            "fn mk() {{ return [1, 2, 3] }}\n\
+             {}\
+             let same = mk() == churn()",
+            churn("[1, 2, 3]")
+        ));
+
+        assert!(interp.heap.collections > 0, "the collector never ran");
+        assert_eq!(global(&interp, "same"), Some(Value::Bool(true)));
+    }
+
+    #[test]
+    fn an_argument_survives_evaluating_a_later_argument() {
+        let interp = run(&format!(
+            "fn mk() {{ return [1, 2, 3] }}\n\
+             fn first(a, b) {{ return a }}\n\
+             {}\
+             let kept = len(first(mk(), churn()))",
+            churn("0")
+        ));
+
+        assert!(interp.heap.collections > 0, "the collector never ran");
+        assert_eq!(global(&interp, "kept"), Some(Value::Int(3)));
+    }
+
+    #[test]
+    fn the_callee_survives_evaluating_the_arguments() {
+        // A closure built by an expression is reachable from nowhere but the
+        // Rust frame until the call actually begins.
+        let interp = run(&format!(
+            "fn make() {{ fn id(x) {{ return x }} return id }}\n\
+             {}\
+             let kept = make()(churn())",
+            churn("7")
+        ));
+
+        assert!(interp.heap.collections > 0, "the collector never ran");
+        assert_eq!(global(&interp, "kept"), Some(Value::Int(7)));
+    }
+
+    #[test]
+    fn an_assigned_value_survives_evaluating_its_target() {
+        // `xs[churn()] = mk()` evaluates the value first, then the target.
+        let interp = run(&format!(
+            "fn mk() {{ return [1, 2, 3] }}\n\
+             {}\
+             let xs = [0, 0]\n\
+             xs[churn()] = mk()\n\
+             let kept = len(xs[1])",
+            churn("1")
+        ));
+
+        assert!(interp.heap.collections > 0, "the collector never ran");
+        assert_eq!(global(&interp, "kept"), Some(Value::Int(3)));
     }
 
     #[test]

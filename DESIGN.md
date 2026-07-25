@@ -72,18 +72,45 @@ each statement. There, the live set is small and nameable:
   it came from, not off its caller, so the caller's scope is unreachable from the
   callee and each active frame has to be a root of its own. `exec_scoped` is the
   only place a scope is entered, which is what keeps this list complete.
-- values a frame holds across a nested statement. There is one: the snapshot
-  `for` takes of the list it iterates, whose items may be dropped from the
-  original list by the loop body.
+- **every value an expression is holding while a sibling sub-expression runs.**
 
-The tests deliberately break each half of that root set to confirm the suite
-notices — an untested collector is indistinguishable from a broken one.
+That last one was originally believed to be a single special case — the snapshot
+`for` takes of the list it iterates. It is not, and the reason is worth writing
+down, because the mistake is easy to make twice.
+
+Restricting collection to statement boundaries does *not* mean an expression
+never sees one. A call is an expression that runs statements, so any
+sub-expression that calls a function reaches a safe point, with the results of
+its earlier siblings sitting unrooted in an `eval` frame. `[mk(), churn()]` was
+enough: `mk()`'s list was collected during `churn()`, its slot reused by a
+scope, and the handle left pointing at the wrong kind of object. In a less
+lucky allocation order it would have returned a plausible wrong answer instead
+of panicking.
+
+The fix is `eval_seq` / `eval_pair`, which every multi-operand form now goes
+through — list literals, binary operators, subscripts, call arguments, the
+callee, and the value in an indexed assignment. Each roots what it has already
+computed for as long as it has more to evaluate.
+
+Two things keep the cost of that down. Only values carrying a handle are
+rooted, since an `int` cannot be collected and a string is reference counted
+outside the heap; and the two-operand case is written out by hand, because
+returning a `Vec` from every arithmetic operation is a heap allocation per
+`+`. What is left is about 15% on `fib(25)`, against no measurable cost — a
+slight gain, in fact — on an allocation-heavy loop.
+
+Every root has a test that fails when that root alone is removed. This is
+checked by actually deleting each one and running the suite, because an
+untested collector is indistinguishable from a broken one, and because the bug
+above sat behind a green suite for two releases.
 
 The cost of this design is that a tight expression can allocate without ever
 collecting; `[[[[…]]]]` is bounded by the source text, so the exposure is a
-program's nesting depth rather than its runtime. A bytecode VM would fix this
-properly, because its operands live on a stack the collector owns rather than on
-Rust's — which is one of the better arguments for building one.
+program's nesting depth rather than its runtime. A bytecode VM would fix all of
+this properly, because its operands live on a stack the collector owns rather
+than on Rust's. The rooting above is precisely the bookkeeping a VM gets for
+free, and having had to write it by hand — after getting it wrong — is the
+strongest argument yet for building one.
 
 ## Architecture
 
