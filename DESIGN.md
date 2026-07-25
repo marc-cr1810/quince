@@ -584,9 +584,9 @@ and `in`. Adding them turned up a use-after-free in the collector that had been
 there since it landed — see Collection — so the root set grew to cover intermediate
 expression values at the same time.
 
-Still missing: `try`/`catch`, classes, and methods on strings, lists, and dicts.
-`push`, `keys`, `values`, and `remove` are free functions standing in for the
-methods they will become once there is dispatch to hang them off. There are no
+Still missing: `try`/`catch` and classes. `push`, `keys`, `values`, and `remove`
+began as free functions standing in for methods; dispatch landed and they moved onto
+their types, leaving `print`, `len`, and `type` as the only globals. There are no
 tuples, which is why iterating a dict yields keys rather than pairs. The REPL is
 line-at-a-time and continues reading when a parse fails at end of input, which is a
 heuristic rather than a real incremental parser.
@@ -606,7 +606,9 @@ Lists and dicts are done, with indexing, iteration, concatenation, and membershi
 Dispatch is done too — see Dispatch above — so `list` and `dict` have methods and the
 globals that stood in for them are gone.
 
-Strings are done too — indexing, slicing, and nine methods — so **v0.3 is complete**.
+Strings are done too — indexing, slicing, and nine methods — so **v0.3 is complete**,
+with one asterisk: iterating a dict yields keys rather than key/value pairs, because
+there is no tuple to yield. That waits on tuples, not on anything in this milestone.
 See Strings above for what the character-versus-byte decision cost and bought.
 
 Slicing was the only part that was not just filling in the table: it needed a `Slice`
