@@ -1,6 +1,8 @@
+# Arithmetic, including the two division operators.
 print(1 + 2 * 3)
 print((1 + 2) * 3)
 print(7 / 2)
+print(4 / 2)
 print(7 % 2)
 print(7.0 / 2)
 print(2 + 1.5)

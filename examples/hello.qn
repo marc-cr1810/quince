@@ -1,3 +1,4 @@
+# The obligatory first program.
 fn greet(name) {
     return "hello, " + name
 }

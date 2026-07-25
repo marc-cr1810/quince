@@ -29,6 +29,7 @@ fn infix_op(kind: &TokenKind) -> Option<(InfixOp, u8, u8)> {
         TokenKind::Minus => (InfixOp::Binary(BinaryOp::Sub), 9),
         TokenKind::Star => (InfixOp::Binary(BinaryOp::Mul), 11),
         TokenKind::Slash => (InfixOp::Binary(BinaryOp::Div), 11),
+        TokenKind::SlashSlash => (InfixOp::Binary(BinaryOp::FloorDiv), 11),
         TokenKind::Percent => (InfixOp::Binary(BinaryOp::Rem), 11),
         _ => return None,
     };
@@ -532,6 +533,7 @@ mod tests {
                     BinaryOp::Sub => "-",
                     BinaryOp::Mul => "*",
                     BinaryOp::Div => "/",
+                    BinaryOp::FloorDiv => "//",
                     BinaryOp::Rem => "%",
                     BinaryOp::Eq => "==",
                     BinaryOp::Ne => "!=",

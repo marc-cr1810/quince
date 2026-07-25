@@ -13,7 +13,10 @@ pub enum BinaryOp {
     Add,
     Sub,
     Mul,
+    /// True division: always produces a float, as in Python 3.
     Div,
+    /// Floor division: `int // int` stays an int.
+    FloorDiv,
     Rem,
     Eq,
     Ne,

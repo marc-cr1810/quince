@@ -451,8 +451,21 @@ fn as_float(value: &Value) -> f64 {
     }
 }
 
-/// Integer arithmetic. Division truncates toward zero and, like the rest of
-/// these, reports overflow rather than wrapping.
+/// Rounds toward negative infinity, which Rust's `/` does not — it truncates
+/// toward zero, so `-7 / 2` is `-3` there but `-4` here.
+///
+/// `div_euclid` is not the same thing: it keeps the remainder non-negative, so
+/// it disagrees whenever the divisor is negative.
+fn floor_div(a: i64, b: i64) -> Option<i64> {
+    let quotient = a.checked_div(b)?;
+    if a % b != 0 && (a < 0) != (b < 0) {
+        quotient.checked_sub(1)
+    } else {
+        Some(quotient)
+    }
+}
+
+/// Integer arithmetic. Reports overflow rather than wrapping.
 fn int_op(op: BinaryOp, a: i64, b: i64, span: Span) -> Result<Value, QuinceError> {
     use BinaryOp::*;
     let overflow = || QuinceError::new("integer overflow", span);
@@ -461,11 +474,19 @@ fn int_op(op: BinaryOp, a: i64, b: i64, span: Span) -> Result<Value, QuinceError
         Add => Value::Int(a.checked_add(b).ok_or_else(overflow)?),
         Sub => Value::Int(a.checked_sub(b).ok_or_else(overflow)?),
         Mul => Value::Int(a.checked_mul(b).ok_or_else(overflow)?),
+        // True division always leaves the integers behind, so `1 / 2` is `0.5`
+        // rather than `0`. `//` is there when an int is wanted.
         Div => {
             if b == 0 {
                 return Err(QuinceError::new("division by zero", span));
             }
-            Value::Int(a.checked_div(b).ok_or_else(overflow)?)
+            Value::Float(a as f64 / b as f64)
+        }
+        FloorDiv => {
+            if b == 0 {
+                return Err(QuinceError::new("division by zero", span));
+            }
+            Value::Int(floor_div(a, b).ok_or_else(overflow)?)
         }
         Rem => {
             if b == 0 {
@@ -491,6 +512,8 @@ fn float_op(op: BinaryOp, a: f64, b: f64, span: Span) -> Result<Value, QuinceErr
         // Kept an error rather than yielding infinity, to match integer division.
         Div if b == 0.0 => return Err(QuinceError::new("division by zero", span)),
         Div => Value::Float(a / b),
+        FloorDiv if b == 0.0 => return Err(QuinceError::new("division by zero", span)),
+        FloorDiv => Value::Float((a / b).floor()),
         Rem if b == 0.0 => return Err(QuinceError::new("division by zero", span)),
         Rem => Value::Float(a % b),
         Lt => Value::Bool(a < b),
@@ -508,7 +531,7 @@ fn type_error(op: BinaryOp, lhs: &Value, rhs: &Value, span: Span) -> QuinceError
         Add => "add",
         Sub => "subtract",
         Mul => "multiply",
-        Div => "divide",
+        Div | FloorDiv => "divide",
         Rem => "take the remainder of",
         Lt | Le | Gt | Ge => "compare",
         Eq | Ne => unreachable!("equality is defined for every type"),

@@ -51,6 +51,7 @@ pub enum TokenKind {
     Minus,
     Star,
     Slash,
+    SlashSlash,
     Percent,
 
     Assign,
@@ -126,6 +127,7 @@ impl fmt::Display for TokenKind {
             TokenKind::Minus => write!(f, "-"),
             TokenKind::Star => write!(f, "*"),
             TokenKind::Slash => write!(f, "/"),
+            TokenKind::SlashSlash => write!(f, "//"),
             TokenKind::Percent => write!(f, "%"),
 
             TokenKind::Assign => write!(f, "="),

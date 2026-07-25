@@ -44,6 +44,7 @@ impl<'a> Lexer<'a> {
                 '+' => TokenKind::Plus,
                 '-' => TokenKind::Minus,
                 '*' => TokenKind::Star,
+                '/' if self.eat('/') => TokenKind::SlashSlash,
                 '/' => TokenKind::Slash,
                 '%' => TokenKind::Percent,
 
@@ -121,7 +122,9 @@ impl<'a> Lexer<'a> {
                     newline |= c == '\n';
                     self.advance();
                 }
-                Some('/') if self.peek_next() == Some('/') => {
+                // `#` rather than `//`, which is floor division. This also makes a
+                // `#!` shebang line a comment for free.
+                Some('#') => {
                     // The terminating newline is left for the next iteration so it
                     // still counts as a line break.
                     while let Some(c) = self.peek() {
@@ -323,20 +326,23 @@ mod tests {
     #[test]
     fn comments_and_whitespace_are_skipped() {
         assert_eq!(
-            kinds("let // trailing comment\n x"),
+            kinds("let # trailing comment\n x"),
             vec![TokenKind::Let, TokenKind::Ident("x".into())]
         );
-        assert_eq!(kinds("// only a comment"), vec![]);
+        assert_eq!(kinds("# only a comment"), vec![]);
+        assert_eq!(kinds("#!/usr/bin/env quince\nlet"), vec![TokenKind::Let]);
     }
 
     #[test]
-    fn slash_alone_is_division() {
+    fn one_slash_divides_and_two_floor_divide() {
         assert_eq!(
-            kinds("a / b"),
+            kinds("a / b // c"),
             vec![
                 TokenKind::Ident("a".into()),
                 TokenKind::Slash,
-                TokenKind::Ident("b".into())
+                TokenKind::Ident("b".into()),
+                TokenKind::SlashSlash,
+                TokenKind::Ident("c".into()),
             ]
         );
     }
@@ -357,7 +363,7 @@ mod tests {
 
     #[test]
     fn a_comment_does_not_swallow_its_newline() {
-        let tokens = Lexer::new("a // note\nb").tokenize().unwrap();
+        let tokens = Lexer::new("a # note\nb").tokenize().unwrap();
         assert!(
             tokens[1].newline_before,
             "`b` should still start a new line"

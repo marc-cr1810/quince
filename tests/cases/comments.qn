@@ -1,0 +1,5 @@
+#!/usr/bin/env quince
+# A full-line comment.
+let x = 1 # a trailing comment
+print(x) # another
+# print("not printed")

@@ -1,0 +1,9 @@
+# `//` floors toward negative infinity, unlike C-style truncation.
+print(7 // 2)
+print(-7 // 2)
+print(7 // -2)
+print(-7 // -2)
+print(6 // 3)
+print(7.0 // 2)
+print(type(7 // 2))
+print(type(7 / 2))

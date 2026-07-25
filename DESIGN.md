@@ -117,6 +117,8 @@ for item in [1, 2, 3] {
 - Dynamic typing, optional annotations later (as Zephyr has)
 - `let` / `const` bindings
 - Braces, not significant whitespace — simpler to parse, fewer edge cases
+- `#` line comments, which leaves `//` free for floor division and makes a `#!`
+  shebang line a comment for free
 - Expression-oriented where practical
 
 ### Statement termination
@@ -159,10 +161,12 @@ migration problem later. Annotations are additive and can wait.
 - `int` arithmetic is checked. Overflow is a runtime error, not a silent wrap — the
   same instinct behind Zephyr's overflow protection, for the cost of `checked_add`.
 - Comparison follows the same rule: `1 == 1.0` is true, `1 == "1"` is false.
-- `int / int` truncates and stays an `int`, so `7 / 2` is `3`. Python would give
-  `3.5` and reserve `//` for floor division, but `//` is a comment here, which
-  leaves no operator for integer division. Truncating also matches Zephyr's C++
-  lineage and keeps the operation type-preserving. `7.0 / 2` is `3.5` as expected.
+- Two division operators, as in Python 3. `/` is true division and always yields a
+  float, so `7 / 2` is `3.5` and even `4 / 2` is `2.0`. `//` floors, and keeps ints
+  as ints: `7 // 2` is `3`.
+- `//` floors toward negative infinity rather than truncating toward zero, so
+  `-7 // 2` is `-4`. Rust's own `/` truncates and its `div_euclid` keeps the
+  remainder non-negative, so neither is floor division — it is implemented by hand.
 - Division by zero is an error for floats as well as ints, rather than yielding
   infinity — the same instinct as the overflow rule.
 - Truthiness is Python's: `nil`, `false`, zero, empty string, and empty list are
@@ -204,7 +208,7 @@ parse fails at end of input, which is a heuristic rather than a real incremental
 parser.
 
 Deferred from the lexer, both cheap to add: hex/binary/octal literals (Zephyr has
-them) and block comments (`/* */`, whose nesting behaviour is a real decision).
+them) and block comments (whose nesting behaviour is a real decision).
 The parser stops at the first error; multi-error recovery needs synchronisation
 points and can wait until the grammar stops moving.
 
