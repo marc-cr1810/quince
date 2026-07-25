@@ -603,7 +603,10 @@ impl Interp {
                 if let Some(arity) = native.arity {
                     check_arity(native.name, arity, args.len(), span)?;
                 }
-                (native.func)(&mut self.heap, &mut self.out, &args, span)
+                // `args` lives in this frame and nothing roots it. That is safe
+                // only while no builtin reaches a safe point; the first one to
+                // call back into Quince has to root them here first.
+                (native.func)(self, &args, span)
             }
 
             Value::Function(id) => {
@@ -892,9 +895,12 @@ static BUILTINS: &[&Native] = &[&PRINT, &LEN, &TYPE, &PUSH, &KEYS, &VALUES, &REM
 static PRINT: Native = Native {
     name: "print",
     arity: None,
-    func: |heap, out, args, _span| {
-        let parts: Vec<_> = args.iter().map(|value| value.display(heap)).collect();
-        writeln!(out, "{}", parts.join(" ")).expect("failed to write output");
+    func: |interp, args, _span| {
+        let parts: Vec<_> = args
+            .iter()
+            .map(|value| value.display(&interp.heap))
+            .collect();
+        writeln!(interp.out, "{}", parts.join(" ")).expect("failed to write output");
         Ok(Value::Nil)
     },
 };
@@ -902,10 +908,10 @@ static PRINT: Native = Native {
 static LEN: Native = Native {
     name: "len",
     arity: Some(1),
-    func: |heap, _out, args, span| match &args[0] {
+    func: |interp, args, span| match &args[0] {
         Value::Str(s) => Ok(Value::Int(s.chars().count() as i64)),
-        Value::List(id) => Ok(Value::Int(heap.list(*id).len() as i64)),
-        Value::Dict(id) => Ok(Value::Int(heap.dict(*id).len() as i64)),
+        Value::List(id) => Ok(Value::Int(interp.heap.list(*id).len() as i64)),
+        Value::Dict(id) => Ok(Value::Int(interp.heap.dict(*id).len() as i64)),
         other => Err(QuinceError::new(
             format!("`len` does not apply to {}", other.type_name()),
             span,
@@ -920,9 +926,9 @@ static LEN: Native = Native {
 static PUSH: Native = Native {
     name: "push",
     arity: Some(2),
-    func: |heap, _out, args, span| match &args[0] {
+    func: |interp, args, span| match &args[0] {
         Value::List(id) => {
-            heap.list_mut(*id).push(args[1].clone());
+            interp.heap.list_mut(*id).push(args[1].clone());
             Ok(Value::Nil)
         }
         other => Err(QuinceError::new(
@@ -935,10 +941,10 @@ static PUSH: Native = Native {
 static KEYS: Native = Native {
     name: "keys",
     arity: Some(1),
-    func: |heap, _out, args, span| match &args[0] {
+    func: |interp, args, span| match &args[0] {
         Value::Dict(id) => {
-            let keys: Vec<_> = heap.dict(*id).keys().collect();
-            Ok(Value::List(heap.alloc(Object::List(keys))))
+            let keys: Vec<_> = interp.heap.dict(*id).keys().collect();
+            Ok(Value::List(interp.heap.alloc(Object::List(keys))))
         }
         other => Err(QuinceError::new(
             format!("`keys` needs a dict, but was given {}", other.type_name()),
@@ -950,10 +956,10 @@ static KEYS: Native = Native {
 static VALUES: Native = Native {
     name: "values",
     arity: Some(1),
-    func: |heap, _out, args, span| match &args[0] {
+    func: |interp, args, span| match &args[0] {
         Value::Dict(id) => {
-            let values: Vec<_> = heap.dict(*id).values().cloned().collect();
-            Ok(Value::List(heap.alloc(Object::List(values))))
+            let values: Vec<_> = interp.heap.dict(*id).values().cloned().collect();
+            Ok(Value::List(interp.heap.alloc(Object::List(values))))
         }
         other => Err(QuinceError::new(
             format!("`values` needs a dict, but was given {}", other.type_name()),
@@ -967,12 +973,12 @@ static VALUES: Native = Native {
 static REMOVE: Native = Native {
     name: "remove",
     arity: Some(2),
-    func: |heap, _out, args, span| match &args[0] {
+    func: |interp, args, span| match &args[0] {
         Value::Dict(id) => {
             let key = key_of(&args[1], span)?;
-            heap.dict_mut(*id).remove(&key).ok_or_else(|| {
+            interp.heap.dict_mut(*id).remove(&key).ok_or_else(|| {
                 QuinceError::new(
-                    format!("key {} is not in the dict", args[1].repr(heap)),
+                    format!("key {} is not in the dict", args[1].repr(&interp.heap)),
                     span,
                 )
             })
@@ -987,7 +993,7 @@ static REMOVE: Native = Native {
 static TYPE: Native = Native {
     name: "type",
     arity: Some(1),
-    func: |_heap, _out, args, _span| Ok(Value::Str(Rc::from(args[0].type_name()))),
+    func: |_interp, args, _span| Ok(Value::Str(Rc::from(args[0].type_name()))),
 };
 
 #[cfg(test)]

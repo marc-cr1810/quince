@@ -4,6 +4,7 @@ use std::rc::Rc;
 use crate::ast::FnDecl;
 use crate::error::QuinceError;
 use crate::heap::{Heap, ObjId};
+use crate::interp::Interp;
 use crate::token::Span;
 
 /// A user-defined function together with the scope it closed over.
@@ -13,10 +14,17 @@ pub struct Function {
     pub env: ObjId,
 }
 
-/// The signature every builtin implements. `out` is threaded through so the
-/// interpreter's output can be redirected, which is what lets tests capture it.
-pub type NativeFn =
-    fn(&mut Heap, &mut dyn std::io::Write, &[Value], Span) -> Result<Value, QuinceError>;
+/// The signature every builtin implements.
+///
+/// The whole interpreter is threaded through rather than just the heap, so that
+/// a builtin can call back into Quince. Nothing does yet, but anything taking a
+/// function argument — `sort` with a key, `map`, `filter` — needs to, as does
+/// every method on a user-defined class. Widening the signature costs one line
+/// per builtin today and grows with the method table, so it is done early.
+///
+/// Output is reached through the interpreter too, which is what lets tests
+/// capture what a program prints.
+pub type NativeFn = fn(&mut Interp, &[Value], Span) -> Result<Value, QuinceError>;
 
 /// A function implemented in Rust.
 pub struct Native {
