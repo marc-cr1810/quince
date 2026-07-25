@@ -76,7 +76,9 @@ impl Resolver {
         }
         for stmt in stmts {
             match &stmt.kind {
-                StmtKind::Let { name, mutable, .. } => self.declare(name, *mutable, stmt.span)?,
+                StmtKind::Let { name, bind, .. } => {
+                    self.declare(name, bind.mutable(), stmt.span)?
+                }
                 StmtKind::Fn { decl, .. } => self.declare(&decl.name, false, stmt.span)?,
                 StmtKind::Class { name, .. } => self.declare(name, false, stmt.span)?,
                 _ => {}
@@ -350,14 +352,19 @@ impl Resolver {
 
             ExprKind::Assign { target, value } => {
                 self.expr(value)?;
-                // A `const` local is known to be immutable here, so the error
-                // arrives before the program runs. Globals keep their run-time
-                // check, since the binding may not exist yet.
+                // A `final` or `const` local is known to be immutable here, so
+                // the error arrives before the program runs. Globals keep their
+                // run-time check, since the binding may not exist yet.
+                //
+                // The message says "reassign" rather than naming the keyword:
+                // only the *name* is being refused here, and `const` refuses
+                // rather more than that. Saying so would blur the line the two
+                // forms exist to draw.
                 if let ExprKind::Var(var) = &target.kind
                     && let Some((_, false)) = self.find(&var.name)
                 {
                     return Err(QuinceError::new(
-                        format!("cannot assign to constant `{}`", var.name),
+                        format!("cannot reassign `{}`", var.name),
                         target.span,
                     ));
                 }
@@ -664,19 +671,24 @@ mod tests {
     }
 
     #[test]
-    fn assigning_to_a_constant_local_is_caught_before_running() {
+    fn reassigning_a_bound_local_is_caught_before_running() {
         // The assignment is unreachable, which is the point: a run-time check
         // would never have seen it.
         assert_eq!(
+            resolve_err("fn f() { final k = 1\n if false { k = 2 } }"),
+            "cannot reassign `k`"
+        );
+        assert_eq!(
             resolve_err("fn f() { const k = 1\n if false { k = 2 } }"),
-            "cannot assign to constant `k`"
+            "cannot reassign `k`",
+            "`const` binds the name too"
         );
     }
 
     #[test]
-    fn a_constant_global_is_left_to_the_evaluator() {
+    fn a_bound_global_is_left_to_the_evaluator() {
         // Globals may not exist yet when the resolver runs, so their mutability
         // is not knowable here.
-        resolved("const k = 1\nk = 2");
+        resolved("final k = 1\nk = 2");
     }
 }

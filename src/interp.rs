@@ -194,11 +194,17 @@ impl Interp {
             StmtKind::Let {
                 name,
                 value,
-                mutable,
+                bind,
                 slot,
             } => {
                 let value = self.eval(value, env)?;
-                self.bind(slot, name, value, *mutable, env);
+                // Freezing before binding, so that a `const` can never be
+                // observed thawed — not that anything runs in between, but the
+                // order is the thing a reader checks first.
+                if bind.freezes() {
+                    self.heap.freeze(&value);
+                }
+                self.bind(slot, name, value, bind.mutable(), env);
                 Ok(Flow::Normal)
             }
 
@@ -685,7 +691,7 @@ impl Interp {
                             }
                             Err(AssignError::Immutable) => {
                                 return Err(QuinceError::new(
-                                    format!("cannot assign to constant `{name}`"),
+                                    format!("cannot reassign `{name}`"),
                                     target.span,
                                 ));
                             }
@@ -711,13 +717,24 @@ impl Interp {
                     // Assigning to a missing key inserts it, where assigning
                     // past the end of a list stays an error: a list's indices
                     // are positions, and there is no meaningful gap to fill.
+                    // The mutation happens inside the `map` so that the borrow
+                    // it needs has ended by the time the error — which reads
+                    // the heap to name the type — is built.
                     Value::Dict(id) => {
                         let key = key_of(&self.heap, &index, target.span)?;
-                        self.heap.dict_mut(*id).insert(key, value.clone());
+                        let written = self
+                            .heap
+                            .dict_mut(*id)
+                            .map(|entries| entries.insert(key, value.clone()));
+                        written.map_err(|_| frozen(&self.heap, &collection, target.span))?;
                     }
                     _ => {
                         let (id, offset) = self.list_index(&collection, &index, target.span)?;
-                        self.heap.list_mut(id)[offset] = value.clone();
+                        let written = self
+                            .heap
+                            .list_mut(id)
+                            .map(|items| items[offset] = value.clone());
+                        written.map_err(|_| frozen(&self.heap, &collection, target.span))?;
                     }
                 }
                 Ok(value)
@@ -737,10 +754,13 @@ impl Interp {
 
                 match object? {
                     Value::Instance(id) => {
-                        self.heap
+                        let key = Key::Str(Rc::from(name.as_str()));
+                        let written = self
+                            .heap
                             .instance_mut(id)
-                            .fields
-                            .insert(Key::Str(Rc::from(name.as_str())), value.clone());
+                            .map(|instance| instance.fields.insert(key, value.clone()));
+                        written
+                            .map_err(|_| frozen(&self.heap, &Value::Instance(id), target.span))?;
                         Ok(value)
                     }
                     other => Err(QuinceError::new(
@@ -1291,6 +1311,22 @@ fn float_op(op: BinaryOp, a: f64, b: f64, span: Span) -> Result<Value, QuinceErr
     Ok(value)
 }
 
+/// The error for a mutation the heap refused.
+///
+/// It names `const` rather than saying only "frozen", because freezing has
+/// exactly one cause in the language and the reader's next question is always
+/// what did this. The value it names may be several steps from the `const` that
+/// froze it — that is what "deeply" means.
+fn frozen(heap: &Heap, value: &Value, span: Span) -> QuinceError {
+    QuinceError::new(
+        format!(
+            "`const` froze this {}, so it cannot be modified",
+            value.type_name(heap)
+        ),
+        span,
+    )
+}
+
 fn type_error(heap: &Heap, op: BinaryOp, lhs: &Value, rhs: &Value, span: Span) -> QuinceError {
     use BinaryOp::*;
     let verb = match op {
@@ -1432,7 +1468,11 @@ pub static PUSH: Native = Native {
     arity: Some(2),
     func: |interp, args, span| match &args[0] {
         Value::List(id) => {
-            interp.heap.list_mut(*id).push(args[1].clone());
+            let pushed = interp
+                .heap
+                .list_mut(*id)
+                .map(|items| items.push(args[1].clone()));
+            pushed.map_err(|_| frozen(&interp.heap, &args[0], span))?;
             Ok(Value::Nil)
         }
         other => Err(QuinceError::new(
@@ -1489,12 +1529,18 @@ pub static REMOVE: Native = Native {
     func: |interp, args, span| match &args[0] {
         Value::Dict(id) => {
             let key = key_of(&interp.heap, &args[1], span)?;
-            interp.heap.dict_mut(*id).remove(&key).ok_or_else(|| {
-                QuinceError::new(
-                    format!("key {} is not in the dict", args[1].repr(&interp.heap)),
-                    span,
-                )
-            })
+            let removed = interp
+                .heap
+                .dict_mut(*id)
+                .map(|entries| entries.remove(&key));
+            removed
+                .map_err(|_| frozen(&interp.heap, &args[0], span))?
+                .ok_or_else(|| {
+                    QuinceError::new(
+                        format!("key {} is not in the dict", args[1].repr(&interp.heap)),
+                        span,
+                    )
+                })
         }
         other => Err(QuinceError::new(
             format!(

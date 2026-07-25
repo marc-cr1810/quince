@@ -149,7 +149,7 @@ mod tests {
     }
 
     #[test]
-    fn globals_refuse_assignment_to_a_constant() {
+    fn globals_refuse_assignment_to_a_bound_name() {
         let mut globals = Globals::new();
         globals.declare("k", Value::Int(1), false);
 

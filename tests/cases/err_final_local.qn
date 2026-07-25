@@ -1,6 +1,6 @@
 # The assignment never runs. The resolver catches it anyway.
 fn f() {
-    const k = 1
+    final k = 1
     if false {
         k = 2
     }

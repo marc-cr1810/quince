@@ -26,6 +26,14 @@ pub enum Object {
     Instance(Instance),
 }
 
+/// A mutation refused because `const` froze the object.
+///
+/// Carries nothing: the caller already knows which operation it was attempting
+/// and where, which is everything a useful message needs and more than this
+/// could supply.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Frozen;
+
 /// Live objects at which a collection is worth doing. Below this the mark phase
 /// costs more than the memory it reclaims.
 const MIN_THRESHOLD: usize = 256;
@@ -37,6 +45,14 @@ pub struct Heap {
     /// A freed slot becomes `None` rather than being removed, so that live
     /// handles never shift. Reclaimed indices are reused via `free`.
     objects: Vec<Option<Object>>,
+    /// Parallel to `objects`: whether the object at that index has been frozen
+    /// by `const`. Kept alongside rather than inside [`Object`] so that the
+    /// three mutable variants do not each grow a field, and so that the flag is
+    /// indexed by exactly the same number as the object it describes.
+    ///
+    /// It must be cleared when a slot is reused, or a fresh list inherits the
+    /// frozenness of whatever died there — see `alloc`.
+    frozen: Vec<bool>,
     free: Vec<u32>,
     live: usize,
     threshold: usize,
@@ -48,6 +64,7 @@ impl Heap {
     pub fn new() -> Self {
         Heap {
             objects: Vec::new(),
+            frozen: Vec::new(),
             free: Vec::new(),
             live: 0,
             threshold: MIN_THRESHOLD,
@@ -60,12 +77,41 @@ impl Heap {
         match self.free.pop() {
             Some(index) => {
                 self.objects[index as usize] = Some(object);
+                // A reused slot starts thawed. Frozenness belongs to the object
+                // that was there, not to the index.
+                self.frozen[index as usize] = false;
                 ObjId(index)
             }
             None => {
                 self.objects.push(Some(object));
+                self.frozen.push(false);
                 ObjId((self.objects.len() - 1) as u32)
             }
+        }
+    }
+
+    /// Whether `id` has been frozen by `const`.
+    pub fn is_frozen(&self, id: ObjId) -> bool {
+        self.frozen[id.0 as usize]
+    }
+
+    /// Freezes everything reachable from `value` through its *data*.
+    ///
+    /// Deep, because an immutable list of mutable lists is not an immutable
+    /// value, and the whole point of `const` is to mean what it says. Frozen on
+    /// pop rather than on push for the collector's reason: the graph may contain
+    /// cycles, and this is what makes them terminate.
+    pub fn freeze(&mut self, value: &Value) {
+        let Some(root) = value.handle() else {
+            return;
+        };
+        let mut worklist = vec![root];
+        while let Some(id) = worklist.pop() {
+            if self.is_frozen(id) {
+                continue;
+            }
+            self.frozen[id.0 as usize] = true;
+            reachable_data(self.get(id), &mut worklist);
         }
     }
 
@@ -120,7 +166,10 @@ impl Heap {
             .expect("handle points at a collected object")
     }
 
-    pub fn get_mut(&mut self, id: ObjId) -> &mut Object {
+    /// Private, so that the only ways to obtain a `&mut` to a freezable object
+    /// are the accessors below, which check. A `pub` escape hatch here would
+    /// make `const` advisory.
+    fn get_mut(&mut self, id: ObjId) -> &mut Object {
         self.objects[id.0 as usize]
             .as_mut()
             .expect("handle points at a collected object")
@@ -135,9 +184,12 @@ impl Heap {
         }
     }
 
-    pub fn list_mut(&mut self, id: ObjId) -> &mut Vec<Value> {
+    /// The `Result` is the enforcement: `const` is only as good as the number of
+    /// places that can forget to ask, and this makes that number zero.
+    pub fn list_mut(&mut self, id: ObjId) -> Result<&mut Vec<Value>, Frozen> {
+        self.thawed(id)?;
         match self.get_mut(id) {
-            Object::List(items) => items,
+            Object::List(items) => Ok(items),
             other => panic!("expected a list, found {other:?}"),
         }
     }
@@ -149,9 +201,10 @@ impl Heap {
         }
     }
 
-    pub fn dict_mut(&mut self, id: ObjId) -> &mut Dict {
+    pub fn dict_mut(&mut self, id: ObjId) -> Result<&mut Dict, Frozen> {
+        self.thawed(id)?;
         match self.get_mut(id) {
-            Object::Dict(entries) => entries,
+            Object::Dict(entries) => Ok(entries),
             other => panic!("expected a dict, found {other:?}"),
         }
     }
@@ -212,10 +265,18 @@ impl Heap {
         }
     }
 
-    pub fn instance_mut(&mut self, id: ObjId) -> &mut Instance {
+    pub fn instance_mut(&mut self, id: ObjId) -> Result<&mut Instance, Frozen> {
+        self.thawed(id)?;
         match self.get_mut(id) {
-            Object::Instance(instance) => instance,
+            Object::Instance(instance) => Ok(instance),
             other => panic!("expected an instance, found {other:?}"),
+        }
+    }
+
+    fn thawed(&self, id: ObjId) -> Result<(), Frozen> {
+        match self.is_frozen(id) {
+            true => Err(Frozen),
+            false => Ok(()),
         }
     }
 
@@ -266,6 +327,37 @@ fn trace(object: &Object, worklist: &mut Vec<ObjId>) {
     }
 }
 
+/// Pushes the handles [`Heap::freeze`] should follow: the ones an object holds
+/// *as data*.
+///
+/// Deliberately not [`trace`], and the difference is the whole design of `const`.
+/// A closure's captured scope is shared with the code that created it — at the
+/// top level it *is* the globals — so following `Function::env` would let one
+/// `const` freeze an unrelated function's locals, or the entire program's. A
+/// function reached from a frozen list keeps working; what is frozen is the
+/// list's inability to stop pointing at it.
+///
+/// Adding an [`Object`] variant makes this fail to compile alongside `trace`,
+/// which is the point: the two questions are different, and a new object type
+/// has to answer both.
+fn reachable_data(object: &Object, worklist: &mut Vec<ObjId>) {
+    match object {
+        Object::List(items) => worklist.extend(items.iter().filter_map(Value::handle)),
+        // Keys are hashable, so they are never heap objects — see `dict.rs`.
+        Object::Dict(entries) => entries.trace(worklist),
+        // Fields are data; the class holding the methods is not.
+        Object::Instance(instance) => instance.fields.trace(worklist),
+        // Nothing below here is mutable through a Quince expression, so nothing
+        // below here can be frozen. Freezing them would be at best a no-op and
+        // at worst — see above — a scope frozen at a distance.
+        Object::Env(_)
+        | Object::Globals(_)
+        | Object::Function(_)
+        | Object::BoundMethod(_)
+        | Object::Class(_) => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,7 +382,9 @@ mod tests {
     fn objects_are_mutable_through_their_handle() {
         let mut heap = Heap::new();
         let id = heap.alloc(Object::List(vec![]));
-        heap.list_mut(id).push(Value::Int(7));
+        heap.list_mut(id)
+            .expect("never frozen here")
+            .push(Value::Int(7));
         assert_eq!(heap.list(id)[0], Value::Int(7));
     }
 
@@ -299,7 +393,9 @@ mod tests {
         // The reason for handles: this is a cycle, and it costs nothing here.
         let mut heap = Heap::new();
         let id = heap.alloc(Object::List(vec![]));
-        heap.list_mut(id).push(Value::List(id));
+        heap.list_mut(id)
+            .expect("never frozen here")
+            .push(Value::List(id));
         let Value::List(inner) = heap.list(id)[0] else {
             panic!("expected a nested list");
         };
@@ -333,7 +429,9 @@ mod tests {
         let mut heap = Heap::new();
         let a = heap.alloc(Object::List(vec![]));
         let b = heap.alloc(Object::List(vec![Value::List(a)]));
-        heap.list_mut(a).push(Value::List(b));
+        heap.list_mut(a)
+            .expect("never frozen here")
+            .push(Value::List(b));
 
         assert_eq!(heap.collect(&[]), 2);
         assert_eq!(heap.live(), 0);
@@ -343,7 +441,9 @@ mod tests {
     fn a_reachable_cycle_survives_and_terminates() {
         let mut heap = Heap::new();
         let id = heap.alloc(Object::List(vec![]));
-        heap.list_mut(id).push(Value::List(id));
+        heap.list_mut(id)
+            .expect("never frozen here")
+            .push(Value::List(id));
 
         assert_eq!(heap.collect(&[id]), 0);
         assert_eq!(heap.live(), 1);
@@ -359,6 +459,71 @@ mod tests {
         let fresh = heap.alloc(Object::List(vec![Value::Int(1)]));
         assert_eq!(fresh, stale, "the free slot should have been reused");
         assert_eq!(heap.live(), 2);
+    }
+
+    #[test]
+    fn freezing_reaches_through_nested_data() {
+        let mut heap = Heap::new();
+        let inner = heap.alloc(Object::List(vec![]));
+        let outer = heap.alloc(Object::List(vec![Value::List(inner)]));
+
+        heap.freeze(&Value::List(outer));
+        assert!(heap.is_frozen(inner), "a frozen list of mutable lists");
+    }
+
+    #[test]
+    fn freezing_a_cycle_terminates() {
+        let mut heap = Heap::new();
+        let a = heap.alloc(Object::List(vec![]));
+        let b = heap.alloc(Object::List(vec![Value::List(a)]));
+        heap.list_mut(a)
+            .expect("never frozen here")
+            .push(Value::List(b));
+
+        heap.freeze(&Value::List(a));
+        assert!(heap.is_frozen(a) && heap.is_frozen(b));
+    }
+
+    #[test]
+    fn freezing_stops_at_a_function() {
+        // The decision `reachable_data` exists to make: a scope is shared with
+        // whoever created it, so following a function into one would let a
+        // `const` freeze code it has nothing to do with.
+        let mut heap = Heap::new();
+        let scope = heap.alloc(Object::Env(Env::new(None, 1)));
+        let func = heap.alloc(Object::Function(Function {
+            decl: std::rc::Rc::new(crate::ast::FnDecl {
+                name: "f".to_string(),
+                params: Vec::new(),
+                body: crate::ast::Block {
+                    stmts: Vec::new(),
+                    slot_count: 0,
+                    span: crate::token::Span::new(0, 0),
+                },
+            }),
+            env: scope,
+        }));
+        let held = heap.alloc(Object::List(vec![Value::Function(func)]));
+
+        heap.freeze(&Value::List(held));
+        assert!(heap.is_frozen(held), "the list itself freezes");
+        assert!(!heap.is_frozen(scope), "the function's scope must not");
+    }
+
+    #[test]
+    fn a_reused_slot_starts_thawed() {
+        // Frozenness belongs to the object, not to the index it happened to
+        // occupy. Without the reset in `alloc`, a fresh list would inherit the
+        // immutability of whatever died in its slot.
+        let mut heap = Heap::new();
+        let stale = heap.alloc(Object::List(vec![]));
+        heap.freeze(&Value::List(stale));
+        heap.collect(&[]);
+
+        let fresh = heap.alloc(Object::List(vec![]));
+        assert_eq!(fresh, stale, "the slot should have been reused");
+        assert!(!heap.is_frozen(fresh));
+        assert!(heap.list_mut(fresh).is_ok());
     }
 
     #[test]

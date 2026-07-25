@@ -179,7 +179,7 @@ before it is declared" rather than reading a stale value.
 Two errors moved from run time to compile time, and are now caught even in code
 that never executes:
 
-- assigning to a `const` local
+- reassigning a `final` or `const` local
 - declaring the same name twice in one scope
 
 The second is a **language change**: redeclaring used to shadow silently. With
@@ -207,7 +207,7 @@ fn greet(name) {
 }
 
 let x = 42
-const PI = 3.14159
+final PI = 3.14159
 
 if x > 10 {
     print(greet("world"))
@@ -229,8 +229,8 @@ if 4 in all { print("built", all) }
 ```
 
 - Dynamic typing, optional annotations later (as Zephyr has)
-- `let` / `const` bindings; a name may be declared only once per scope, but may
-  shadow one from an enclosing scope
+- `let` / `final` / `const` bindings; a name may be declared only once per scope,
+  but may shadow one from an enclosing scope
 - Lists and dicts, both mutable and both structurally compared; `in` for membership
 - Braces, not significant whitespace — simpler to parse, fewer edge cases
 - `#` line comments, which leaves `//` free for floor division and makes a `#!`
@@ -647,6 +647,70 @@ runs. That has a collector consequence: `self` is an assignable parameter, so a 
 writes `self = nil` drops the only heap-visible reference to the object under
 construction, and `call` has to root it across the constructor to hand it back.
 
+## Bindings — `let`, `final`, `const`
+
+Three keywords answering two questions: may the name be pointed somewhere else, and may
+the object it names be changed. `let` allows both, `final` allows only the second,
+`const` allows neither.
+
+The keyword that used to mean `final` was called `const`, and the rename came out of
+noticing that it promised something it never delivered:
+
+```
+let ys = [1, 2]
+const xs = ys
+ys.push(3)      # xs is now [1, 2, 3]
+```
+
+`xs` changed without ever appearing on the left of an assignment. A word meaning
+"constant" that a two-line program can falsify is worse than no word, so the
+binding-only form took the name that only ever claimed to bind: `final`.
+
+### Freezing is a property of the object
+
+That left `const` free to mean what it says, and only one implementation of it is
+coherent. Constness cannot live on the binding, because a binding is not where mutation
+happens; it has to live on the object. So `const xs = ys` freezes the list `ys` names,
+and `ys.push(3)` now fails too — a variable that never said `const`, refused because of a
+line elsewhere that mentioned it once.
+
+That is genuinely surprising, and it is the honest option. The alternative is to copy,
+which breaks identity and *still* is not deep, since the copy's elements are the original's
+elements. Rust reaches the other answer — `let xs = vec![]; xs.push(1)` really is an error
+there — but only because mutability is a property of the access path and ownership tracks
+every path. That is the entire borrow checker, and it is not a thing to bolt onto a
+dynamic language. Freezing is at least monotone: an object never thaws, so it can only
+surprise once.
+
+Deep, for the same reason: an immutable list of mutable lists is not an immutable value.
+The walk is the collector's — freeze on pop, skip what is already frozen — which is what
+makes a cyclic structure terminate.
+
+### Freezing follows data, not code
+
+`reachable_data` in `heap.rs` is deliberately not `trace`. A closure's captured scope is
+shared with whatever created it, and at the top level it *is* the globals, so following
+`Function::env` would let one `const` freeze an unrelated function's locals — or every
+binding in the program. A function reached from a frozen list keeps working; what is
+frozen is the list's ability to stop pointing at it. The same holds for a class reached
+from an instance: fields are data, methods are not.
+
+Two exhaustive matches over `Object` now exist, and a new variant has to answer both.
+They ask different questions — "what does this keep alive" and "what does this own" — and
+the temptation to write the second in terms of the first is exactly the bug.
+
+### Enforcement is in the type, not in the callers
+
+`list_mut`, `dict_mut`, and `instance_mut` return `Result<_, Frozen>`, and `get_mut` is
+private. There are five places in the evaluator that mutate a heap object, which is few
+enough to check by hand and far too many to keep checking by hand for the rest of the
+project. A `pub fn get_mut` returning `&mut Object` would make `const` advisory the first
+time someone added a sixth.
+
+The error names `const` rather than only saying "frozen", because freezing has exactly
+one cause and the reader's next question is always what did this. The value it names may
+be several steps from the `const` that froze it — that is what deep means.
+
 ## Roadmap
 
 **v0.1 — walking skeleton**
@@ -718,6 +782,10 @@ piece of work and are listed under v0.5 rather than left implied here.
 
 **v0.5 — robustness**
 `try`/`catch` and span-accurate diagnostics everywhere. GC is done.
+
+`final` and `const` landed here first, out of order, because they were a rename with a
+feature hiding inside it — see Bindings above. Renaming a keyword only gets cheaper the
+earlier it happens, and the corpus was 59 files at the time.
 
 Protocol slots belong here too — the point at which `is_truthy`, `display`, `equals`,
 indexing, and iteration stop being closed matches over `Value` and gain one arm that

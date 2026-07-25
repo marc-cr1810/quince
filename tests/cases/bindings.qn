@@ -1,0 +1,51 @@
+# Three keywords, two questions: may the name be reassigned, and may the value
+# be modified.
+
+let a = 1
+a = 2
+print(a)
+
+# `final` binds the name. The object it names is untouched.
+final xs = [1, 2]
+xs.push(3)
+xs[0] = 9
+print(xs)
+
+# `const` binds the name *and* freezes the value, as deeply as it reaches.
+const ys = [1, [2, 3]]
+print(ys)
+print(ys[1])
+
+# Freezing is a property of the object, so every other name sees it. This is
+# the surprising half of the design and the only one that could be honest.
+let shared = {"k": 1}
+const also_shared = shared
+print(shared["k"])
+
+# Scalars have nothing to freeze, so `const` and `final` agree on them.
+const PI = 3.14159
+final E = 2.71828
+print(PI + E)
+
+# A function reached from a frozen value keeps its own mutable scope: freezing
+# follows data, not code. A closure's scope belongs to whoever created it.
+fn counter() {
+    let n = 0
+    fn bump() { n = n + 1; return n }
+    return bump
+}
+const handlers = [counter()]
+print(handlers[0]())
+print(handlers[0]())
+
+# `init` runs before the freeze, which is why a frozen instance can exist at all.
+class Point {
+    fn init(x) { self.x = x }
+    fn grow() { self.x = self.x + 1 }
+}
+final p = Point(1)
+p.grow()
+print(p.x)
+
+const q = Point(5)
+print(q.x)

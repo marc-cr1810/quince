@@ -1,0 +1,4 @@
+# Freezing belongs to the object, so the name that never said `const` sees it.
+let ys = [1, 2]
+const xs = ys
+ys.push(3)

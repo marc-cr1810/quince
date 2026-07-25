@@ -192,15 +192,51 @@ pub struct Stmt {
     pub span: Span,
 }
 
+/// Which keyword introduced a binding.
+///
+/// One field rather than a pair of bools, because half the combinations two
+/// bools can express are not forms the language has — a rebindable name holding
+/// a frozen value, say. The two questions anyone asks of it are derived instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BindKind {
+    /// `let`: the name may be reassigned.
+    Let,
+    /// `final`: the name is bound once. The object it names is untouched, so a
+    /// `final` list still grows — see [`BindKind::Const`] for the other one.
+    Final,
+    /// `const`: the name is bound once *and* the value is frozen, deeply, and
+    /// through every other name that already reaches it.
+    Const,
+}
+
+impl BindKind {
+    pub fn mutable(&self) -> bool {
+        matches!(self, BindKind::Let)
+    }
+
+    pub fn freezes(&self) -> bool {
+        matches!(self, BindKind::Const)
+    }
+
+    /// How the keyword is written, for error messages that quote it back.
+    pub fn word(&self) -> &'static str {
+        match self {
+            BindKind::Let => "let",
+            BindKind::Final => "final",
+            BindKind::Const => "const",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum StmtKind {
     Expr(Expr),
-    /// `let` and `const` share a node; `mutable` distinguishes them so a
-    /// reassignment can be rejected with the original binding in hand.
+    /// `let`, `final`, and `const` share a node; [`BindKind`] distinguishes
+    /// them so a reassignment can be rejected with the original binding in hand.
     Let {
         name: String,
         value: Expr,
-        mutable: bool,
+        bind: BindKind,
         /// Where the binding goes. Always `Local { hops: 0, .. }` or `Global`.
         slot: Option<Slot>,
     },

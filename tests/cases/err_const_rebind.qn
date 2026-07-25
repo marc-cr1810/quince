@@ -1,0 +1,3 @@
+# `const` binds the name too, so this is the `final` error, not the frozen one.
+const xs = [1, 2]
+xs = [3]

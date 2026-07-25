@@ -1,5 +1,6 @@
 use crate::ast::{
-    self, BinaryOp, Block, Expr, ExprKind, FnDecl, LogicalOp, Param, Stmt, StmtKind, UnaryOp, Var,
+    self, BinaryOp, BindKind, Block, Expr, ExprKind, FnDecl, LogicalOp, Param, Stmt, StmtKind,
+    UnaryOp, Var,
 };
 use crate::error::QuinceError;
 use crate::token::{Span, Token, TokenKind};
@@ -63,7 +64,7 @@ impl Parser {
 
     fn statement(&mut self) -> Result<Stmt, QuinceError> {
         match self.peek().kind {
-            TokenKind::Let | TokenKind::Const => self.let_stmt(),
+            TokenKind::Let | TokenKind::Final | TokenKind::Const => self.let_stmt(),
             TokenKind::Fn => self.fn_stmt(),
             TokenKind::Class => self.class_stmt(),
             TokenKind::If => self.if_stmt(),
@@ -83,8 +84,12 @@ impl Parser {
 
     fn let_stmt(&mut self) -> Result<Stmt, QuinceError> {
         let keyword = self.advance();
-        let mutable = keyword.kind == TokenKind::Let;
-        let word = if mutable { "`let`" } else { "`const`" };
+        let bind = match keyword.kind {
+            TokenKind::Let => BindKind::Let,
+            TokenKind::Final => BindKind::Final,
+            _ => BindKind::Const,
+        };
+        let word = format!("`{}`", bind.word());
 
         let (name, _) = self.expect_ident(&format!("after {word}"))?;
         self.expect(TokenKind::Assign, &format!("in a {word} binding"))?;
@@ -97,7 +102,7 @@ impl Parser {
                 slot: None,
                 name,
                 value,
-                mutable,
+                bind,
             },
             span,
         })
@@ -906,19 +911,20 @@ mod tests {
     }
 
     #[test]
-    fn let_and_const_differ_only_in_mutability() {
-        let stmts = parse_ok("let a = 1\nconst b = 2");
-        match (&stmts[0].kind, &stmts[1].kind) {
-            (
-                StmtKind::Let { mutable: true, .. },
-                StmtKind::Let {
-                    mutable: false,
-                    name,
-                    ..
-                },
-            ) => assert_eq!(name, "b"),
-            other => panic!("unexpected bindings: {other:?}"),
-        }
+    fn the_three_binding_keywords_share_a_node() {
+        let stmts = parse_ok("let a = 1\nfinal b = 2\nconst c = 3");
+        let kinds: Vec<_> = stmts
+            .iter()
+            .map(|stmt| match &stmt.kind {
+                StmtKind::Let { bind, .. } => *bind,
+                other => panic!("unexpected statement: {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            [BindKind::Let, BindKind::Final, BindKind::Const],
+            "the keyword should be the only difference"
+        );
     }
 
     #[test]

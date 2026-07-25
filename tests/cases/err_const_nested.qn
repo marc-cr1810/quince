@@ -1,0 +1,3 @@
+# Freezing is deep: an immutable list of mutable lists is not immutable.
+const xs = [1, [2, 3]]
+xs[1].push(9)

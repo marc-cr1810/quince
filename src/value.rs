@@ -401,7 +401,9 @@ mod tests {
         // Guards the self-referential case from running forever.
         let mut heap = Heap::new();
         let id = heap.alloc(Object::List(vec![]));
-        heap.list_mut(id).push(Value::List(id));
+        heap.list_mut(id)
+            .expect("never frozen here")
+            .push(Value::List(id));
         assert!(Value::List(id).equals(&Value::List(id), &heap));
     }
 
