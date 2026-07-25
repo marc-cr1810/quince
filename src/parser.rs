@@ -136,11 +136,16 @@ impl Parser {
             params.push(Param {
                 name: ast::SELF.to_string(),
                 span: name_span,
+                receiver: true,
             });
         }
         while !self.check(&TokenKind::RParen) {
             let (name, span) = self.expect_ident("in the parameter list")?;
-            params.push(Param { name, span });
+            params.push(Param {
+                name,
+                span,
+                receiver: false,
+            });
             if !self.eat(&TokenKind::Comma) {
                 break;
             }

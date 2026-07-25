@@ -909,17 +909,17 @@ impl Interp {
                 })));
 
                 match self.heap.class(id).method(class::INIT, &self.heap) {
+                    // `init` runs Quince code, so it reaches safe points, and
+                    // the instance needs no root here: it sits in slot 0 of the
+                    // constructor's scope, which `exec_scoped` roots for the
+                    // whole body.
+                    //
+                    // That holds only because `self` cannot be reassigned — the
+                    // resolver refuses it, see `Param::receiver`. This used to
+                    // push the instance onto `temps` for exactly that reason,
+                    // and the root came out when the language rule went in.
                     Some(init) => {
-                        // `init` runs Quince code, so it reaches a safe point,
-                        // and the only other reference to the instance is the
-                        // copy in its `self` slot — which the body is free to
-                        // overwrite. Rooting it here is what makes returning it
-                        // afterwards safe.
-                        let mark = self.temps.len();
-                        self.temps.push(instance.clone());
-                        let result = self.call_method(instance.clone(), init, args, span);
-                        self.temps.truncate(mark);
-                        result?;
+                        self.call_method(instance.clone(), init, args, span)?;
                     }
                     // No constructor, so the only correct call passes nothing.
                     None => {
@@ -1889,17 +1889,15 @@ mod tests {
 
     #[test]
     fn an_instance_survives_its_own_constructor() {
-        // `init` is free to overwrite `self`, and once it has, the slot the
-        // instance was bound into no longer names it. The only other reference
-        // is the Rust local in `call` waiting to return it, so without rooting
-        // there the collector reclaims the object mid-construction and `C(7)`
-        // evaluates to a handle pointing at whatever reused the slot.
+        // Slot 0 is the root, and it stays pointing at the instance because
+        // `self` cannot be reassigned. This passed with a `temps` root too, and
+        // still passes now that the root is gone — what makes it hold is the
+        // resolver rule, which `self_cannot_be_reassigned` pins down.
         let interp = run(&format!(
             "{}\
              class C {{\n\
              fn init(n) {{\n\
              self.n = n\n\
-             self = nil\n\
              let junk = churn()\n\
              }}\n\
              }}\n\

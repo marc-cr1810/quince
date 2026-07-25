@@ -158,6 +158,14 @@ pub struct Block {
 pub struct Param {
     pub name: String,
     pub span: Span,
+    /// Whether this is the `self` the parser inserted, rather than a parameter
+    /// someone wrote.
+    ///
+    /// A flag rather than a comparison against [`SELF`], because the name is
+    /// only unambiguous while `self` is a keyword — an invariant that lives in
+    /// the lexer and would be silently assumed here. The parser knows which
+    /// parameter it invented, so it says so.
+    pub receiver: bool,
 }
 
 /// The receiver's name inside a method body.

@@ -1,0 +1,6 @@
+# The receiver is not a binding the method owns.
+class Point {
+    fn init(x) {
+        self = nil
+    }
+}

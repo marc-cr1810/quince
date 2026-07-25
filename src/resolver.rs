@@ -251,10 +251,14 @@ impl Resolver {
     fn function(&mut self, decl: &mut FnDecl) -> Result<(), QuinceError> {
         // Parameters occupy the body scope's first slots, in order, which is
         // what lets a call bind them by index without consulting their names.
+        //
+        // A parameter is rebindable — except the receiver, which nobody wrote
+        // and which the method does not own. That immutability is also what
+        // keeps slot 0 pointing at the instance for the whole of `init`.
         let params: Vec<_> = decl
             .params
             .iter()
-            .map(|param| (param.name.clone(), true, param.span))
+            .map(|param| (param.name.clone(), !param.receiver, param.span))
             .collect();
         decl.body.slot_count = self.scoped(&mut decl.body.stmts, &params)?;
         Ok(())
@@ -363,10 +367,14 @@ impl Resolver {
                 if let ExprKind::Var(var) = &target.kind
                     && let Some((_, false)) = self.find(&var.name)
                 {
-                    return Err(QuinceError::new(
-                        format!("cannot reassign `{}`", var.name),
-                        target.span,
-                    ));
+                    // `self` is immutable by the same mechanism, but for a
+                    // different reason, and saying "reassign" would teach that
+                    // it is a binding someone chose. It is the receiver.
+                    let message = match var.name == ast::SELF {
+                        true => "`self` is the receiver, not a variable to assign to".to_string(),
+                        false => format!("cannot reassign `{}`", var.name),
+                    };
+                    return Err(QuinceError::new(message, target.span));
                 }
                 self.expr(target)
             }
@@ -564,6 +572,33 @@ mod tests {
             resolve_err("print(self)"),
             "`self` is only valid inside a method"
         );
+    }
+
+    #[test]
+    fn self_cannot_be_reassigned() {
+        // The receiver is not a binding the method owns. This is also what lets
+        // the constructor drop its `temps` root: slot 0 is guaranteed to still
+        // name the instance when `init` returns.
+        for body in [
+            "self = nil",
+            "self = 1",
+            "self = self",
+            // Reached through the scope chain, which costs nothing extra:
+            // `find` reports the mutability of whatever scope it lands in.
+            "fn inner() { self = nil }",
+        ] {
+            assert_eq!(
+                resolve_err(&format!("class C {{ fn m() {{ {body} }} }}")),
+                "`self` is the receiver, not a variable to assign to",
+                "for `{body}`"
+            );
+        }
+    }
+
+    #[test]
+    fn a_method_may_still_reach_through_self() {
+        // Only the name is pinned. The instance stays as mutable as any other.
+        resolved("class C { fn m() { self.x = 1\n return self } }");
     }
 
     #[test]

@@ -583,6 +583,17 @@ Here the question does not arise.
 a resolver error naming the mistake, rather than `undefined variable \`self\`` naming the
 symptom. It costs the ability to have a variable called `self`, which is not a loss.
 
+It is a parameter with one exception: it cannot be reassigned. `self.x = 1` is fine —
+only the name is pinned, exactly the `final` distinction — but `self = nil` is refused,
+because the receiver is not a binding the method owns. Rebinding it can only ever be a
+mistake, and the mistake was previously silent until some later line failed with a
+message about `nil` that named neither `self` nor the assignment that caused it.
+
+`Param::receiver` carries this rather than a comparison against the name `self`. The
+comparison would be correct today, since `self` is a keyword and so the parser is the
+only source of a parameter with that name — but that is an invariant living in the lexer
+and silently assumed in the resolver. The parser knows which parameter it invented.
+
 ### One receiver convention, two kinds of method
 
 A builtin method takes its receiver as `args[0]`. A user method takes it as slot zero of
@@ -643,9 +654,15 @@ instance arm each; letting a class override them is the protocol-slot work, and 
 arrives whole or not at all.
 
 `init` cannot return anything useful, because the instance already exists by the time it
-runs. That has a collector consequence: `self` is an assignable parameter, so a body that
-writes `self = nil` drops the only heap-visible reference to the object under
-construction, and `call` has to root it across the constructor to hand it back.
+runs. It also needs no root: the instance sits in slot 0 of the constructor's scope, which
+`exec_scoped` roots for the whole body, and slot 0 keeps naming it because `self` cannot
+be reassigned.
+
+That is worth stating as a dependency rather than a coincidence. `call` used to push the
+instance onto `temps`, precisely because a body writing `self = nil` would drop the only
+heap-visible reference to the object under construction. Pinning `self` removed the
+hazard, so the root went with it — a language rule doing the work a defensive root was
+doing before. `self_cannot_be_reassigned` in `resolver.rs` is what holds the other end up.
 
 ## Bindings — `let`, `final`, `const`
 
