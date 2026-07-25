@@ -84,6 +84,7 @@ pub struct QuinceHelper {
     pub use_color: bool,
     pub globals: Arc<Mutex<Vec<(String, String)>>>,
     pub custom_methods: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    pub var_fields: Arc<Mutex<HashMap<String, Vec<String>>>>,
 }
 
 impl Helper for QuinceHelper {}
@@ -118,16 +119,28 @@ impl Completer for QuinceHelper {
                 .lock()
                 .map(|m| m.clone())
                 .unwrap_or_default();
+            let var_fields_map = self
+                .var_fields
+                .lock()
+                .map(|m| m.clone())
+                .unwrap_or_default();
             let methods = if let Some(var_name) = extract_var_before_dot(line, start - 1) {
+                let mut set = Vec::new();
                 if let Ok(globals) = self.globals.lock() {
                     if let Some((_, type_name)) = globals.iter().find(|(k, _)| k == var_name) {
-                        method_names_for_type(type_name, &custom_map)
+                        set.extend(method_names_for_type(type_name, &custom_map));
                     } else {
-                        method_names().into_iter().map(String::from).collect()
+                        set.extend(method_names().into_iter().map(String::from));
                     }
                 } else {
-                    method_names().into_iter().map(String::from).collect()
+                    set.extend(method_names().into_iter().map(String::from));
                 }
+                if let Some(fields) = var_fields_map.get(var_name) {
+                    set.extend(fields.clone());
+                }
+                set.sort();
+                set.dedup();
+                set
             } else {
                 method_names().into_iter().map(String::from).collect()
             };
@@ -204,16 +217,28 @@ impl Hinter for QuinceHelper {
                 .lock()
                 .map(|m| m.clone())
                 .unwrap_or_default();
+            let var_fields_map = self
+                .var_fields
+                .lock()
+                .map(|m| m.clone())
+                .unwrap_or_default();
             let methods = if let Some(var_name) = extract_var_before_dot(line, start - 1) {
+                let mut set = Vec::new();
                 if let Ok(globals) = self.globals.lock() {
                     if let Some((_, type_name)) = globals.iter().find(|(k, _)| k == var_name) {
-                        method_names_for_type(type_name, &custom_map)
+                        set.extend(method_names_for_type(type_name, &custom_map));
                     } else {
-                        method_names().into_iter().map(String::from).collect()
+                        set.extend(method_names().into_iter().map(String::from));
                     }
                 } else {
-                    method_names().into_iter().map(String::from).collect()
+                    set.extend(method_names().into_iter().map(String::from));
                 }
+                if let Some(fields) = var_fields_map.get(var_name) {
+                    set.extend(fields.clone());
+                }
+                set.sort();
+                set.dedup();
+                set
             } else {
                 method_names().into_iter().map(String::from).collect()
             };
@@ -238,6 +263,7 @@ impl Hinter for QuinceHelper {
         None
     }
 }
+
 
 
 impl Validator for QuinceHelper {}
@@ -572,35 +598,71 @@ pub fn run_repl(use_color_stdout: bool, use_color_stderr: bool) -> Result<()> {
     let globals_store: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
     let custom_methods_store: Arc<Mutex<HashMap<String, Vec<String>>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    let var_fields_store: Arc<Mutex<HashMap<String, Vec<String>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
 
     rl.set_helper(Some(QuinceHelper {
         use_color: use_color_stdout,
         globals: Arc::clone(&globals_store),
         custom_methods: Arc::clone(&custom_methods_store),
+        var_fields: Arc::clone(&var_fields_store),
     }));
 
     let mut interp = Interp::new();
     let mut buffer = String::new();
 
     loop {
-        // Sync global variables and custom class methods for tab autocompletion
+        // Sync global variables, custom class methods, and instance fields for tab autocompletion
         if let Ok(mut store) = globals_store.lock() {
             let mut vars = Vec::new();
             let mut custom_map = HashMap::new();
+            let mut fields_map: HashMap<String, Vec<String>> = HashMap::new();
+
             for (k, v) in interp.get_globals() {
                 let type_name = v.type_name(&interp.heap).to_string();
-                vars.push((k, type_name));
-                if let Value::Class(id) = v {
-                    let class_obj = interp.heap.class(id);
-                    let methods: Vec<String> = class_obj.methods.keys().cloned().collect();
-                    custom_map.insert(class_obj.name.clone(), methods);
+                vars.push((k.clone(), type_name));
+
+                match v {
+                    Value::Class(id) => {
+                        let class_obj = interp.heap.class(id);
+                        let methods: Vec<String> = class_obj.methods.keys().cloned().collect();
+                        custom_map.insert(class_obj.name.clone(), methods);
+                    }
+                    Value::Instance(id) => {
+                        let inst = interp.heap.instance(id);
+                        let fields: Vec<String> = inst
+                            .fields
+                            .iter()
+                            .filter_map(|(key, _)| match key.to_value() {
+                                Value::Str(s) => Some(s.to_string()),
+                                _ => None,
+                            })
+                            .collect();
+                        fields_map.insert(k, fields);
+                    }
+                    Value::Dict(id) => {
+                        let dict = interp.heap.dict(id);
+                        let fields: Vec<String> = dict
+                            .iter()
+                            .filter_map(|(key, _)| match key.to_value() {
+                                Value::Str(s) => Some(s.to_string()),
+                                _ => None,
+                            })
+                            .collect();
+                        fields_map.insert(k, fields);
+                    }
+                    _ => {}
                 }
             }
             *store = vars;
             if let Ok(mut methods_store) = custom_methods_store.lock() {
                 *methods_store = custom_map;
             }
+            if let Ok(mut fields_store) = var_fields_store.lock() {
+                *fields_store = fields_map;
+            }
         }
+
 
 
         let open_braces = count_open_braces(&buffer);
