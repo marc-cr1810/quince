@@ -1,0 +1,5 @@
+class C {
+    fn m() {
+        return super.m()
+    }
+}

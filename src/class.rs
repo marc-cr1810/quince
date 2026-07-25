@@ -82,19 +82,35 @@ impl BuiltinType {
 pub struct UserClass {
     pub name: String,
     /// Each entry is a [`crate::value::Function`] handle, closed over the scope
-    /// the class was declared in.
+    /// the class was declared in — which, for a subclass, is the scope holding
+    /// `super`.
     pub methods: HashMap<String, ObjId>,
+    pub parent: Option<ObjId>,
 }
 
 impl UserClass {
-    /// `heap` is unused until a class can have a parent, which is where the
-    /// lookup stops being a single map hit.
-    pub fn method(&self, name: &str, _heap: &Heap) -> Option<Value> {
-        self.methods.get(name).copied().map(Value::Function)
+    /// The method `name`, searching this class and then its ancestors.
+    ///
+    /// Overriding falls out of the order rather than being implemented: the
+    /// first table to hold the name wins, so a subclass shadows what it
+    /// redefines and inherits what it does not.
+    ///
+    /// The loop terminates because the chain cannot contain a cycle. A parent
+    /// has to be evaluated before the class that names it is bound, so a class
+    /// can only ever extend one that already exists.
+    pub fn method(&self, name: &str, heap: &Heap) -> Option<Value> {
+        let mut class = self;
+        loop {
+            if let Some(id) = class.methods.get(name) {
+                return Some(Value::Function(*id));
+            }
+            class = heap.class(class.parent?);
+        }
     }
 
     pub fn trace(&self, worklist: &mut Vec<ObjId>) {
         worklist.extend(self.methods.values().copied());
+        worklist.extend(self.parent);
     }
 }
 

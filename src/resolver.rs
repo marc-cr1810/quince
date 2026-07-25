@@ -164,16 +164,31 @@ impl Resolver {
 
             StmtKind::Class {
                 name,
+                parent,
                 methods,
                 slot,
             } => {
-                *slot = Some(self.slot_of(name));
-                for decl in methods {
-                    let decl = std::rc::Rc::get_mut(decl)
-                        .expect("the parser hands out unshared declarations");
-                    self.function(decl)?;
+                // The parent is read in the enclosing scope, before the class's
+                // own name is bound, which is what makes `class A extends A` an
+                // undefined-variable error instead of a cycle.
+                if let Some(parent) = parent {
+                    parent.slot = Some(self.slot_of(&parent.name));
                 }
-                Ok(())
+                *slot = Some(self.slot_of(name));
+
+                // Methods of a subclass are resolved inside a scope holding
+                // `super`, so a reference to it is an ordinary local lookup at
+                // whatever depth it appears — including from a closure nested
+                // in a method. The evaluator builds the matching scope.
+                if parent.is_none() {
+                    return self.methods(methods);
+                }
+                self.scopes.push(Scope::default());
+                let result = self
+                    .declare(ast::SUPER, false, span)
+                    .and_then(|()| self.methods(methods));
+                self.scopes.pop();
+                result
             }
 
             StmtKind::If {
@@ -219,6 +234,15 @@ impl Resolver {
 
     fn block(&mut self, block: &mut Block) -> Result<(), QuinceError> {
         block.slot_count = self.scoped(&mut block.stmts, &[])?;
+        Ok(())
+    }
+
+    fn methods(&mut self, methods: &mut [std::rc::Rc<FnDecl>]) -> Result<(), QuinceError> {
+        for decl in methods {
+            let decl =
+                std::rc::Rc::get_mut(decl).expect("the parser hands out unshared declarations");
+            self.function(decl)?;
+        }
         Ok(())
     }
 
@@ -304,6 +328,25 @@ impl Resolver {
             }
 
             ExprKind::Field { target, .. } => self.expr(target),
+
+            ExprKind::Super {
+                parent, receiver, ..
+            } => {
+                // `super` lives one scope out from the method body, so failing
+                // to find it means there is no enclosing subclass method. The
+                // two halves fail differently and are worth separating: a class
+                // with no parent has no `super` at all, while a plain function
+                // has neither.
+                if self.find(ast::SUPER).is_none() {
+                    return Err(QuinceError::new(
+                        "`super` is only valid inside a method of a class that extends another",
+                        expr.span,
+                    ));
+                }
+                parent.slot = Some(self.slot_of(ast::SUPER));
+                receiver.slot = Some(self.slot_of(ast::SELF));
+                Ok(())
+            }
 
             ExprKind::Assign { target, value } => {
                 self.expr(value)?;
@@ -513,6 +556,77 @@ mod tests {
         assert_eq!(
             resolve_err("print(self)"),
             "`self` is only valid inside a method"
+        );
+    }
+
+    #[test]
+    fn super_sits_one_scope_outside_a_method_body() {
+        // The scope wrapped around the methods holds exactly `super`, so from a
+        // method body it is one hop out at slot 0. The evaluator builds a scope
+        // of that shape, and the two have to agree.
+        let program = resolved("class A {}\nclass B extends A {\n fn m() { return super.m }\n}");
+        let StmtKind::Class { methods, .. } = &program[1].kind else {
+            panic!("expected a class");
+        };
+        let StmtKind::Return(Some(expr)) = &methods[0].body.stmts[0].kind else {
+            panic!("expected a return");
+        };
+        let ExprKind::Super {
+            parent, receiver, ..
+        } = &expr.kind
+        else {
+            panic!("expected a super lookup");
+        };
+        assert_eq!(parent.slot, Some(Slot::Local { hops: 1, index: 0 }));
+        assert_eq!(
+            receiver.slot,
+            Some(Slot::Local { hops: 0, index: 0 }),
+            "`self` is still the method's own first parameter"
+        );
+    }
+
+    #[test]
+    fn a_class_without_a_parent_adds_no_scope() {
+        // The extra scope exists only for `super`, so a plain class must not
+        // pay a hop for it — otherwise every capture out of a method body would
+        // be counted wrong.
+        let program = resolved("fn f() {\n let n = 1\n class C {\n fn m() { return n }\n}\n}");
+        let StmtKind::Class { methods, .. } = &body(&program[0]).stmts[1].kind else {
+            panic!("expected a class");
+        };
+        let StmtKind::Return(Some(expr)) = &methods[0].body.stmts[0].kind else {
+            panic!("expected a return");
+        };
+        assert_eq!(var(expr), Slot::Local { hops: 1, index: 0 });
+    }
+
+    #[test]
+    fn a_subclass_adds_exactly_one_hop() {
+        let program = resolved(
+            "fn f() {\n let n = 1\n class A {}\n class C extends A {\n fn m() { return n }\n}\n}",
+        );
+        let StmtKind::Class { methods, .. } = &body(&program[0]).stmts[2].kind else {
+            panic!("expected a class");
+        };
+        let StmtKind::Return(Some(expr)) = &methods[0].body.stmts[0].kind else {
+            panic!("expected a return");
+        };
+        assert_eq!(
+            var(expr),
+            Slot::Local { hops: 2, index: 0 },
+            "through `super`"
+        );
+    }
+
+    #[test]
+    fn super_outside_a_subclass_method_is_caught_before_running() {
+        assert_eq!(
+            resolve_err("class C {\n fn m() { return super.m() }\n}"),
+            "`super` is only valid inside a method of a class that extends another"
+        );
+        assert_eq!(
+            resolve_err("fn f() { return super.m() }"),
+            "`super` is only valid inside a method of a class that extends another"
         );
     }
 

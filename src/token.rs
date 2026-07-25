@@ -36,9 +36,11 @@ pub enum TokenKind {
 
     Fn,
     Class,
-    /// A keyword rather than an identifier so that using it outside a method is
-    /// caught by the resolver, with a message that says why.
+    Extends,
+    /// Keywords rather than identifiers so that using one where it has no
+    /// meaning is caught by the resolver, with a message that says why.
     SelfKw,
+    Super,
     Let,
     Const,
     If,
@@ -90,7 +92,9 @@ impl TokenKind {
         let kind = match word {
             "fn" => TokenKind::Fn,
             "class" => TokenKind::Class,
+            "extends" => TokenKind::Extends,
             "self" => TokenKind::SelfKw,
+            "super" => TokenKind::Super,
             "let" => TokenKind::Let,
             "const" => TokenKind::Const,
             "if" => TokenKind::If,
@@ -118,7 +122,9 @@ impl fmt::Display for TokenKind {
 
             TokenKind::Fn => write!(f, "fn"),
             TokenKind::Class => write!(f, "class"),
+            TokenKind::Extends => write!(f, "extends"),
             TokenKind::SelfKw => write!(f, "self"),
+            TokenKind::Super => write!(f, "super"),
             TokenKind::Let => write!(f, "let"),
             TokenKind::Const => write!(f, "const"),
             TokenKind::If => write!(f, "if"),

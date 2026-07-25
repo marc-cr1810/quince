@@ -595,6 +595,40 @@ That is also why `Point.dist(p)` works. Reached through the class rather than an
 instance, a method is handed back unbound, and it really is a function whose first
 parameter is written out.
 
+### Inheritance, and where `super` lives
+
+`class Dog extends Animal`. The first spelling tried was `class Dog < Animal`, which
+Lox uses and which needs no new keyword — and which reads, in a language that already
+has `<` as a comparison, like `Dog` is *less than* `Animal`. A reserved word is the
+cheaper of the two costs.
+
+Overriding is not implemented so much as fallen out of. `UserClass::method` walks the
+parent chain and returns the first table holding the name, so a subclass shadows what it
+redefines and inherits what it does not. `init` goes through the same lookup, which is
+why a subclass that declares none uses its parent's. The loop needs no cycle guard: a
+parent is evaluated before the class naming it is bound, so `class A extends A` is an
+undefined variable and a chain can only ever point at classes that already exist.
+
+`super` is the interesting half. It needs two things that come from different places —
+the class to start searching from, and the receiver to bind the result to — and the
+receiver is just the enclosing method's `self`. For the class, a subclass's methods are
+closed over a one-slot scope holding the parent, built when the class is declared.
+
+That choice pays twice. `super` becomes an ordinary local, so a closure nested in a
+method reaches it through the same chain that carries `self`, with no rule to write
+down. And the collector needed no new root for it: a captured scope is already kept
+alive by the function that captured it. Storing the parent on the `Class` and consulting
+a call stack instead would have been a new mechanism and a new root, to reach the same
+place.
+
+The lookup deliberately starts *at* the parent rather than at the parent's class of the
+receiver. `Dog.speak` calling `super.speak()` must not find `Dog.speak` again.
+
+`super` on its own is not an expression — the parser requires `super.name`. There is
+nothing useful to do with the parent class as a bare value that naming the class
+directly would not do better, and demanding the `.name` puts the error on the `super`
+instead of somewhere downstream.
+
 ### What a class does not get
 
 Fields are created by assignment, never declared, so `init` is the only reason an
@@ -641,11 +675,12 @@ and `in`. Adding them turned up a use-after-free in the collector that had been
 there since it landed — see Collection — so the root set grew to cover intermediate
 expression values at the same time.
 
-Still missing: `try`/`catch`. `push`, `keys`, `values`, and `remove`
-began as free functions standing in for methods; dispatch landed and they moved onto
-their types, leaving `print`, `len`, and `type` as the only globals. There are no
-tuples, which is why iterating a dict yields keys rather than pairs. The REPL is
-line-at-a-time and continues reading when a parse fails at end of input, which is a
+Still missing: `try`/`catch`, and the protocol slots that would let a user class decide
+its own truthiness, printing, equality, indexing, or iteration. `push`, `keys`,
+`values`, and `remove` began as free functions standing in for methods; dispatch landed
+and they moved onto their types, leaving `print`, `len`, and `type` as the only globals.
+There are no tuples, which is why iterating a dict yields keys rather than pairs. The
+REPL is line-at-a-time and continues reading when a parse fails at end of input, which is a
 heuristic rather than a real incremental parser.
 
 Deferred from the lexer, both cheap to add: hex/binary/octal literals (Zephyr has
@@ -675,12 +710,20 @@ optional ints would have been the worse trade.
 **v0.4 — objects**
 Classes, methods, inheritance, `self`.
 
-Classes, methods, fields, and `self` are done — see Classes above. A class is a value:
-callable to build an instance, storable in a list, passable to a function. Inheritance
-is the remaining piece.
+**Done.** See Classes above. A class is a value — callable to build an instance,
+storable in a list, passable to a function — and `extends` plus `super` complete the
+milestone. What v0.4 does *not* bring is protocol slots: a class cannot yet decide its
+own truthiness, printing, equality, indexing, or iteration. Those are one coherent
+piece of work and are listed under v0.5 rather than left implied here.
 
 **v0.5 — robustness**
 `try`/`catch` and span-accurate diagnostics everywhere. GC is done.
+
+Protocol slots belong here too — the point at which `is_truthy`, `display`, `equals`,
+indexing, and iteration stop being closed matches over `Value` and gain one arm that
+asks the class. Deferred to a single pass on purpose: doing them one at a time means
+five separate decisions about what a class may override and no way to keep them
+consistent.
 
 **Later**
 Bytecode VM, async/await, module system, sized integer types — all things Zephyr has,

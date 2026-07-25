@@ -215,19 +215,52 @@ impl Interp {
 
             StmtKind::Class {
                 name,
+                parent,
                 methods,
                 slot,
             } => {
-                // Methods close over the scope the class is declared in, exactly
-                // as a `fn` at that position would. Nothing here reaches a safe
-                // point, so the functions are safe unrooted until the class that
-                // owns them exists.
+                // Read before the class's own name is bound, so `class A extends
+                // A` is an undefined variable rather than a cycle in the chain
+                // that `UserClass::method` walks.
+                let parent = match parent {
+                    Some(parent) => match self.read(parent, env, stmt.span)? {
+                        Value::Class(id) => Some(id),
+                        other => {
+                            return Err(QuinceError::new(
+                                format!(
+                                    "a class can only extend a class, but `{}` is {}",
+                                    parent.name,
+                                    other.type_name(&self.heap)
+                                ),
+                                stmt.span,
+                            ));
+                        }
+                    },
+                    None => None,
+                };
+
+                // A subclass wraps its methods in a scope holding the parent, so
+                // `super` is an ordinary local wherever it appears — including
+                // inside a closure nested in a method. The resolver pushed the
+                // matching scope, so the hop counts already account for it.
+                let enclosing = match parent {
+                    Some(id) => {
+                        let scope = self.heap.alloc(Object::Env(Env::new(Some(env), 1)));
+                        self.heap.env_mut(scope).set(0, Value::Class(id));
+                        scope
+                    }
+                    None => env,
+                };
+
+                // Methods close over that scope, exactly as a `fn` at the same
+                // position would. Nothing here reaches a safe point, so the
+                // functions are safe unrooted until the class owning them exists.
                 let table = methods
                     .iter()
                     .map(|decl| {
                         let func = self.heap.alloc(Object::Function(Function {
                             decl: Rc::clone(decl),
-                            env,
+                            env: enclosing,
                         }));
                         (decl.name.clone(), func)
                     })
@@ -235,6 +268,7 @@ impl Interp {
                 let class = self.heap.alloc(Object::Class(UserClass {
                     name: name.clone(),
                     methods: table,
+                    parent,
                 }));
                 self.bind(slot, name, Value::Class(class), false, env);
                 Ok(Flow::Normal)
@@ -506,6 +540,23 @@ impl Interp {
                 if let ExprKind::Field { target, name } = &callee.kind {
                     return self.eval_method_call(target, name, args, env, callee.span, expr.span);
                 }
+                // `super.init(name)` is the overwhelmingly common form, and it
+                // is fused for the same reason: no bound method to allocate.
+                if let ExprKind::Super {
+                    name,
+                    parent,
+                    receiver,
+                } = &callee.kind
+                {
+                    let (receiver, method) =
+                        self.super_method(parent, receiver, name, env, callee.span)?;
+                    let mark = self.temps.len();
+                    self.temps.push(receiver.clone());
+                    self.temps.push(method.clone());
+                    let values = self.eval_seq(args, env);
+                    self.temps.truncate(mark);
+                    return self.call_method(receiver, method, values?, expr.span);
+                }
 
                 let target = self.eval(callee, env)?;
                 // The callee is held across every argument, any of which can
@@ -559,6 +610,21 @@ impl Interp {
                             .alloc(Object::BoundMethod(BoundMethod { receiver, method })),
                     )),
                 }
+            }
+
+            // Only reached when the method is not called immediately. Binding it
+            // to `self` is the whole point of `super`: the parent's code runs,
+            // but on this object.
+            ExprKind::Super {
+                name,
+                parent,
+                receiver,
+            } => {
+                let (receiver, method) =
+                    self.super_method(parent, receiver, name, env, expr.span)?;
+                Ok(Value::BoundMethod(self.heap.alloc(Object::BoundMethod(
+                    BoundMethod { receiver, method },
+                ))))
             }
 
             ExprKind::Assign { target, value } => {
@@ -956,6 +1022,39 @@ impl Interp {
         match receiver.class(&self.heap).method(name, &self.heap) {
             Some(method) => Ok(Attr::Method(method)),
             None => Err(self.no_attr(receiver, name, span)),
+        }
+    }
+
+    /// Resolves `super.name` to the receiver it will run on and the method to
+    /// run, without calling anything.
+    ///
+    /// The two halves come from different scopes — the parent class from the
+    /// one wrapped around the methods, the receiver from the enclosing method's
+    /// parameters — and both are read through slots the resolver assigned, so
+    /// nothing here searches by name.
+    ///
+    /// The lookup starts *at* the parent, which is what stops an override from
+    /// calling itself: `Dog.speak` reaching for `super.speak` must not find
+    /// `Dog.speak` again.
+    fn super_method(
+        &mut self,
+        parent: &Var,
+        receiver: &Var,
+        name: &str,
+        env: ObjId,
+        span: Span,
+    ) -> Result<(Value, Value), QuinceError> {
+        let Value::Class(id) = self.read(parent, env, span)? else {
+            unreachable!("`super` is only ever bound to a class");
+        };
+        let receiver = self.read(receiver, env, span)?;
+
+        match self.heap.class(id).method(name, &self.heap) {
+            Some(method) => Ok((receiver, method)),
+            None => Err(QuinceError::new(
+                format!("{} has no method `{name}`", self.heap.class(id).name),
+                span,
+            )),
         }
     }
 
@@ -1788,6 +1887,55 @@ mod tests {
         assert!(interp.heap.collections > 0, "the collector never ran");
         assert_eq!(global(&interp, "kept"), Some(Value::Int(42)));
         assert_eq!(global(&interp, "name"), Some(Value::from("Hidden")));
+    }
+
+    #[test]
+    fn a_parent_class_survives_the_subclass_that_names_it() {
+        // `Base` goes out of scope with `build`, leaving the subclass's `parent`
+        // handle as the only thing that reaches it. Method lookup walks that
+        // chain, so losing it turns an inherited call into a panic.
+        let interp = run(&format!(
+            "fn build() {{\n\
+             class Base {{ fn greet() {{ return 42 }} }}\n\
+             class Sub extends Base {{}}\n\
+             return Sub()\n\
+             }}\n\
+             let obj = build()\n\
+             {}\
+             let junk = churn()\n\
+             let kept = obj.greet()",
+            churn("0")
+        ));
+
+        assert!(interp.heap.collections > 0, "the collector never ran");
+        assert_eq!(global(&interp, "kept"), Some(Value::Int(42)));
+    }
+
+    #[test]
+    fn the_scope_holding_super_survives_with_the_methods_that_close_over_it() {
+        // A subclass's methods close over a scope whose only slot is the parent
+        // class. Nothing names that scope, so it is reachable only as a method's
+        // captured environment — and `super.speak()` reads straight out of it.
+        //
+        // No new root was needed for it, which is the point: making `super` a
+        // captured local rather than a field on the class means the collector
+        // work was already done. This is the test that would notice if that
+        // stopped being true — deleting `Function`'s env tracing fails it.
+        let interp = run(&format!(
+            "fn build() {{\n\
+             class Base {{ fn speak() {{ return 1 }} }}\n\
+             class Sub extends Base {{ fn speak() {{ return super.speak() + 1 }} }}\n\
+             return Sub()\n\
+             }}\n\
+             let obj = build()\n\
+             {}\
+             let junk = churn()\n\
+             let kept = obj.speak()",
+            churn("0")
+        ));
+
+        assert!(interp.heap.collections > 0, "the collector never ran");
+        assert_eq!(global(&interp, "kept"), Some(Value::Int(2)));
     }
 
     #[test]

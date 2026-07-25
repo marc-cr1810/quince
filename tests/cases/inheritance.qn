@@ -1,0 +1,81 @@
+class Animal {
+    fn init(name) {
+        self.name = name
+    }
+    fn speak() {
+        return "..."
+    }
+    fn describe() {
+        return self.name + " says " + self.speak()
+    }
+}
+
+class Dog extends Animal {
+    fn init(name, breed) {
+        super.init(name)
+        self.breed = breed
+    }
+    fn speak() {
+        return "woof"
+    }
+}
+
+let a = Animal("generic")
+let d = Dog("Rex", "corgi")
+
+# `describe` is inherited, but the `speak` it calls is the override — the
+# receiver decides, not the class the code was written in.
+print(a.describe())
+print(d.describe())
+print(d.name, d.breed)
+print(a.speak(), d.speak())
+
+# An instance reports its own class, never its parent's.
+print(type(a), type(d))
+print(a, d)
+
+# Three levels, with `super` chaining through the middle one.
+class Puppy extends Dog {
+    fn speak() {
+        return super.speak() + "!"
+    }
+}
+let p = Puppy("Bit", "corgi")
+print(p.describe())
+print(p.speak())
+print(type(p))
+
+# A subclass that adds no `init` uses its parent's.
+class Cat extends Animal {
+    fn speak() {
+        return "meow"
+    }
+}
+print(Cat("Tom").describe())
+
+# `super.m` is a value like any other method reference, not call syntax.
+class Loud extends Dog {
+    fn speak() {
+        let base = super.speak
+        return base().upper()
+    }
+}
+print(Loud("Max", "lab").describe())
+
+# `super` reaches through a closure nested in a method, because it is a local
+# in an enclosing scope rather than something bound per call.
+class Echo extends Animal {
+    fn twice() {
+        fn inner() {
+            return super.speak() + super.speak()
+        }
+        return inner()
+    }
+}
+print(Echo("Val").twice())
+
+# A class is a value, so a subclass is one too.
+let kinds = [Dog, Puppy]
+for kind in kinds {
+    print(kind("Ash", "mix").describe())
+}

@@ -123,6 +123,19 @@ pub enum ExprKind {
         target: Box<Expr>,
         name: String,
     },
+    /// `super.name`, which is a lookup that starts at the parent class but
+    /// binds to the current receiver.
+    ///
+    /// A node of its own rather than a `Field` over a `super` variable, because
+    /// those two halves come from different places: the class to search from is
+    /// in the scope wrapped around the methods, and the receiver to bind to is
+    /// the enclosing method's `self`. Both are ordinary variable references, so
+    /// the resolver handles them without knowing what they mean.
+    Super {
+        name: String,
+        parent: Var,
+        receiver: Var,
+    },
     /// `target` is restricted to an assignable form by the parser, so the
     /// evaluator can assume it is an ident, index, or field access.
     Assign {
@@ -156,6 +169,14 @@ pub struct Param {
 /// special case. What the keyword buys is the error when it is used outside a
 /// method, which would otherwise read `undefined variable`.
 pub const SELF: &str = "self";
+
+/// The parent class's name inside a method body.
+///
+/// Bound the same way, but as a slot in a scope wrapped around the methods of a
+/// class that extends another, rather than as a parameter — its value is fixed
+/// when the class is declared, not per call. A closure nested in a method
+/// reaches it through the same chain that carries [`SELF`].
+pub const SUPER: &str = "super";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct FnDecl {
@@ -194,6 +215,9 @@ pub enum StmtKind {
     /// parameter is the receiver, so nothing about calling one is special.
     Class {
         name: String,
+        /// The class this one extends, resolved in the enclosing scope like any
+        /// other name — a superclass is an ordinary value, not a static label.
+        parent: Option<Var>,
         methods: Vec<Rc<FnDecl>>,
         /// Where the class's own name is bound, as for `Let`.
         slot: Option<Slot>,

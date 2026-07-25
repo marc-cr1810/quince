@@ -149,6 +149,14 @@ impl Parser {
     fn class_stmt(&mut self) -> Result<Stmt, QuinceError> {
         let start = self.advance().span;
         let (name, _) = self.expect_ident("after `class`")?;
+
+        let parent = if self.eat(&TokenKind::Extends) {
+            let (parent, _) = self.expect_ident("after `extends`")?;
+            Some(Var::new(parent))
+        } else {
+            None
+        };
+
         self.expect(TokenKind::LBrace, "after the class name")?;
 
         let mut methods = Vec::new();
@@ -166,6 +174,7 @@ impl Parser {
         Ok(Stmt {
             kind: StmtKind::Class {
                 name,
+                parent,
                 methods,
                 slot: None,
             },
@@ -444,6 +453,23 @@ impl Parser {
             // this name arrived as a keyword.
             TokenKind::SelfKw => ExprKind::Var(Var::new(ast::SELF)),
 
+            // `super` is only ever a lookup — there is nothing useful to do
+            // with the parent class as a bare value that naming it would not
+            // do better, and requiring the `.name` here means the error lands
+            // on the `super` rather than somewhere downstream.
+            TokenKind::Super => {
+                self.expect(TokenKind::Dot, "after `super`")?;
+                let (name, end) = self.expect_ident("after `super.`")?;
+                return Ok(Expr {
+                    kind: ExprKind::Super {
+                        name,
+                        parent: Var::new(ast::SUPER),
+                        receiver: Var::new(ast::SELF),
+                    },
+                    span: token.span.to(end),
+                });
+            }
+
             TokenKind::LParen => {
                 let inner = self.expression()?;
                 let close = self.expect(TokenKind::RParen, "after the expression")?;
@@ -686,6 +712,7 @@ mod tests {
             ExprKind::Assign { target, value } => {
                 format!("(= {} {})", sexpr(target), sexpr(value))
             }
+            ExprKind::Super { name, .. } => format!("(super {name})"),
         }
     }
 
@@ -1032,6 +1059,26 @@ mod tests {
             panic!("expected a return");
         };
         assert_eq!(sexpr(expr), "(. self x)");
+    }
+
+    #[test]
+    fn a_superclass_is_a_name_like_any_other() {
+        let stmts = parse_ok("class Dog extends Animal {}");
+        let StmtKind::Class { name, parent, .. } = &stmts[0].kind else {
+            panic!("expected a class");
+        };
+        assert_eq!(name, "Dog");
+        assert_eq!(parent.as_ref().map(|p| p.name.as_str()), Some("Animal"));
+    }
+
+    #[test]
+    fn super_must_be_followed_by_a_name() {
+        // `super` alone has no useful value — the parent class is better named
+        // directly — so requiring the `.name` puts the error on the `super`.
+        assert_eq!(
+            parse_err("class B extends A {\n fn m() { return super }\n}").message,
+            "expected `.` after `super`, found `}`"
+        );
     }
 
     #[test]
