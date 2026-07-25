@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
+use quince::color::ColorChoice;
+
 #[derive(Parser)]
 #[command(
     name = "quince",
@@ -9,6 +11,10 @@ use clap::{Parser, Subcommand, ValueEnum};
     about = "A dynamically-typed scripting language"
 )]
 pub struct Cli {
+    /// When to use colored output [auto, always, never]
+    #[arg(long, global = true, value_enum, default_value_t = ColorChoice::Auto)]
+    pub color: ColorChoice,
+
     #[command(subcommand)]
     pub command: Command,
 }

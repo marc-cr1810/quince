@@ -3,6 +3,7 @@ use std::rc::Rc;
 
 use crate::ast::FnDecl;
 use crate::class::{self, Class};
+use crate::color::Style;
 use crate::error::QuinceError;
 use crate::heap::{Heap, ObjId};
 use crate::interp::Interp;
@@ -205,40 +206,68 @@ impl Value {
 
     /// How a value prints. `Nil` shows as `nil` so it is visible in output.
     pub fn display(&self, heap: &Heap) -> String {
+        self.display_styled(heap, false)
+    }
+
+    /// How a value prints with optional ANSI syntax highlighting.
+    pub fn display_styled(&self, heap: &Heap, color: bool) -> String {
         match self {
-            Value::Nil => "nil".to_string(),
-            Value::Bool(b) => b.to_string(),
-            Value::Int(n) => n.to_string(),
+            Value::Nil => Style::DIM.paint("nil", color),
+            Value::Bool(b) => Style::YELLOW.paint(b, color),
+            Value::Int(n) => Style::CYAN.paint(n, color),
             // Keeps floats distinguishable from ints in output: `1.0`, not `1`.
-            Value::Float(n) if n.fract() == 0.0 && n.is_finite() => format!("{n:.1}"),
-            Value::Float(n) => n.to_string(),
-            Value::Str(s) => s.to_string(),
+            Value::Float(n) if n.fract() == 0.0 && n.is_finite() => {
+                Style::CYAN.paint(format!("{n:.1}"), color)
+            }
+            Value::Float(n) => Style::CYAN.paint(n, color),
+            Value::Str(s) => Style::GREEN.paint(s, color),
             Value::List(id) => {
-                let items: Vec<_> = heap.list(*id).iter().map(|v| v.repr(heap)).collect();
-                format!("[{}]", items.join(", "))
+                let items: Vec<_> = heap
+                    .list(*id)
+                    .iter()
+                    .map(|v| v.repr_styled(heap, color))
+                    .collect();
+                format!(
+                    "{}{}{}",
+                    Style::BOLD.paint("[", color),
+                    items.join(", "),
+                    Style::BOLD.paint("]", color)
+                )
             }
             Value::Dict(id) => {
                 let entries: Vec<_> = heap
                     .dict(*id)
                     .iter()
                     .map(|(key, value)| {
-                        format!("{}: {}", key.to_value().repr(heap), value.repr(heap))
+                        format!(
+                            "{}: {}",
+                            key.to_value().repr_styled(heap, color),
+                            value.repr_styled(heap, color)
+                        )
                     })
                     .collect();
-                format!("{{{}}}", entries.join(", "))
-            }
-            Value::Function(id) => format!("<fn {}>", heap.function(*id).decl.name),
-            Value::Native(native) => format!("<builtin {}>", native.name),
-            Value::BoundMethod(id) => {
-                let bound = heap.bound_method(*id);
                 format!(
-                    "<method {} of {}>",
-                    bound.method.callable_name(heap),
-                    bound.receiver.type_name(heap)
+                    "{}{}{}",
+                    Style::BOLD.paint("{", color),
+                    entries.join(", "),
+                    Style::BOLD.paint("}", color)
                 )
             }
-            Value::Class(id) => format!("<class {}>", heap.class(*id).name),
-            Value::Instance(_) => format!("<{} instance>", self.type_name(heap)),
+            Value::Function(id) => Style::MAGENTA.paint(format!("<fn {}>", heap.function(*id).decl.name), color),
+            Value::Native(native) => Style::MAGENTA.paint(format!("<builtin {}>", native.name), color),
+            Value::BoundMethod(id) => {
+                let bound = heap.bound_method(*id);
+                Style::MAGENTA.paint(
+                    format!(
+                        "<method {} of {}>",
+                        bound.method.callable_name(heap),
+                        bound.receiver.type_name(heap)
+                    ),
+                    color,
+                )
+            }
+            Value::Class(id) => Style::MAGENTA.paint(format!("<class {}>", heap.class(*id).name), color),
+            Value::Instance(_) => Style::MAGENTA.paint(format!("<{} instance>", self.type_name(heap)), color),
         }
     }
 
@@ -256,9 +285,14 @@ impl Value {
     /// quoting to stay distinguishable from bare identifiers. Also what error
     /// messages use when they name a value rather than a type.
     pub fn repr(&self, heap: &Heap) -> String {
+        self.repr_styled(heap, false)
+    }
+
+    /// How a value prints inside collections with optional ANSI colors.
+    pub fn repr_styled(&self, heap: &Heap, color: bool) -> String {
         match self {
-            Value::Str(s) => format!("{s:?}"),
-            other => other.display(heap),
+            Value::Str(s) => Style::GREEN.paint(format!("{s:?}"), color),
+            other => other.display_styled(heap, color),
         }
     }
 }

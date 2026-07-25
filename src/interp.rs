@@ -1319,10 +1319,7 @@ fn float_op(op: BinaryOp, a: f64, b: f64, span: Span) -> Result<Value, QuinceErr
 /// froze it — that is what "deeply" means.
 fn frozen(heap: &Heap, value: &Value, span: Span) -> QuinceError {
     QuinceError::new(
-        format!(
-            "`const` froze this {}, so it cannot be modified",
-            value.type_name(heap)
-        ),
+        format!("cannot modify `const` {}", value.type_name(heap)),
         span,
     )
 }

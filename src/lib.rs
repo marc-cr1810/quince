@@ -1,5 +1,6 @@
 pub mod ast;
 pub mod class;
+pub mod color;
 pub mod dict;
 pub mod env;
 pub mod error;

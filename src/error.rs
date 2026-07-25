@@ -1,5 +1,6 @@
 use std::fmt;
 
+use crate::color::Style;
 use crate::token::Span;
 
 /// An error carrying the source range that caused it.
@@ -23,6 +24,11 @@ impl QuinceError {
     /// Renders the error against the source it came from, with a caret pointing
     /// at the offending range.
     pub fn report(&self, source: &str, path: &str) -> String {
+        self.report_styled(source, path, false)
+    }
+
+    /// Renders the error against the source with optional ANSI colors.
+    pub fn report_styled(&self, source: &str, path: &str, color: bool) -> String {
         let (line, col) = line_col(source, self.span.start as usize);
         let text = source.lines().nth(line - 1).unwrap_or("");
 
@@ -34,16 +40,21 @@ impl QuinceError {
             .max(1);
 
         let gutter = line.to_string().len();
+
+        let err_label = Style::BOLD_RED.paint("error", color);
+        let msg = Style::BOLD.paint(&self.message, color);
+        let arrow = Style::BOLD_CYAN.paint("-->", color);
+        let bar = Style::BOLD_CYAN.paint("|", color);
+        let caret = Style::BOLD_RED.paint("^".repeat(width), color);
+
         format!(
-            "error: {msg}\n\
-             {blank:>gutter$}--> {path}:{line}:{col}\n\
-             {blank:>gutter$} |\n\
-             {line} | {text}\n\
-             {blank:>gutter$} | {pad}{caret}",
-            msg = self.message,
+            "{err_label}: {msg}\n\
+             {blank:>gutter$}{arrow} {path}:{line}:{col}\n\
+             {blank:>gutter$} {bar}\n\
+             {line} {bar} {text}\n\
+             {blank:>gutter$} {bar} {pad}{caret}",
             blank = "",
             pad = " ".repeat(col - 1),
-            caret = "^".repeat(width),
         )
     }
 }
@@ -98,5 +109,14 @@ mod tests {
         assert!(out.contains("error: unexpected character '@'"), "{out}");
         assert!(out.contains("--> test.qn:1:9"), "{out}");
         assert!(out.ends_with("^"), "{out}");
+    }
+
+    #[test]
+    fn report_styled_with_color() {
+        let src = "let x = @";
+        let err = QuinceError::new("unexpected character '@'", Span::new(8, 9));
+        let out = err.report_styled(src, "test.qn", true);
+        assert!(out.contains("\x1b[1;31merror\x1b[0m: \x1b[1munexpected character '@'\x1b[0m"), "{out}");
+        assert!(out.contains("\x1b[1;36m-->\x1b[0m test.qn:1:9"), "{out}");
     }
 }
