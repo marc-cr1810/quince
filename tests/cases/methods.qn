@@ -1,0 +1,33 @@
+# Methods on the builtin types. Everything that acts on one particular type is
+# reached through that type rather than through a global.
+let xs = [1, 2]
+xs.push(3)
+print(xs)
+
+let d = {"a": 1, "b": 2}
+print(d.keys())
+print(d.values())
+print(d.remove("a"))
+print(d)
+
+# A method is an ordinary value: bound now, called later, passed around.
+let grow = xs.push
+grow(4)
+grow(5)
+print(xs)
+print(type(grow))
+
+# Binding twice gives equal values, even though each binding is a fresh
+# allocation. Different receivers stay distinct.
+print(xs.push == xs.push)
+print(xs.push == [].push)
+
+# A method call is an expression, so a receiver can be anything that produces
+# a value of the right type.
+print({"k": 1, "j": 2}.keys())
+print([1, 2] + [3])
+
+fn make() { return [] }
+let built = make()
+for n in [1, 2, 3] { built.push(n * n) }
+print(built)

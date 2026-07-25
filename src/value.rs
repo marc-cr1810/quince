@@ -27,6 +27,18 @@ pub struct Function {
 /// capture what a program prints.
 pub type NativeFn = fn(&mut Interp, &[Value], Span) -> Result<Value, QuinceError>;
 
+/// A method that has found its receiver but has not been called yet.
+///
+/// Only produced by a bare `x.push`, since `x.push(1)` dispatches without
+/// building one. It exists so that a method is an ordinary value — passable,
+/// storable, callable later — rather than syntax that only works in call
+/// position.
+#[derive(Clone, Debug)]
+pub struct BoundMethod {
+    pub receiver: Value,
+    pub method: &'static Native,
+}
+
 /// A function implemented in Rust.
 pub struct Native {
     pub name: &'static str,
@@ -55,6 +67,9 @@ pub enum Value {
     Dict(ObjId),
     Function(ObjId),
     Native(&'static Native),
+    /// Heap-allocated because it holds a receiver, which may be a handle the
+    /// collector has to follow.
+    BoundMethod(ObjId),
 }
 
 impl Value {
@@ -64,7 +79,9 @@ impl Value {
     /// keep anything alive.
     pub fn handle(&self) -> Option<ObjId> {
         match self {
-            Value::List(id) | Value::Dict(id) | Value::Function(id) => Some(*id),
+            Value::List(id) | Value::Dict(id) | Value::Function(id) | Value::BoundMethod(id) => {
+                Some(*id)
+            }
             _ => None,
         }
     }
@@ -84,7 +101,7 @@ impl Value {
             Value::Str(_) => &class::STR,
             Value::List(_) => &class::LIST,
             Value::Dict(_) => &class::DICT,
-            Value::Function(_) | Value::Native(_) => &class::FUNCTION,
+            Value::Function(_) | Value::Native(_) | Value::BoundMethod(_) => &class::FUNCTION,
         }
     }
 
@@ -104,7 +121,7 @@ impl Value {
             Value::Str(s) => !s.is_empty(),
             Value::List(id) => !heap.list(*id).is_empty(),
             Value::Dict(id) => !heap.dict(*id).is_empty(),
-            Value::Function(_) | Value::Native(_) => true,
+            Value::Function(_) | Value::Native(_) | Value::BoundMethod(_) => true,
         }
     }
 
@@ -143,6 +160,18 @@ impl Value {
             // Functions compare by identity; there is no useful structural test.
             (Value::Function(a), Value::Function(b)) => a == b,
             (Value::Native(a), Value::Native(b)) => std::ptr::eq(*a, *b),
+            // Two bindings of the same method to the same object are equal even
+            // though `x.push` allocates a fresh one each time — otherwise
+            // `x.push == x.push` would be false, which nothing could justify.
+            // The receiver compares by identity rather than structurally, so
+            // `[].push` and another empty list's `push` stay distinct.
+            (Value::BoundMethod(a), Value::BoundMethod(b)) => {
+                if a == b {
+                    return true;
+                }
+                let (a, b) = (heap.bound_method(*a), heap.bound_method(*b));
+                std::ptr::eq(a.method, b.method) && a.receiver == b.receiver
+            }
             _ => false,
         }
     }
@@ -173,6 +202,14 @@ impl Value {
             }
             Value::Function(id) => format!("<fn {}>", heap.function(*id).decl.name),
             Value::Native(native) => format!("<builtin {}>", native.name),
+            Value::BoundMethod(id) => {
+                let bound = heap.bound_method(*id);
+                format!(
+                    "<method {} of {}>",
+                    bound.method.name,
+                    bound.receiver.type_name()
+                )
+            }
         }
     }
 
@@ -201,6 +238,7 @@ impl PartialEq for Value {
             (Value::Dict(a), Value::Dict(b)) => a == b,
             (Value::Function(a), Value::Function(b)) => a == b,
             (Value::Native(a), Value::Native(b)) => std::ptr::eq(*a, *b),
+            (Value::BoundMethod(a), Value::BoundMethod(b)) => a == b,
             _ => false,
         }
     }

@@ -1,6 +1,6 @@
 use crate::dict::Dict;
 use crate::env::{Env, Globals};
-use crate::value::{Function, Value};
+use crate::value::{BoundMethod, Function, Value};
 
 /// A handle into the [`Heap`].
 ///
@@ -20,6 +20,7 @@ pub enum Object {
     /// permanent root.
     Globals(Globals),
     Function(Function),
+    BoundMethod(BoundMethod),
 }
 
 /// Live objects at which a collection is worth doing. Below this the mark phase
@@ -187,6 +188,13 @@ impl Heap {
         }
     }
 
+    pub fn bound_method(&self, id: ObjId) -> &BoundMethod {
+        match self.get(id) {
+            Object::BoundMethod(bound) => bound,
+            other => panic!("expected a bound method, found {other:?}"),
+        }
+    }
+
     /// Objects currently allocated. Not the arena's size — freed slots are
     /// still there, waiting to be reused.
     pub fn live(&self) -> usize {
@@ -212,6 +220,9 @@ fn trace(object: &Object, worklist: &mut Vec<ObjId>) {
         Object::Env(env) => env.trace(worklist),
         Object::Globals(globals) => globals.trace(worklist),
         Object::Function(func) => worklist.push(func.env),
+        // A bound method is often the only thing holding its receiver alive:
+        // in `[1, 2].push`, the list is reachable from nowhere else.
+        Object::BoundMethod(bound) => worklist.extend(bound.receiver.handle()),
     }
 }
 

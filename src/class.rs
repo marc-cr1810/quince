@@ -5,20 +5,61 @@
 //! protocol slots a user-defined class overrides. Builtin types are static, so
 //! naming one costs nothing and allocates nothing.
 //!
-//! Only `name` lives here so far. `methods` arrives with dispatch, and user
-//! classes with v0.4; see Dispatch in DESIGN.md for the shape they land in.
+//! User classes arrive with v0.4; see Dispatch in DESIGN.md for the shape.
+
+use crate::interp::{KEYS, PUSH, REMOVE, VALUES};
+use crate::value::Native;
 
 /// A type built into the language.
 pub struct BuiltinType {
     /// What the type is called in error messages and in `type(x)`.
     pub name: &'static str,
+    /// The methods callable on a value of this type, looked up by name.
+    ///
+    /// A slice rather than a map: these are single digits long, a linear scan
+    /// over contiguous memory beats hashing at that size, and a `static` needs
+    /// no construction at startup.
+    pub methods: &'static [(&'static str, &'static Native)],
 }
 
-pub static NIL: BuiltinType = BuiltinType { name: "nil" };
-pub static BOOL: BuiltinType = BuiltinType { name: "bool" };
-pub static INT: BuiltinType = BuiltinType { name: "int" };
-pub static FLOAT: BuiltinType = BuiltinType { name: "float" };
-pub static STR: BuiltinType = BuiltinType { name: "string" };
-pub static LIST: BuiltinType = BuiltinType { name: "list" };
-pub static DICT: BuiltinType = BuiltinType { name: "dict" };
-pub static FUNCTION: BuiltinType = BuiltinType { name: "function" };
+impl BuiltinType {
+    pub fn method(&self, name: &str) -> Option<&'static Native> {
+        self.methods
+            .iter()
+            .find(|(method, _)| *method == name)
+            .map(|(_, native)| *native)
+    }
+}
+
+pub static NIL: BuiltinType = BuiltinType {
+    name: "nil",
+    methods: &[],
+};
+pub static BOOL: BuiltinType = BuiltinType {
+    name: "bool",
+    methods: &[],
+};
+pub static INT: BuiltinType = BuiltinType {
+    name: "int",
+    methods: &[],
+};
+pub static FLOAT: BuiltinType = BuiltinType {
+    name: "float",
+    methods: &[],
+};
+pub static STR: BuiltinType = BuiltinType {
+    name: "string",
+    methods: &[],
+};
+pub static LIST: BuiltinType = BuiltinType {
+    name: "list",
+    methods: &[("push", &PUSH)],
+};
+pub static DICT: BuiltinType = BuiltinType {
+    name: "dict",
+    methods: &[("keys", &KEYS), ("values", &VALUES), ("remove", &REMOVE)],
+};
+pub static FUNCTION: BuiltinType = BuiltinType {
+    name: "function",
+    methods: &[],
+};

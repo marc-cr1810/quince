@@ -13,12 +13,12 @@ print(d)
 
 # Updating a value does not move the key to the back.
 d["name"] = "q"
-print(keys(d))
-print(values(d))
+print(d.keys())
+print(d.values())
 
 # Membership and removal.
 print("name" in d, "missing" in d)
-print(remove(d, "stable"))
+print(d.remove("stable"))
 print(d, len(d))
 
 # Iteration yields keys, in order.

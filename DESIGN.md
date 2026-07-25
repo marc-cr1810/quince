@@ -454,8 +454,48 @@ not after.
 ### Sequencing
 
 None of this gets built speculatively. It arrives as the machinery that makes
-`x.push(1)` work, with `Class::User` present from the start as a variant that nothing
-constructs yet, so that classes slot into a shape already built to hold them.
+`x.push(1)` work.
+
+This section originally went further and said `Class::User` should be present from the
+start, as a variant nothing constructs, so classes would slot into a shape already
+built for them. **That did not survive contact.** Written that way it is dead code: no
+constructor, no caller, and nothing that fails if it is wrong. A commit whose content
+cannot be reviewed — because nothing exercises it — is worse than the later diff it was
+meant to avoid, and it contradicts the paragraph directly above it.
+
+So `Value::class()` returns a `&'static BuiltinType` today, and the `Class` enum arrives
+with user classes. The cost is one signature change in v0.4: `class()` will need `&Heap`
+too, because an instance stores its class as a handle. That is affordable precisely
+because the indirection exists — there is one call site, in method dispatch.
+
+The general lesson is the one the `{` section already records, arriving from the other
+direction: a design written ahead of the code is worth having, and is still a
+prediction. Where it turned out to be wrong it gets corrected, not quietly satisfied.
+
+### What landed
+
+Methods on builtin types work. `push` belongs to `list`; `keys`, `values`, and `remove`
+belong to `dict`; and they are no longer globals — the doc comment on `push` had
+promised that since it was written.
+
+`x.m(a)` is fused: it dispatches without allocating, because that form is overwhelmingly
+the common one. A bare `x.m` allocates a `BoundMethod` holding the receiver, which makes
+a method an ordinary value rather than syntax that only works in call position, and
+which the collector has to trace — in `[1, 2].push` the bound method is the only thing
+keeping the list alive.
+
+The receiver counts as `args[0]`, so a method's declared arity is one more than the call
+site writes. Arity errors subtract it back out; reporting the declared number would ask
+for an argument that has no syntax.
+
+One thing to know before touching `eval` again: adding the method-call arm raised the
+native stack a single Quince call frame consumes by roughly half, in debug builds, with
+no change to the size of `Value` or `Object`. `MAX_DEPTH` is a fixed 250 and is not
+calibrated against any actual stack, so that shifted the corpus test from a clean
+"recursion limit exceeded" to a SIGSEGV. The test now runs on a thread whose size it
+states. **The production gap is still open**: on a small-stack platform, 250 frames can
+overflow before the limit fires, and `MAX_DEPTH`'s promise is only kept by the main
+thread happening to be large enough.
 
 ## Roadmap
 
@@ -504,8 +544,12 @@ Control flow (`if`/`while`/`for`), functions, closures, proper scoping.
 Lists, dicts, strings with methods, indexing, iteration.
 
 Lists and dicts are done, with indexing, iteration, concatenation, and membership.
-Methods are the remainder, and they need dispatch before anything else — see Dispatch
-above, which is written ahead of the code precisely because v0.4 reuses all of it.
+Dispatch is done too — see Dispatch above — so `list` and `dict` have methods and the
+globals that stood in for them are gone.
+
+Strings are what remain: they have `+`, comparison, `in`, and `len`, and no methods at
+all. No indexing, no slicing, no `split`/`join`/`trim`/case conversion. That is now a
+matter of filling in a table rather than of building anything.
 
 **v0.4 — objects**
 Classes, methods, inheritance, `self`.

@@ -33,7 +33,7 @@ fn makers() {
     let out = []
     for n in [1, 2, 3] {
         fn hold() { return n }
-        push(out, hold)
+        out.push(hold)
     }
     return out
 }

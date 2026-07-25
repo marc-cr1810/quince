@@ -42,8 +42,32 @@ fn run(source: &str) -> Result<String, String> {
     }
 }
 
+/// Runs the corpus on a thread whose stack size this test chooses.
+///
+/// `err_recursion.qn` deliberately recurses until the interpreter's own limit
+/// stops it, and how much native stack those 250 frames cost moves with the
+/// build profile and with edits to `eval` that have nothing to do with
+/// recursion. Relying on whatever the test harness happens to default to means
+/// an unrelated change turns a clean error message into a SIGSEGV, which is
+/// what it did. 8 MiB is what the main thread of a real `quince run` gets.
+///
+/// This makes the *test* honest about what it needs. It does not give the
+/// interpreter that guarantee in production — see `MAX_DEPTH` in `interp.rs`.
 #[test]
 fn cases_produce_their_expected_output() {
+    let checker = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(check_cases)
+        .expect("should be able to spawn a thread");
+
+    // Propagates the original panic rather than a wrapper, so a failing case
+    // still reports which case and why.
+    if let Err(payload) = checker.join() {
+        std::panic::resume_unwind(payload);
+    }
+}
+
+fn check_cases() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cases");
     let mut checked = 0;
     let mut failures = Vec::new();

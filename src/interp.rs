@@ -8,7 +8,7 @@ use crate::env::{self, AssignError, Env, Globals};
 use crate::error::QuinceError;
 use crate::heap::{Heap, ObjId, Object};
 use crate::token::Span;
-use crate::value::{Function, Native, Value};
+use crate::value::{BoundMethod, Function, Native, Value};
 
 /// Guards against a runaway recursion taking the process down with a native
 /// stack overflow, which a language should never expose to its users.
@@ -416,6 +416,14 @@ impl Interp {
             }
 
             ExprKind::Call { callee, args } => {
+                // A method call is fused rather than evaluating the callee to a
+                // bound method and then calling it. `xs.push(1)` is by far the
+                // common form, and going through `ExprKind::Field` would
+                // allocate an object per call only to drop it immediately.
+                if let ExprKind::Field { target, name } = &callee.kind {
+                    return self.eval_method_call(target, name, args, env, callee.span, expr.span);
+                }
+
                 let target = self.eval(callee, env)?;
                 // The callee is held across every argument, any of which can
                 // reach a safe point, and a closure built by an expression is
@@ -435,12 +443,18 @@ impl Interp {
                 self.index_get(&target, &index, expr.span)
             }
 
+            // Only reached when a method is not being called immediately — the
+            // fused path above handles `x.m(…)`. Binding it makes a method an
+            // ordinary value rather than syntax that works in one position.
             ExprKind::Field { target, name } => {
-                let value = self.eval(target, env)?;
-                Err(QuinceError::new(
-                    format!("{} has no field `{name}`", value.type_name()),
-                    expr.span,
-                ))
+                let receiver = self.eval(target, env)?;
+                let method = method_of(&receiver, name, expr.span)?;
+                // Nothing between here and the allocation is a safe point, so
+                // the receiver needs no rooting on the way in; once it is
+                // inside, `trace` keeps it alive.
+                Ok(Value::BoundMethod(self.heap.alloc(Object::BoundMethod(
+                    BoundMethod { receiver, method },
+                ))))
             }
 
             ExprKind::Assign { target, value } => {
@@ -640,11 +654,73 @@ impl Interp {
                 }
             }
 
+            Value::BoundMethod(id) => {
+                let bound = self.heap.bound_method(id).clone();
+                self.call_method(bound.receiver, bound.method, args, span)
+            }
+
             other => Err(QuinceError::new(
                 format!("{} is not callable", other.type_name()),
                 span,
             )),
         }
+    }
+
+    /// Evaluates `receiver.name(args)`.
+    ///
+    /// Kept out of `eval` to stop the arm's locals widening a frame that
+    /// recurses once per node in the tree. Measured against this program's
+    /// recursion limit it made no difference — debug frames are dominated by
+    /// things other than one arm — but it keeps `eval` readable.
+    fn eval_method_call(
+        &mut self,
+        target: &Expr,
+        name: &str,
+        args: &[Expr],
+        env: ObjId,
+        callee_span: Span,
+        span: Span,
+    ) -> Result<Value, QuinceError> {
+        let receiver = self.eval(target, env)?;
+        let method = method_of(&receiver, name, callee_span)?;
+
+        // The receiver is held across every argument, any of which can reach a
+        // safe point — the same hazard as an ordinary callee, and the same fix.
+        let mark = self.temps.len();
+        if receiver.handle().is_some() {
+            self.temps.push(receiver.clone());
+        }
+        let values = self.eval_seq(args, env);
+        self.temps.truncate(mark);
+
+        self.call_method(receiver, method, values?, span)
+    }
+
+    /// Calls a builtin with `receiver` occupying `args[0]`.
+    ///
+    /// Passing the receiver in the argument list is what lets one `Native`
+    /// serve as both a free function and a method, so the method table holds
+    /// the type the interpreter already had.
+    fn call_method(
+        &mut self,
+        receiver: Value,
+        method: &'static Native,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, QuinceError> {
+        if let Some(arity) = method.arity {
+            // Reported against what the call site can actually write. The
+            // receiver is one of the declared arguments but has no syntax as
+            // one, so quoting the declared arity would ask for an argument the
+            // user has no way to supply. Every method has a receiver, making
+            // the subtraction safe.
+            check_arity(method.name, arity.saturating_sub(1), args.len(), span)?;
+        }
+
+        let mut full = Vec::with_capacity(args.len() + 1);
+        full.push(receiver);
+        full.extend(args);
+        (method.func)(self, &full, span)
     }
 
     // -- operators ---------------------------------------------------------
@@ -877,6 +953,16 @@ fn type_error(op: BinaryOp, lhs: &Value, rhs: &Value, span: Span) -> QuinceError
     )
 }
 
+/// Finds a method on a value, or explains that the type has none by that name.
+fn method_of(receiver: &Value, name: &str, span: Span) -> Result<&'static Native, QuinceError> {
+    receiver.class().method(name).ok_or_else(|| {
+        QuinceError::new(
+            format!("{} has no method `{name}`", receiver.type_name()),
+            span,
+        )
+    })
+}
+
 fn check_arity(name: &str, expected: usize, found: usize, span: Span) -> Result<(), QuinceError> {
     if expected == found {
         return Ok(());
@@ -890,7 +976,12 @@ fn check_arity(name: &str, expected: usize, found: usize, span: Span) -> Result<
 
 // -- builtins --------------------------------------------------------------
 
-static BUILTINS: &[&Native] = &[&PRINT, &LEN, &TYPE, &PUSH, &KEYS, &VALUES, &REMOVE];
+/// The globals every program starts with.
+///
+/// Anything that acts on one particular type is a method instead, reached
+/// through that type's table in `class.rs`. What remains here either applies to
+/// every type (`len`, `type`) or to none of them (`print`).
+static BUILTINS: &[&Native] = &[&PRINT, &LEN, &TYPE];
 
 static PRINT: Native = Native {
     name: "print",
@@ -921,9 +1012,9 @@ static LEN: Native = Native {
 
 /// The in-place counterpart to `+`, which builds a new list.
 ///
-/// A free function rather than a method because there is no method dispatch
-/// yet; when strings and lists grow methods this becomes `xs.push(x)`.
-static PUSH: Native = Native {
+/// `args[0]` is the receiver, so a method's declared arity is one more than the
+/// number of arguments written at the call site.
+pub static PUSH: Native = Native {
     name: "push",
     arity: Some(2),
     func: |interp, args, span| match &args[0] {
@@ -938,7 +1029,7 @@ static PUSH: Native = Native {
     },
 };
 
-static KEYS: Native = Native {
+pub static KEYS: Native = Native {
     name: "keys",
     arity: Some(1),
     func: |interp, args, span| match &args[0] {
@@ -953,7 +1044,7 @@ static KEYS: Native = Native {
     },
 };
 
-static VALUES: Native = Native {
+pub static VALUES: Native = Native {
     name: "values",
     arity: Some(1),
     func: |interp, args, span| match &args[0] {
@@ -970,7 +1061,7 @@ static VALUES: Native = Native {
 
 /// Removing a key that is not there is an error, for the same reason reading one
 /// is: silently doing nothing hides the typo that caused it.
-static REMOVE: Native = Native {
+pub static REMOVE: Native = Native {
     name: "remove",
     arity: Some(2),
     func: |interp, args, span| match &args[0] {
@@ -1122,6 +1213,54 @@ mod tests {
 
         assert!(interp.heap.collections > 0, "the collector never ran");
         assert_eq!(global(&interp, "kept"), Some(Value::Int(4)));
+    }
+
+    #[test]
+    fn a_bound_method_keeps_its_receiver_alive() {
+        // The list is reachable from nowhere but the bound method: no variable
+        // names it, and it is not inside any other object. If `trace` skipped
+        // the receiver, `push` would later write through a handle whose slot
+        // had been reused.
+        let interp = run(&format!(
+            "fn mk() {{ return [1, 2, 3] }}\n\
+             let m = mk().push\n\
+             {}\
+             let junk = churn()\n\
+             m(4)",
+            churn("0")
+        ));
+
+        assert!(interp.heap.collections > 0, "the collector never ran");
+
+        let Some(Value::BoundMethod(id)) = global(&interp, "m") else {
+            panic!("`m` should be a bound method");
+        };
+        let Value::List(list) = interp.heap.bound_method(id).receiver else {
+            panic!("the receiver should be a list");
+        };
+        assert_eq!(
+            interp.heap.list(list).len(),
+            4,
+            "the push should have landed"
+        );
+    }
+
+    #[test]
+    fn a_receiver_survives_evaluating_the_arguments() {
+        // The receiver exists only in `eval_method_call`'s Rust frame while the
+        // argument runs, and evaluating an argument reaches a safe point. A
+        // dict receiver rather than a list because `remove` returns something
+        // drawn from it, so a collected receiver is a wrong answer and not only
+        // a panic.
+        let interp = run(&format!(
+            "fn mk() {{ return {{\"k\": 7}} }}\n\
+             {}\
+             let got = mk().remove(churn())",
+            churn("\"k\"")
+        ));
+
+        assert!(interp.heap.collections > 0, "the collector never ran");
+        assert_eq!(global(&interp, "got"), Some(Value::Int(7)));
     }
 
     #[test]
