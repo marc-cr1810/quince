@@ -1,13 +1,13 @@
-use std::borrow::Cow;
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
 use anyhow::Result;
+use rustyline::Context;
+use rustyline::Helper;
 use rustyline::completion::{Completer, Pair};
 use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
 use rustyline::validate::Validator;
-use rustyline::Context;
-use rustyline::Helper;
+use std::borrow::Cow;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use quince::class;
 use quince::color::Style;
@@ -196,7 +196,13 @@ impl Highlighter for QuinceHelper {
             }
 
             if start > last_end {
-                push_trivia_with_brackets(&mut output, &line[last_end..start], last_end, &matched_brackets, self.use_color);
+                push_trivia_with_brackets(
+                    &mut output,
+                    &line[last_end..start],
+                    last_end,
+                    &matched_brackets,
+                    self.use_color,
+                );
             }
 
             let text = &line[start..end];
@@ -210,7 +216,13 @@ impl Highlighter for QuinceHelper {
         }
 
         if last_end < line.len() {
-            push_trivia_with_brackets(&mut output, &line[last_end..], last_end, &matched_brackets, self.use_color);
+            push_trivia_with_brackets(
+                &mut output,
+                &line[last_end..],
+                last_end,
+                &matched_brackets,
+                self.use_color,
+            );
         }
 
         Cow::Owned(output)
@@ -253,7 +265,7 @@ fn find_matching_brackets(line: &str, pos: usize) -> Vec<usize> {
     if bytes.is_empty() {
         return Vec::new();
     }
-    
+
     let check_positions = [pos, pos.saturating_sub(1)];
     for &check_pos in &check_positions {
         if check_pos >= bytes.len() {
@@ -308,7 +320,13 @@ fn push_trivia_with_brackets(
     let mut current = 0;
     while let Some(hash_pos) = trivia[current..].find('#') {
         let hash_idx = current + hash_pos;
-        push_plain_or_bracket(output, &trivia[current..hash_idx], base_idx + current, matched_brackets, use_color);
+        push_plain_or_bracket(
+            output,
+            &trivia[current..hash_idx],
+            base_idx + current,
+            matched_brackets,
+            use_color,
+        );
         let end_idx = trivia[hash_idx..]
             .find('\n')
             .map(|i| hash_idx + i)
@@ -318,7 +336,13 @@ fn push_trivia_with_brackets(
         current = end_idx;
     }
     if current < trivia.len() {
-        push_plain_or_bracket(output, &trivia[current..], base_idx + current, matched_brackets, use_color);
+        push_plain_or_bracket(
+            output,
+            &trivia[current..],
+            base_idx + current,
+            matched_brackets,
+            use_color,
+        );
     }
 }
 
@@ -403,9 +427,7 @@ pub fn run_repl(use_color_stdout: bool, use_color_stderr: bool) -> Result<()> {
     let hint = Style::DIM.paint("ctrl-d to exit, :help for commands", use_color_stdout);
     println!("{pkg_name} {version} — {hint}");
 
-    let config = rustyline::Config::builder()
-        .auto_add_history(true)
-        .build();
+    let config = rustyline::Config::builder().auto_add_history(true).build();
     let mut rl = rustyline::Editor::with_config(config)?;
     let globals_store = Arc::new(Mutex::new(Vec::new()));
 
@@ -464,7 +486,12 @@ pub fn run_repl(use_color_stdout: bool, use_color_stderr: bool) -> Result<()> {
         // Handle REPL Meta-Commands
         let trimmed_line = line.trim();
         if buffer.is_empty() && trimmed_line.starts_with(':') {
-            if handle_meta_command(trimmed_line, &mut interp, use_color_stdout, use_color_stderr)? {
+            if handle_meta_command(
+                trimmed_line,
+                &mut interp,
+                use_color_stdout,
+                use_color_stderr,
+            )? {
                 continue;
             }
         }
@@ -510,7 +537,15 @@ mod tests {
         for real in ["chars", "upper", "lower", "push", "keys", "remove", "join"] {
             assert!(names.contains(&real), "{real} should be offered");
         }
-        for fake in ["pop", "insert", "clear", "slice", "contains", "to_uppercase", "len"] {
+        for fake in [
+            "pop",
+            "insert",
+            "clear",
+            "slice",
+            "contains",
+            "to_uppercase",
+            "len",
+        ] {
             assert!(!names.contains(&fake), "{fake} is not a method");
         }
     }
@@ -528,26 +563,59 @@ fn handle_meta_command(
 
     match cmd {
         ":help" => {
-            println!("{}", Style::BOLD_CYAN.paint("Quince REPL Meta-Commands:", use_color_stdout));
-            println!("  {}   Display this help message", Style::YELLOW.paint(":help", use_color_stdout));
-            println!("  {}   List all declared global variables", Style::YELLOW.paint(":vars", use_color_stdout));
-            println!("  {}   Show the runtime type of an expression", Style::YELLOW.paint(":type <expr>", use_color_stdout));
-            println!("  {}    Dump the compiled AST of an expression", Style::YELLOW.paint(":ast <expr>", use_color_stdout));
-            println!("  {} Dump tokens for an expression", Style::YELLOW.paint(":tokens <expr>", use_color_stdout));
-            println!("  {}   Load and run a Quince script file", Style::YELLOW.paint(":load <file>", use_color_stdout));
-            println!("  {}   Time the execution of an expression", Style::YELLOW.paint(":time <expr>", use_color_stdout));
-            println!("  {}  Clear screen and reset REPL environment", Style::YELLOW.paint(":clear", use_color_stdout));
+            println!(
+                "{}",
+                Style::BOLD_CYAN.paint("Quince REPL Meta-Commands:", use_color_stdout)
+            );
+            println!(
+                "  {}   Display this help message",
+                Style::YELLOW.paint(":help", use_color_stdout)
+            );
+            println!(
+                "  {}   List all declared global variables",
+                Style::YELLOW.paint(":vars", use_color_stdout)
+            );
+            println!(
+                "  {}   Show the runtime type of an expression",
+                Style::YELLOW.paint(":type <expr>", use_color_stdout)
+            );
+            println!(
+                "  {}    Dump the compiled AST of an expression",
+                Style::YELLOW.paint(":ast <expr>", use_color_stdout)
+            );
+            println!(
+                "  {} Dump tokens for an expression",
+                Style::YELLOW.paint(":tokens <expr>", use_color_stdout)
+            );
+            println!(
+                "  {}   Load and run a Quince script file",
+                Style::YELLOW.paint(":load <file>", use_color_stdout)
+            );
+            println!(
+                "  {}   Time the execution of an expression",
+                Style::YELLOW.paint(":time <expr>", use_color_stdout)
+            );
+            println!(
+                "  {}  Clear screen and reset REPL environment",
+                Style::YELLOW.paint(":clear", use_color_stdout)
+            );
             Ok(true)
         }
         ":vars" => {
             let globals = interp.get_globals();
             if globals.is_empty() {
-                println!("{}", Style::DIM.paint("No global variables defined.", use_color_stdout));
+                println!(
+                    "{}",
+                    Style::DIM.paint("No global variables defined.", use_color_stdout)
+                );
             } else {
                 for (name, val) in globals {
                     let name_str = Style::BOLD.paint(&name, use_color_stdout);
                     let val_str = val.display_pretty(&interp.heap, use_color_stdout);
-                    let type_str = Style::DIM.paint(format!("({})", val.type_name(&interp.heap)), use_color_stdout);
+                    let type_str = Style::DIM.paint(
+                        format!("({})", val.type_name(&interp.heap)),
+                        use_color_stdout,
+                    );
                     println!("{name_str} = {val_str} {type_str}");
                 }
             }
@@ -555,13 +623,19 @@ fn handle_meta_command(
         }
         ":type" => {
             if arg.is_empty() {
-                println!("{}", Style::DIM.paint("Usage: :type <expression>", use_color_stdout));
+                println!(
+                    "{}",
+                    Style::DIM.paint("Usage: :type <expression>", use_color_stdout)
+                );
                 return Ok(true);
             }
             match quince::compile(arg) {
                 Ok(program) => match interp.run_repl(&program) {
                     Ok(Some(val)) => {
-                        println!("{}", Style::CYAN.paint(val.type_name(&interp.heap), use_color_stdout));
+                        println!(
+                            "{}",
+                            Style::CYAN.paint(val.type_name(&interp.heap), use_color_stdout)
+                        );
                     }
                     Ok(None) => println!("{}", Style::DIM.paint("nil", use_color_stdout)),
                     Err(err) => eprintln!("{}", err.report_styled(arg, "<repl>", use_color_stderr)),
@@ -572,13 +646,19 @@ fn handle_meta_command(
         }
         ":ast" => {
             if arg.is_empty() {
-                println!("{}", Style::DIM.paint("Usage: :ast <expression>", use_color_stdout));
+                println!(
+                    "{}",
+                    Style::DIM.paint("Usage: :ast <expression>", use_color_stdout)
+                );
                 return Ok(true);
             }
             match quince::compile(arg) {
                 Ok(program) => {
                     for stmt in &program {
-                        println!("{}", Style::CYAN.paint(format!("{stmt:#?}"), use_color_stdout));
+                        println!(
+                            "{}",
+                            Style::CYAN.paint(format!("{stmt:#?}"), use_color_stdout)
+                        );
                     }
                 }
                 Err(err) => eprintln!("{}", err.report_styled(arg, "<repl>", use_color_stderr)),
@@ -587,7 +667,10 @@ fn handle_meta_command(
         }
         ":tokens" => {
             if arg.is_empty() {
-                println!("{}", Style::DIM.paint("Usage: :tokens <expression>", use_color_stdout));
+                println!(
+                    "{}",
+                    Style::DIM.paint("Usage: :tokens <expression>", use_color_stdout)
+                );
                 return Ok(true);
             }
             match Lexer::new(arg).tokenize() {
@@ -597,10 +680,8 @@ fn handle_meta_command(
                             format!("{:>4}..{:<4}", token.span.start, token.span.end),
                             use_color_stdout,
                         );
-                        let kind_str = Style::BOLD_CYAN.paint(
-                            format!("{:?}", token.kind),
-                            use_color_stdout,
-                        );
+                        let kind_str =
+                            Style::BOLD_CYAN.paint(format!("{:?}", token.kind), use_color_stdout);
                         println!("{span_str} {kind_str}");
                     }
                 }
@@ -610,13 +691,19 @@ fn handle_meta_command(
         }
         ":load" => {
             if arg.is_empty() {
-                println!("{}", Style::DIM.paint("Usage: :load <filename.q>", use_color_stdout));
+                println!(
+                    "{}",
+                    Style::DIM.paint("Usage: :load <filename.q>", use_color_stdout)
+                );
                 return Ok(true);
             }
             let source = match std::fs::read_to_string(arg) {
                 Ok(src) => src,
                 Err(err) => {
-                    eprintln!("{}", Style::RED.paint(format!("could not read {arg}: {err}"), use_color_stderr));
+                    eprintln!(
+                        "{}",
+                        Style::RED.paint(format!("could not read {arg}: {err}"), use_color_stderr)
+                    );
                     return Ok(true);
                 }
             };
@@ -628,14 +715,20 @@ fn handle_meta_command(
                 }
             };
             match interp.run_repl(&program) {
-                Ok(_) => println!("{}", Style::GREEN.paint(format!("Loaded {arg}"), use_color_stdout)),
+                Ok(_) => println!(
+                    "{}",
+                    Style::GREEN.paint(format!("Loaded {arg}"), use_color_stdout)
+                ),
                 Err(err) => eprintln!("{}", err.report_styled(&source, arg, use_color_stderr)),
             }
             Ok(true)
         }
         ":time" => {
             if arg.is_empty() {
-                println!("{}", Style::DIM.paint("Usage: :time <expression>", use_color_stdout));
+                println!(
+                    "{}",
+                    Style::DIM.paint("Usage: :time <expression>", use_color_stdout)
+                );
                 return Ok(true);
             }
             let start = Instant::now();
@@ -650,12 +743,14 @@ fn handle_meta_command(
                 Ok(Some(val)) => {
                     let elapsed = start.elapsed();
                     let val_str = val.display_pretty(&interp.heap, use_color_stdout);
-                    let time_str = Style::DIM.paint(format!("(evaluated in {:.2?})", elapsed), use_color_stdout);
+                    let time_str = Style::DIM
+                        .paint(format!("(evaluated in {:.2?})", elapsed), use_color_stdout);
                     println!("{val_str} {time_str}");
                 }
                 Ok(None) => {
                     let elapsed = start.elapsed();
-                    let time_str = Style::DIM.paint(format!("(evaluated in {:.2?})", elapsed), use_color_stdout);
+                    let time_str = Style::DIM
+                        .paint(format!("(evaluated in {:.2?})", elapsed), use_color_stdout);
                     println!("{time_str}");
                 }
                 Err(err) => eprintln!("{}", err.report_styled(arg, "<repl>", use_color_stderr)),
@@ -666,11 +761,20 @@ fn handle_meta_command(
             print!("\x1B[2J\x1B[1;1H");
             let _ = std::io::Write::flush(&mut std::io::stdout());
             *interp = Interp::new();
-            println!("{}", Style::DIM.paint("REPL state cleared.", use_color_stdout));
+            println!(
+                "{}",
+                Style::DIM.paint("REPL state cleared.", use_color_stdout)
+            );
             Ok(true)
         }
         _ if input.starts_with(':') => {
-            println!("{}", Style::RED.paint(format!("Unknown command `{input}`. Type :help for commands."), use_color_stdout));
+            println!(
+                "{}",
+                Style::RED.paint(
+                    format!("Unknown command `{input}`. Type :help for commands."),
+                    use_color_stdout
+                )
+            );
             Ok(true)
         }
         _ => Ok(false),

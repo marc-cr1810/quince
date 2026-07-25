@@ -23,7 +23,9 @@ fn main() -> Result<()> {
             let source = std::fs::read_to_string(&file)
                 .with_context(|| format!("could not read {}", file.display()))?;
             let path = file.display().to_string();
-            quince::interp::with_stack(|| run(&source, &path, dump, use_color_stdout, use_color_stderr));
+            quince::interp::with_stack(|| {
+                run(&source, &path, dump, use_color_stdout, use_color_stderr)
+            });
             Ok(())
         }
         Command::Repl => {
@@ -31,7 +33,6 @@ fn main() -> Result<()> {
         }
     }
 }
-
 
 fn run(
     source: &str,
@@ -53,10 +54,7 @@ fn run(
                 format!("{:>4}..{:<4}", token.span.start, token.span.end),
                 use_color_stdout,
             );
-            let kind_str = Style::BOLD_CYAN.paint(
-                format!("{:?}", token.kind),
-                use_color_stdout,
-            );
+            let kind_str = Style::BOLD_CYAN.paint(format!("{:?}", token.kind), use_color_stdout);
             println!("{span_str} {kind_str}");
         }
         return;
@@ -78,24 +76,14 @@ fn run(
         return;
     }
 
-    report(
-        Interp::new().run(&program),
-        source,
-        path,
-        use_color_stderr,
-    );
+    report(Interp::new().run(&program), source, path, use_color_stderr);
 }
 
 /// Renders a compile or runtime error against its source and exits.
 ///
 /// These diagnostics already carry a location and caret, so they bypass anyhow
 /// rather than picking up a second "Error:" prefix.
-fn report<T>(
-    result: Result<T, QuinceError>,
-    source: &str,
-    path: &str,
-    color: bool,
-) -> T {
+fn report<T>(result: Result<T, QuinceError>, source: &str, path: &str, color: bool) -> T {
     match result {
         Ok(value) => value,
         Err(err) => {

@@ -1,5 +1,5 @@
-use std::io::IsTerminal;
 use clap::ValueEnum;
+use std::io::IsTerminal;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Default)]
 pub enum ColorChoice {
@@ -46,16 +46,26 @@ impl Style {
     pub const BOLD: Style = Style { prefix: "\x1b[1m" };
     pub const DIM: Style = Style { prefix: "\x1b[2m" };
     pub const RED: Style = Style { prefix: "\x1b[31m" };
-    pub const BOLD_RED: Style = Style { prefix: "\x1b[1;31m" };
+    pub const BOLD_RED: Style = Style {
+        prefix: "\x1b[1;31m",
+    };
     pub const GREEN: Style = Style { prefix: "\x1b[32m" };
-    pub const BOLD_GREEN: Style = Style { prefix: "\x1b[1;32m" };
+    pub const BOLD_GREEN: Style = Style {
+        prefix: "\x1b[1;32m",
+    };
     pub const YELLOW: Style = Style { prefix: "\x1b[33m" };
-    pub const BOLD_YELLOW: Style = Style { prefix: "\x1b[1;33m" };
+    pub const BOLD_YELLOW: Style = Style {
+        prefix: "\x1b[1;33m",
+    };
     pub const BLUE: Style = Style { prefix: "\x1b[34m" };
     pub const MAGENTA: Style = Style { prefix: "\x1b[35m" };
-    pub const BOLD_MAGENTA: Style = Style { prefix: "\x1b[1;35m" };
+    pub const BOLD_MAGENTA: Style = Style {
+        prefix: "\x1b[1;35m",
+    };
     pub const CYAN: Style = Style { prefix: "\x1b[36m" };
-    pub const BOLD_CYAN: Style = Style { prefix: "\x1b[1;36m" };
+    pub const BOLD_CYAN: Style = Style {
+        prefix: "\x1b[1;36m",
+    };
 
     pub fn paint(&self, text: impl std::fmt::Display, enabled: bool) -> String {
         if enabled {
@@ -72,7 +82,10 @@ mod tests {
 
     #[test]
     fn style_paint_respects_enabled_flag() {
-        assert_eq!(Style::BOLD_RED.paint("error", true), "\x1b[1;31merror\x1b[0m");
+        assert_eq!(
+            Style::BOLD_RED.paint("error", true),
+            "\x1b[1;31merror\x1b[0m"
+        );
         assert_eq!(Style::BOLD_RED.paint("error", false), "error");
     }
 
