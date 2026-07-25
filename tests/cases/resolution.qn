@@ -30,12 +30,10 @@ print(deep())
 
 # Each iteration gets a fresh scope, so the closures do not share one slot.
 fn makers() {
-    let out = [0, 0, 0]
-    let at = 0
+    let out = []
     for n in [1, 2, 3] {
         fn hold() { return n }
-        out[at] = hold
-        at = at + 1
+        push(out, hold)
     }
     return out
 }

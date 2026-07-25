@@ -88,9 +88,9 @@ lucky allocation order it would have returned a plausible wrong answer instead
 of panicking.
 
 The fix is `eval_seq` / `eval_pair`, which every multi-operand form now goes
-through — list literals, binary operators, subscripts, call arguments, the
-callee, and the value in an indexed assignment. Each roots what it has already
-computed for as long as it has more to evaluate.
+through — list and dict literals, binary operators, subscripts, call arguments,
+the callee, and the value in an indexed assignment. Each roots what it has
+already computed for as long as it has more to evaluate.
 
 Two things keep the cost of that down. Only values carrying a handle are
 rooted, since an `int` cannot be collected and a string is reference counted
@@ -143,6 +143,7 @@ Flat `src/*.rs`, matching the wrapt layout.
 | `heap.rs` | the arena, allocation, mark-and-sweep collection |
 | `interp.rs` | tree-walking evaluator |
 | `env.rs` | scopes and variable binding |
+| `dict.rs` | insertion-ordered map, and the values admitted as keys |
 | `error.rs` | `QuinceError` with spans, user-facing diagnostics |
 
 Hand-written lexer and parser, no parser-generator dependency. For a language whose
@@ -214,11 +215,22 @@ if x > 10 {
 for item in [1, 2, 3] {
     print(item)
 }
+
+let counts = {"a": 1, "b": 2}
+counts["c"] = 3
+for key in counts {
+    print(key, counts[key])
+}
+
+let all = [1, 2] + [3]
+push(all, 4)
+if 4 in all { print("built", all) }
 ```
 
 - Dynamic typing, optional annotations later (as Zephyr has)
 - `let` / `const` bindings; a name may be declared only once per scope, but may
   shadow one from an enclosing scope
+- Lists and dicts, both mutable and both structurally compared; `in` for membership
 - Braces, not significant whitespace — simpler to parse, fewer edge cases
 - `#` line comments, which leaves `//` free for floor division and makes a `#!`
   shebang line a comment for free
@@ -284,12 +296,70 @@ migration problem later. Annotations are additive and can wait.
   Zephyr's model — promotion × overflow × every arithmetic operation — and they
   arrive with the annotation system rather than before it.
 
-### Known future conflict: `{`
+### Collections
 
-When dict literals arrive (v0.3), `if x { }` becomes ambiguous — `{` could open the
-body or a dict. Rust hit the same problem and solved it by banning struct literals in
-condition position. The likely fix here is the same restriction, decided when dicts
-land rather than pre-emptively.
+Lists and dicts are both heap objects, both mutable, both compared structurally, and
+both falsy when empty.
+
+`+` concatenates lists into a **new** list, leaving both operands alone, exactly as it
+does for strings. `push` is the in-place counterpart. Having only one of the two is
+what made building a list from a loop require preallocating and assigning by index,
+which was ugly enough to be worth fixing before dicts landed.
+
+Dicts keep **insertion order**. It is observable — printing, iterating, and `keys`
+all expose it — and a test corpus comparing exact output needs it to be deterministic.
+Updating an existing key keeps its original position; only a genuinely new key goes to
+the back. Python made both calls the same way. The cost is that removal is linear,
+since closing the gap renumbers everything after it, which is the right trade while
+lookup is overwhelmingly the common operation.
+
+Iterating a dict yields its **keys**, as in Python. Yielding pairs would need tuples,
+which do not exist yet, and the values are already reachable through `d[k]`.
+
+Keys are restricted to `nil`, bools, ints, floats, and strings. Lists, dicts, and
+functions are excluded because they are mutable or compared by identity, and a key
+that can change out from under the map it is filed in has no good failure mode. That
+exclusion pays for itself twice: it also means a key can never hold a handle, so the
+collector only traces a dict's values.
+
+Two consequences follow from rules the language had already committed to:
+
+- `1` and `1.0` are the same key, because `1 == 1.0` is true. A lookup that disagreed
+  with `==` would be indefensible, so integral floats are folded into int keys.
+- `nan` is rejected as a key, because it is not equal to itself and could therefore be
+  inserted and never found again. It is an error rather than a silent trap, matching
+  the treatment of overflow and division by zero. Infinities are fine.
+
+`in` tests membership and works on all three collections — a dict key, a list element
+(structurally), or a substring. An unhashable value on the left of `in d` is an error
+rather than `false`, for the same reason `d[[]]` is: answering `false` would hide the
+mistake that produced it.
+
+### The `{` conflict that did not happen
+
+This section used to predict that dict literals would make `if x { }` ambiguous, and
+that Quince would have to copy Rust's fix of banning struct literals in condition
+position. Dicts have landed, and no such restriction was needed.
+
+Rust's ambiguity comes from the *shape* of its struct literal: `Name { … }` is a
+postfix form, so in `if x { }` the parser genuinely cannot tell whether `x { }` is one
+expression or two things. A Quince dict literal is `{ … }` standing alone, with
+nothing before it. Once a condition has finished parsing, `{` is neither an infix nor
+a postfix operator, so expression parsing always stops there and the block gets it.
+`if a == {"k": 1} { }` parses correctly for the same reason: the dict is in operand
+position, where a block could never appear.
+
+The two forms compete in exactly one place — the start of a statement — and that is
+settled unconditionally in favour of the block, since `statement` dispatches on `{`
+before any expression parsing begins. So a bare dict literal cannot be a statement.
+That costs nothing (a dict statement discards its own value) but produces a baffling
+error, so the parser special-cases it: a `:` where a statement should have ended
+reports that a `{` at the start of a statement opens a block, and suggests parentheses.
+
+Worth keeping as a lesson rather than deleting: the anticipated problem was real for
+Rust and imaginary here, and deciding it when dicts actually landed — rather than
+pre-emptively adopting Rust's restriction — is what avoided importing a limitation
+Quince had no reason to have.
 
 ## Roadmap
 
@@ -314,11 +384,17 @@ The resolver landed next, for the same reason — it changes what a scope *is*,
 and every later pass would have had to be rewritten around it. `fib(25)` went
 from 0.17s to 0.10s, against CPython's 0.03s on the same machine.
 
-Still missing: `try`/`catch`, dicts, classes, and string methods. Lists have no
-concatenation or `append`, so building one incrementally means preallocating and
-assigning by index. The REPL is line-at-a-time and continues reading when a parse
-fails at end of input, which is a heuristic rather than a real incremental
-parser.
+Dicts came next, which finished the data half of v0.3 along with list `+`, `push`,
+and `in`. Adding them turned up a use-after-free in the collector that had been
+there since it landed — see Collection — so the root set grew to cover intermediate
+expression values at the same time.
+
+Still missing: `try`/`catch`, classes, and methods on strings, lists, and dicts.
+`push`, `keys`, `values`, and `remove` are free functions standing in for the
+methods they will become once there is dispatch to hang them off. There are no
+tuples, which is why iterating a dict yields keys rather than pairs. The REPL is
+line-at-a-time and continues reading when a parse fails at end of input, which is a
+heuristic rather than a real incremental parser.
 
 Deferred from the lexer, both cheap to add: hex/binary/octal literals (Zephyr has
 them) and block comments (whose nesting behaviour is a real decision).
@@ -330,6 +406,9 @@ Control flow (`if`/`while`/`for`), functions, closures, proper scoping.
 
 **v0.3 — data**
 Lists, dicts, strings with methods, indexing, iteration.
+
+Lists and dicts are done, with indexing, iteration, concatenation, and membership.
+Methods are the remainder, and they need dispatch before anything else.
 
 **v0.4 — objects**
 Classes, methods, inheritance, `self`.

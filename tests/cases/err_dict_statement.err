@@ -1,0 +1,1 @@
+unexpected `:` — a `{` at the start of a statement opens a block, so a dict literal there needs parentheses around it

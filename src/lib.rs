@@ -1,4 +1,5 @@
 pub mod ast;
+pub mod dict;
 pub mod env;
 pub mod error;
 pub mod heap;

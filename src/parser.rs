@@ -21,6 +21,7 @@ fn infix_op(kind: &TokenKind) -> Option<(InfixOp, u8, u8)> {
         TokenKind::AndAnd => (InfixOp::Logical(LogicalOp::And), 3),
         TokenKind::Eq => (InfixOp::Binary(BinaryOp::Eq), 5),
         TokenKind::Ne => (InfixOp::Binary(BinaryOp::Ne), 5),
+        TokenKind::In => (InfixOp::Binary(BinaryOp::In), 7),
         TokenKind::Lt => (InfixOp::Binary(BinaryOp::Lt), 7),
         TokenKind::Le => (InfixOp::Binary(BinaryOp::Le), 7),
         TokenKind::Gt => (InfixOp::Binary(BinaryOp::Gt), 7),
@@ -397,6 +398,26 @@ impl Parser {
                 });
             }
 
+            // Only reachable where an operand is expected. A `{` at the start of
+            // a statement is dispatched to `block` long before this, so the two
+            // uses of the brace never compete — see `end_of_statement`.
+            TokenKind::LBrace => {
+                let mut entries = Vec::new();
+                while !self.check(&TokenKind::RBrace) {
+                    let key = self.expression()?;
+                    self.expect(TokenKind::Colon, "between a dict key and its value")?;
+                    entries.push((key, self.expression()?));
+                    if !self.eat(&TokenKind::Comma) {
+                        break;
+                    }
+                }
+                let close = self.expect(TokenKind::RBrace, "after the dict entries")?;
+                return Ok(Expr {
+                    kind: ExprKind::Dict(entries),
+                    span: token.span.to(close.span),
+                });
+            }
+
             _ => {
                 return Err(QuinceError::new(
                     format!("expected an expression, found `{}`", token.kind),
@@ -484,6 +505,16 @@ impl Parser {
             return Ok(());
         }
         let token = self.peek();
+        // A `{` at the start of a statement always opens a block, so a bare dict
+        // literal gets parsed as one and fails here on its first `:`. Saying so
+        // is far more use than naming the token.
+        if token.kind == TokenKind::Colon {
+            return Err(QuinceError::new(
+                "unexpected `:` — a `{` at the start of a statement opens a block, \
+                 so a dict literal there needs parentheses around it",
+                token.span,
+            ));
+        }
         Err(QuinceError::new(
             format!(
                 "expected a newline or `;` after this statement, found `{}`",
@@ -530,6 +561,13 @@ mod tests {
             ExprKind::Nil => "nil".into(),
             ExprKind::Var(var) => var.name.clone(),
             ExprKind::List(items) => format!("[{}]", joined(items)),
+            ExprKind::Dict(entries) => {
+                let pairs: Vec<_> = entries
+                    .iter()
+                    .map(|(key, value)| format!("{}: {}", sexpr(key), sexpr(value)))
+                    .collect();
+                format!("{{{}}}", pairs.join(" "))
+            }
             ExprKind::Unary { op, rhs } => {
                 let op = match op {
                     UnaryOp::Neg => "-",
@@ -551,6 +589,7 @@ mod tests {
                     BinaryOp::Le => "<=",
                     BinaryOp::Gt => ">",
                     BinaryOp::Ge => ">=",
+                    BinaryOp::In => "in",
                 };
                 format!("({op} {} {})", sexpr(lhs), sexpr(rhs))
             }
@@ -655,6 +694,55 @@ mod tests {
         assert_eq!(expr_of("[1, 2, 3]"), "[1 2 3]");
         assert_eq!(expr_of("[1, 2,]"), "[1 2]");
         assert_eq!(expr_of("[[1], 2]"), "[[1] 2]");
+    }
+
+    #[test]
+    fn dicts_parse_with_optional_trailing_comma() {
+        assert_eq!(expr_of("({})"), "{}");
+        assert_eq!(expr_of(r#"({"a": 1, "b": 2})"#), r#"{"a": 1 "b": 2}"#);
+        assert_eq!(expr_of(r#"({"a": 1,})"#), r#"{"a": 1}"#);
+        assert_eq!(expr_of("(({1 + 1: [2]}))"), "{(+ 1 1): [2]}");
+    }
+
+    #[test]
+    fn a_brace_in_condition_position_still_opens_a_block() {
+        // The ambiguity Rust has with struct literals does not arise here: a
+        // dict literal is not a postfix form, so once a condition has parsed,
+        // `{` can only be the block.
+        let stmts = parse_ok("if a { }");
+        let StmtKind::If { cond, then, .. } = &stmts[0].kind else {
+            panic!("expected an if");
+        };
+        assert_eq!(sexpr(cond), "a");
+        assert!(then.stmts.is_empty());
+
+        // And a dict literal *inside* the condition is still reachable.
+        let stmts = parse_ok(r#"if a == {"k": 1} { }"#);
+        let StmtKind::If { cond, .. } = &stmts[0].kind else {
+            panic!("expected an if");
+        };
+        assert_eq!(sexpr(cond), r#"(== a {"k": 1})"#);
+    }
+
+    #[test]
+    fn a_statement_beginning_with_a_brace_is_a_block_not_a_dict() {
+        assert!(matches!(parse_ok("{ }")[0].kind, StmtKind::Block(_)));
+        let err = parse_err(r#"{ "a": 1 }"#);
+        assert!(err.message.contains("needs parentheses"), "{}", err.message);
+    }
+
+    #[test]
+    fn in_parses_as_a_comparison_level_operator() {
+        assert_eq!(expr_of("a in b"), "(in a b)");
+        assert_eq!(expr_of("a + 1 in b"), "(in (+ a 1) b)");
+        assert_eq!(expr_of("a in b && c"), "(&& (in a b) c)");
+        // The loop form takes `in` before any expression is parsed, so the two
+        // uses cannot collide.
+        let stmts = parse_ok("for k in d { }");
+        let StmtKind::For { var, iter, .. } = &stmts[0].kind else {
+            panic!("expected a for loop");
+        };
+        assert_eq!((var.as_str(), sexpr(iter)), ("k", "d".to_string()));
     }
 
     #[test]

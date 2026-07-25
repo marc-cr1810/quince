@@ -1,0 +1,37 @@
+# `+` builds a new list; the operands are untouched.
+let a = [1, 2]
+let b = [3, 4]
+print(a + b)
+print(a, b)
+print([] + a, a + [])
+print(a + a)
+
+# `push` grows one in place, and returns nil rather than the list.
+let grown = []
+for n in [1, 2, 3] {
+    push(grown, n * n)
+}
+print(grown, len(grown))
+print(push(grown, 0))
+print(grown)
+
+# Which makes building a list from a loop the obvious thing it should be.
+fn evens(limit) {
+    let out = []
+    let n = 0
+    while n < limit {
+        if n % 2 == 0 { push(out, n) }
+        n = n + 1
+    }
+    return out
+}
+print(evens(10))
+
+# Concatenation nests and composes with the rest of the language.
+print([[1]] + [[2, 3]])
+print(len(evens(10) + evens(4)))
+
+# Membership works on lists and strings too.
+print(2 in a, 9 in a)
+print([3, 4] in [[3, 4]])
+print("ell" in "hello", "z" in "hello")

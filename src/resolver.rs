@@ -234,6 +234,14 @@ impl Resolver {
                 Ok(())
             }
 
+            ExprKind::Dict(entries) => {
+                for (key, value) in entries {
+                    self.expr(key)?;
+                    self.expr(value)?;
+                }
+                Ok(())
+            }
+
             ExprKind::List(items) => {
                 for item in items {
                     self.expr(item)?;

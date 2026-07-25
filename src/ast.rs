@@ -24,6 +24,8 @@ pub enum BinaryOp {
     Le,
     Gt,
     Ge,
+    /// Membership: a dict key, a list element, or a substring.
+    In,
 }
 
 /// Kept apart from `BinaryOp` because these short-circuit: the evaluator must
@@ -83,6 +85,8 @@ pub enum ExprKind {
     Nil,
     Var(Var),
     List(Vec<Expr>),
+    /// Key-value pairs in source order, which is the order the dict keeps.
+    Dict(Vec<(Expr, Expr)>),
     Unary {
         op: UnaryOp,
         rhs: Box<Expr>,

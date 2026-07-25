@@ -1,0 +1,20 @@
+{} {"name": "still quince", "version": 0}
+0 2
+still quince 0
+{"name": "still quince", "version": 1, "stable": false}
+["name", "version", "stable"]
+["q", 1, false]
+true false
+false
+{"name": "q", "version": 1} 2
+name q
+version 1
+int string bool nil float
+5 same key as 1
+true
+false false
+42 2 true
+{"deep": true}
+empty is falsy
+non-empty is truthy
+dict

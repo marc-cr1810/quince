@@ -1,3 +1,4 @@
+use crate::dict::Dict;
 use crate::env::{Env, Globals};
 use crate::value::{Function, Value};
 
@@ -13,6 +14,7 @@ pub struct ObjId(u32);
 #[derive(Clone, Debug)]
 pub enum Object {
     List(Vec<Value>),
+    Dict(Dict),
     Env(Env),
     /// The top-level scope. Exactly one exists, and it is the collector's
     /// permanent root.
@@ -136,6 +138,20 @@ impl Heap {
         }
     }
 
+    pub fn dict(&self, id: ObjId) -> &Dict {
+        match self.get(id) {
+            Object::Dict(entries) => entries,
+            other => panic!("expected a dict, found {other:?}"),
+        }
+    }
+
+    pub fn dict_mut(&mut self, id: ObjId) -> &mut Dict {
+        match self.get_mut(id) {
+            Object::Dict(entries) => entries,
+            other => panic!("expected a dict, found {other:?}"),
+        }
+    }
+
     pub fn env(&self, id: ObjId) -> &Env {
         match self.get(id) {
             Object::Env(env) => env,
@@ -192,6 +208,7 @@ impl Default for Heap {
 fn trace(object: &Object, worklist: &mut Vec<ObjId>) {
     match object {
         Object::List(items) => worklist.extend(items.iter().filter_map(Value::handle)),
+        Object::Dict(entries) => entries.trace(worklist),
         Object::Env(env) => env.trace(worklist),
         Object::Globals(globals) => globals.trace(worklist),
         Object::Function(func) => worklist.push(func.env),

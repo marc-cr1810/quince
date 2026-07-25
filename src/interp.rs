@@ -3,6 +3,7 @@ use std::rc::Rc;
 
 use crate::ast::Slot;
 use crate::ast::{BinaryOp, Block, Expr, ExprKind, LogicalOp, Stmt, StmtKind, UnaryOp, Var};
+use crate::dict::{Dict, Key, NotAKey};
 use crate::env::{self, AssignError, Env, Globals};
 use crate::error::QuinceError;
 use crate::heap::{Heap, ObjId, Object};
@@ -204,9 +205,12 @@ impl Interp {
     ) -> Result<Flow, QuinceError> {
         let iterable = self.eval(iter, env)?;
         let items = match iterable {
-            // Snapshotted, so mutating the list inside the loop cannot invalidate
-            // the iteration.
+            // Snapshotted, so mutating the collection inside the loop cannot
+            // invalidate the iteration.
             Value::List(id) => self.heap.list(id).clone(),
+            // A dict iterates over its keys, as in Python. Its values are the
+            // half you can already reach, through `d[k]`.
+            Value::Dict(id) => self.heap.dict(id).keys().collect(),
             other => {
                 return Err(QuinceError::new(
                     format!("cannot iterate over {}", other.type_name()),
@@ -375,6 +379,17 @@ impl Interp {
                 Ok(Value::List(self.heap.alloc(Object::List(values))))
             }
 
+            ExprKind::Dict(entries) => {
+                let values = self.eval_seq(entries.iter().flat_map(|(k, v)| [k, v]), env)?;
+                let mut dict = Dict::new();
+                for pair in values.chunks_exact(2) {
+                    // A repeated key overwrites, as in Python — the literal is
+                    // just a run of insertions.
+                    dict.insert(key_of(&pair[0], expr.span)?, pair[1].clone());
+                }
+                Ok(Value::Dict(self.heap.alloc(Object::Dict(dict))))
+            }
+
             ExprKind::Unary { op, rhs } => {
                 let value = self.eval(rhs, env)?;
                 self.unary(*op, value, expr.span)
@@ -417,8 +432,7 @@ impl Interp {
 
             ExprKind::Index { target, index } => {
                 let (target, index) = self.eval_pair(target, index, env)?;
-                let (id, offset) = self.list_index(&target, &index, expr.span)?;
-                Ok(self.heap.list(id)[offset].clone())
+                self.index_get(&target, &index, expr.span)
             }
 
             ExprKind::Field { target, name } => {
@@ -498,19 +512,30 @@ impl Interp {
             }
 
             ExprKind::Index {
-                target: list,
+                target: collection,
                 index,
             } => {
                 // `value` was evaluated by the caller and is held across two
                 // more evaluations, either of which can reach a safe point.
                 let mark = self.temps.len();
                 self.temps.push(value.clone());
-                let evaluated = self.eval_pair(list, index, env);
+                let evaluated = self.eval_pair(collection, index, env);
                 self.temps.truncate(mark);
-                let (list_value, index_value) = evaluated?;
+                let (collection, index) = evaluated?;
 
-                let (id, offset) = self.list_index(&list_value, &index_value, target.span)?;
-                self.heap.list_mut(id)[offset] = value.clone();
+                match &collection {
+                    // Assigning to a missing key inserts it, where assigning
+                    // past the end of a list stays an error: a list's indices
+                    // are positions, and there is no meaningful gap to fill.
+                    Value::Dict(id) => {
+                        let key = key_of(&index, target.span)?;
+                        self.heap.dict_mut(*id).insert(key, value.clone());
+                    }
+                    _ => {
+                        let (id, offset) = self.list_index(&collection, &index, target.span)?;
+                        self.heap.list_mut(id)[offset] = value.clone();
+                    }
+                }
                 Ok(value)
             }
 
@@ -519,6 +544,25 @@ impl Interp {
                 "cannot assign to this expression",
                 target.span,
             )),
+        }
+    }
+
+    /// Reads `target[index]`, dispatching on what is being subscripted.
+    fn index_get(&self, target: &Value, index: &Value, span: Span) -> Result<Value, QuinceError> {
+        match target {
+            Value::Dict(id) => {
+                let key = key_of(index, span)?;
+                self.heap.dict(*id).get(&key).cloned().ok_or_else(|| {
+                    QuinceError::new(
+                        format!("key {} is not in the dict", index.repr(&self.heap)),
+                        span,
+                    )
+                })
+            }
+            _ => {
+                let (id, offset) = self.list_index(target, index, span)?;
+                Ok(self.heap.list(id)[offset].clone())
+            }
         }
     }
 
@@ -618,7 +662,7 @@ impl Interp {
     }
 
     fn binary(
-        &self,
+        &mut self,
         op: BinaryOp,
         lhs: Value,
         rhs: Value,
@@ -630,12 +674,21 @@ impl Interp {
         match op {
             Eq => return Ok(Value::Bool(lhs.equals(&rhs, &self.heap))),
             Ne => return Ok(Value::Bool(!lhs.equals(&rhs, &self.heap))),
+            In => return self.contains(&rhs, &lhs, span),
             _ => {}
         }
 
-        // `+` is the one operator shared between numbers and strings.
+        // `+` is the one operator shared between numbers and the collections.
         if let (Add, Value::Str(a), Value::Str(b)) = (op, &lhs, &rhs) {
             return Ok(Value::Str(Rc::from(format!("{a}{b}"))));
+        }
+
+        // Concatenation builds a new list rather than extending the left one,
+        // matching `+` on strings. `push` is there for growing in place.
+        if let (Add, Value::List(a), Value::List(b)) = (op, &lhs, &rhs) {
+            let mut items = self.heap.list(*a).clone();
+            items.extend_from_slice(self.heap.list(*b));
+            return Ok(Value::List(self.heap.alloc(Object::List(items))));
         }
 
         if let (Value::Str(a), Value::Str(b)) = (&lhs, &rhs) {
@@ -663,6 +716,38 @@ impl Interp {
             _ => Err(type_error(op, &lhs, &rhs, span)),
         }
     }
+
+    /// `needle in haystack`.
+    ///
+    /// An unhashable needle is an error rather than a plain `false`, for the
+    /// same reason `d[[]]` is: a value that could never have been inserted is a
+    /// mistake in the program, and answering `false` would hide it.
+    fn contains(&self, haystack: &Value, needle: &Value, span: Span) -> Result<Value, QuinceError> {
+        let found = match haystack {
+            Value::Dict(id) => self.heap.dict(*id).contains(&key_of(needle, span)?),
+            Value::List(id) => self
+                .heap
+                .list(*id)
+                .iter()
+                .any(|item| item.equals(needle, &self.heap)),
+            Value::Str(text) => match needle {
+                Value::Str(part) => text.contains(part.as_ref()),
+                other => {
+                    return Err(QuinceError::new(
+                        format!("cannot look for {} in a string", other.type_name()),
+                        span,
+                    ));
+                }
+            },
+            other => {
+                return Err(QuinceError::new(
+                    format!("cannot use `in` on {}", other.type_name()),
+                    span,
+                ));
+            }
+        };
+        Ok(Value::Bool(found))
+    }
 }
 
 impl Default for Interp {
@@ -675,6 +760,19 @@ impl Default for Interp {
 /// is a wiring bug rather than anything a program can cause.
 fn resolved(slot: &Option<Slot>) -> Slot {
     slot.expect("the resolver must run before evaluation")
+}
+
+/// Converts a value to a dict key, explaining why if it cannot be one.
+fn key_of(value: &Value, span: Span) -> Result<Key, QuinceError> {
+    Key::from_value(value).map_err(|reason| {
+        let message = match reason {
+            NotAKey::Unhashable(name) => {
+                format!("a {name} cannot be a dict key, because it is compared by identity")
+            }
+            NotAKey::Nan => "NaN cannot be a dict key, because it is not equal to itself".into(),
+        };
+        QuinceError::new(message, span)
+    })
 }
 
 fn as_float(value: &Value) -> f64 {
@@ -732,7 +830,7 @@ fn int_op(op: BinaryOp, a: i64, b: i64, span: Span) -> Result<Value, QuinceError
         Le => Value::Bool(a <= b),
         Gt => Value::Bool(a > b),
         Ge => Value::Bool(a >= b),
-        Eq | Ne => unreachable!("equality is handled before dispatch"),
+        Eq | Ne | In => unreachable!("handled before the numeric dispatch"),
     };
     Ok(value)
 }
@@ -754,7 +852,7 @@ fn float_op(op: BinaryOp, a: f64, b: f64, span: Span) -> Result<Value, QuinceErr
         Le => Value::Bool(a <= b),
         Gt => Value::Bool(a > b),
         Ge => Value::Bool(a >= b),
-        Eq | Ne => unreachable!("equality is handled before dispatch"),
+        Eq | Ne | In => unreachable!("handled before the numeric dispatch"),
     };
     Ok(value)
 }
@@ -768,7 +866,7 @@ fn type_error(op: BinaryOp, lhs: &Value, rhs: &Value, span: Span) -> QuinceError
         Div | FloorDiv => "divide",
         Rem => "take the remainder of",
         Lt | Le | Gt | Ge => "compare",
-        Eq | Ne => unreachable!("equality is defined for every type"),
+        Eq | Ne | In => unreachable!("handled before the numeric dispatch"),
     };
     QuinceError::new(
         format!("cannot {verb} {} and {}", lhs.type_name(), rhs.type_name()),
@@ -789,7 +887,7 @@ fn check_arity(name: &str, expected: usize, found: usize, span: Span) -> Result<
 
 // -- builtins --------------------------------------------------------------
 
-static BUILTINS: &[&Native] = &[&PRINT, &LEN, &TYPE];
+static BUILTINS: &[&Native] = &[&PRINT, &LEN, &TYPE, &PUSH, &KEYS, &VALUES, &REMOVE];
 
 static PRINT: Native = Native {
     name: "print",
@@ -807,8 +905,80 @@ static LEN: Native = Native {
     func: |heap, _out, args, span| match &args[0] {
         Value::Str(s) => Ok(Value::Int(s.chars().count() as i64)),
         Value::List(id) => Ok(Value::Int(heap.list(*id).len() as i64)),
+        Value::Dict(id) => Ok(Value::Int(heap.dict(*id).len() as i64)),
         other => Err(QuinceError::new(
             format!("`len` does not apply to {}", other.type_name()),
+            span,
+        )),
+    },
+};
+
+/// The in-place counterpart to `+`, which builds a new list.
+///
+/// A free function rather than a method because there is no method dispatch
+/// yet; when strings and lists grow methods this becomes `xs.push(x)`.
+static PUSH: Native = Native {
+    name: "push",
+    arity: Some(2),
+    func: |heap, _out, args, span| match &args[0] {
+        Value::List(id) => {
+            heap.list_mut(*id).push(args[1].clone());
+            Ok(Value::Nil)
+        }
+        other => Err(QuinceError::new(
+            format!("`push` needs a list, but was given {}", other.type_name()),
+            span,
+        )),
+    },
+};
+
+static KEYS: Native = Native {
+    name: "keys",
+    arity: Some(1),
+    func: |heap, _out, args, span| match &args[0] {
+        Value::Dict(id) => {
+            let keys: Vec<_> = heap.dict(*id).keys().collect();
+            Ok(Value::List(heap.alloc(Object::List(keys))))
+        }
+        other => Err(QuinceError::new(
+            format!("`keys` needs a dict, but was given {}", other.type_name()),
+            span,
+        )),
+    },
+};
+
+static VALUES: Native = Native {
+    name: "values",
+    arity: Some(1),
+    func: |heap, _out, args, span| match &args[0] {
+        Value::Dict(id) => {
+            let values: Vec<_> = heap.dict(*id).values().cloned().collect();
+            Ok(Value::List(heap.alloc(Object::List(values))))
+        }
+        other => Err(QuinceError::new(
+            format!("`values` needs a dict, but was given {}", other.type_name()),
+            span,
+        )),
+    },
+};
+
+/// Removing a key that is not there is an error, for the same reason reading one
+/// is: silently doing nothing hides the typo that caused it.
+static REMOVE: Native = Native {
+    name: "remove",
+    arity: Some(2),
+    func: |heap, _out, args, span| match &args[0] {
+        Value::Dict(id) => {
+            let key = key_of(&args[1], span)?;
+            heap.dict_mut(*id).remove(&key).ok_or_else(|| {
+                QuinceError::new(
+                    format!("key {} is not in the dict", args[1].repr(heap)),
+                    span,
+                )
+            })
+        }
+        other => Err(QuinceError::new(
+            format!("`remove` needs a dict, but was given {}", other.type_name()),
             span,
         )),
     },
@@ -934,6 +1104,21 @@ mod tests {
     }
 
     #[test]
+    fn the_left_operand_survives_evaluating_the_right() {
+        // The path `+` on lists takes, and the reason the rooting had to land
+        // before concatenation did.
+        let interp = run(&format!(
+            "fn mk() {{ return [1, 2, 3] }}\n\
+             {}\
+             let kept = len(mk() + churn())",
+            churn("[4]")
+        ));
+
+        assert!(interp.heap.collections > 0, "the collector never ran");
+        assert_eq!(global(&interp, "kept"), Some(Value::Int(4)));
+    }
+
+    #[test]
     fn an_argument_survives_evaluating_a_later_argument() {
         let interp = run(&format!(
             "fn mk() {{ return [1, 2, 3] }}\n\
@@ -963,6 +1148,20 @@ mod tests {
     }
 
     #[test]
+    fn a_dict_entry_survives_evaluating_a_later_one() {
+        let interp = run(&format!(
+            "fn mk() {{ return [1, 2, 3] }}\n\
+             {}\
+             let d = {{\"a\": mk(), \"b\": churn()}}\n\
+             let kept = len(d[\"a\"])",
+            churn("0")
+        ));
+
+        assert!(interp.heap.collections > 0, "the collector never ran");
+        assert_eq!(global(&interp, "kept"), Some(Value::Int(3)));
+    }
+
+    #[test]
     fn an_assigned_value_survives_evaluating_its_target() {
         // `xs[churn()] = mk()` evaluates the value first, then the target.
         let interp = run(&format!(
@@ -972,6 +1171,20 @@ mod tests {
              xs[churn()] = mk()\n\
              let kept = len(xs[1])",
             churn("1")
+        ));
+
+        assert!(interp.heap.collections > 0, "the collector never ran");
+        assert_eq!(global(&interp, "kept"), Some(Value::Int(3)));
+    }
+
+    #[test]
+    fn a_dict_survives_collection_with_its_contents() {
+        let interp = run(&format!(
+            "let d = {{\"kept\": [1, 2, 3]}}\n\
+             {}\
+             let ignored = churn()\n\
+             let kept = len(d[\"kept\"])",
+            churn("0")
         ));
 
         assert!(interp.heap.collections > 0, "the collector never ran");

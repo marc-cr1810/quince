@@ -43,6 +43,7 @@ pub enum Value {
     /// printing or comparing a string does not need the heap threaded through.
     Str(Rc<str>),
     List(ObjId),
+    Dict(ObjId),
     Function(ObjId),
     Native(&'static Native),
 }
@@ -54,7 +55,7 @@ impl Value {
     /// keep anything alive.
     pub fn handle(&self) -> Option<ObjId> {
         match self {
-            Value::List(id) | Value::Function(id) => Some(*id),
+            Value::List(id) | Value::Dict(id) | Value::Function(id) => Some(*id),
             _ => None,
         }
     }
@@ -69,6 +70,7 @@ impl Value {
             Value::Float(_) => "float",
             Value::Str(_) => "string",
             Value::List(_) => "list",
+            Value::Dict(_) => "dict",
             Value::Function(_) | Value::Native(_) => "function",
         }
     }
@@ -83,6 +85,7 @@ impl Value {
             Value::Float(n) => *n != 0.0,
             Value::Str(s) => !s.is_empty(),
             Value::List(id) => !heap.list(*id).is_empty(),
+            Value::Dict(id) => !heap.dict(*id).is_empty(),
             Value::Function(_) | Value::Native(_) => true,
         }
     }
@@ -107,6 +110,18 @@ impl Value {
                 let (a, b) = (heap.list(*a), heap.list(*b));
                 a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.equals(y, heap))
             }
+            // Order is not part of a dict's identity, only its contents:
+            // `{"a": 1, "b": 2}` equals `{"b": 2, "a": 1}`.
+            (Value::Dict(a), Value::Dict(b)) => {
+                if a == b {
+                    return true;
+                }
+                let (a, b) = (heap.dict(*a), heap.dict(*b));
+                a.len() == b.len()
+                    && a.iter().all(|(key, value)| {
+                        b.get(key).is_some_and(|other| value.equals(other, heap))
+                    })
+            }
             // Functions compare by identity; there is no useful structural test.
             (Value::Function(a), Value::Function(b)) => a == b,
             (Value::Native(a), Value::Native(b)) => std::ptr::eq(*a, *b),
@@ -128,14 +143,25 @@ impl Value {
                 let items: Vec<_> = heap.list(*id).iter().map(|v| v.repr(heap)).collect();
                 format!("[{}]", items.join(", "))
             }
+            Value::Dict(id) => {
+                let entries: Vec<_> = heap
+                    .dict(*id)
+                    .iter()
+                    .map(|(key, value)| {
+                        format!("{}: {}", key.to_value().repr(heap), value.repr(heap))
+                    })
+                    .collect();
+                format!("{{{}}}", entries.join(", "))
+            }
             Value::Function(id) => format!("<fn {}>", heap.function(*id).decl.name),
             Value::Native(native) => format!("<builtin {}>", native.name),
         }
     }
 
     /// How a value prints when nested inside a collection, where strings need
-    /// quoting to stay distinguishable from bare identifiers.
-    fn repr(&self, heap: &Heap) -> String {
+    /// quoting to stay distinguishable from bare identifiers. Also what error
+    /// messages use when they name a value rather than a type.
+    pub fn repr(&self, heap: &Heap) -> String {
         match self {
             Value::Str(s) => format!("{s:?}"),
             other => other.display(heap),
@@ -154,6 +180,7 @@ impl PartialEq for Value {
             (Value::Float(a), Value::Float(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::List(a), Value::List(b)) => a == b,
+            (Value::Dict(a), Value::Dict(b)) => a == b,
             (Value::Function(a), Value::Function(b)) => a == b,
             (Value::Native(a), Value::Native(b)) => std::ptr::eq(*a, *b),
             _ => false,

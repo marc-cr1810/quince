@@ -1,0 +1,2 @@
+# A statement that opens with `{` is a block, so this is not a dict.
+{ "a": 1 }

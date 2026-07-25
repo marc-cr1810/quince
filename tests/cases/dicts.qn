@@ -1,0 +1,49 @@
+# Literals keep their insertion order, and a repeated key is just a second
+# insertion.
+let empty = {}
+let d = {"name": "quince", "version": 0, "name": "still quince"}
+print(empty, d)
+print(len(empty), len(d))
+
+# Reading, updating, and inserting.
+print(d["name"], d["version"])
+d["version"] = 1
+d["stable"] = false
+print(d)
+
+# Updating a value does not move the key to the back.
+d["name"] = "q"
+print(keys(d))
+print(values(d))
+
+# Membership and removal.
+print("name" in d, "missing" in d)
+print(remove(d, "stable"))
+print(d, len(d))
+
+# Iteration yields keys, in order.
+for key in d {
+    print(key, d[key])
+}
+
+# Keys may be any immutable value, and the numeric tower still holds:
+# `1 == 1.0`, so they are one key.
+let mixed = {1: "int", "1": "string", true: "bool", nil: "nil", 2.5: "float"}
+print(mixed[1.0], mixed["1"], mixed[true], mixed[nil], mixed[2.5])
+mixed[1.0] = "same key as 1"
+print(len(mixed), mixed[1])
+
+# Equality is by contents, not by order or identity.
+print({"a": 1, "b": 2} == {"b": 2, "a": 1})
+print({"a": 1} == {"a": 2}, {"a": 1} == {"a": 1, "b": 2})
+
+# Dicts nest, and hold any value.
+fn twice(n) { return n * 2 }
+let nested = {"fn": twice, "list": [1, 2], "dict": {"deep": true}}
+print(nested["fn"](21), nested["list"][1], nested["dict"]["deep"])
+print(nested["dict"])
+
+# Empty is falsy, non-empty is truthy — as for lists and strings.
+if empty { print("unreachable") } else { print("empty is falsy") }
+if d { print("non-empty is truthy") }
+print(type(d))
