@@ -1,0 +1,2 @@
+fn loop() { return loop() }
+loop()

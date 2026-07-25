@@ -1,0 +1,13 @@
+let x = "outer"
+{
+    let x = "inner"
+    print(x)
+}
+print(x)
+
+fn shadow() {
+    let x = "function"
+    return x
+}
+print(shadow())
+print(x)

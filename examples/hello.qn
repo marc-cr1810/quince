@@ -1,0 +1,9 @@
+fn greet(name) {
+    return "hello, " + name
+}
+
+let x = 42
+
+if x > 10 {
+    print(greet("world"))
+}

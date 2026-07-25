@@ -1,0 +1,13 @@
+fn counter() {
+    let n = 0
+    fn tick() {
+        n = n + 1
+        return n
+    }
+    return tick
+}
+let c = counter()
+print(c())
+print(c())
+let d = counter()
+print(d())

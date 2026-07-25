@@ -1,0 +1,9 @@
+let xs = [1, 2, 3]
+print(xs)
+print(len(xs))
+print(xs[0])
+print(xs[-1])
+xs[1] = 20
+print(xs)
+print([1, "two", [3]])
+print([] == [])

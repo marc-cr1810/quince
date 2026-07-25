@@ -1,0 +1,105 @@
+//! Runs every program in `tests/cases`, comparing against a companion file.
+//!
+//! A `.out` file holds the expected stdout; a `.err` file holds the expected
+//! error message. Adding a case is dropping in two files — no Rust changes.
+
+use std::cell::RefCell;
+use std::io::Write;
+use std::path::Path;
+use std::rc::Rc;
+
+use quince::interp::Interp;
+
+/// A writer the test can read back afterwards.
+#[derive(Clone, Default)]
+struct Captured(Rc<RefCell<Vec<u8>>>);
+
+impl Captured {
+    fn contents(&self) -> String {
+        String::from_utf8(self.0.borrow().clone()).expect("output should be utf-8")
+    }
+}
+
+impl Write for Captured {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.borrow_mut().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Runs a program, returning its output or the message it failed with.
+fn run(source: &str) -> Result<String, String> {
+    let program = quince::compile(source).map_err(|err| err.message)?;
+    let captured = Captured::default();
+    let mut interp = Interp::with_output(Box::new(captured.clone()));
+    match interp.run(&program) {
+        Ok(()) => Ok(captured.contents()),
+        Err(err) => Err(err.message),
+    }
+}
+
+#[test]
+fn cases_produce_their_expected_output() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cases");
+    let mut checked = 0;
+    let mut failures = Vec::new();
+
+    let mut entries: Vec<_> = std::fs::read_dir(&dir)
+        .expect("tests/cases should exist")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "qn"))
+        .collect();
+    entries.sort();
+
+    for path in entries {
+        let name = path.file_stem().unwrap().to_string_lossy().to_string();
+        let source = std::fs::read_to_string(&path).expect("case should be readable");
+        let result = run(&source);
+
+        let expected_out = std::fs::read_to_string(path.with_extension("out")).ok();
+        let expected_err = std::fs::read_to_string(path.with_extension("err")).ok();
+
+        match (expected_out, expected_err, result) {
+            (Some(expected), _, Ok(actual)) => {
+                checked += 1;
+                if expected.trim_end() != actual.trim_end() {
+                    failures.push(format!(
+                        "{name}: output did not match\n  expected: {:?}\n  actual:   {:?}",
+                        expected.trim_end(),
+                        actual.trim_end()
+                    ));
+                }
+            }
+            (_, Some(expected), Err(actual)) => {
+                checked += 1;
+                if expected.trim_end() != actual.trim_end() {
+                    failures.push(format!(
+                        "{name}: error did not match\n  expected: {:?}\n  actual:   {:?}",
+                        expected.trim_end(),
+                        actual.trim_end()
+                    ));
+                }
+            }
+            (Some(_), _, Err(err)) => {
+                failures.push(format!("{name}: expected output, failed: {err}"))
+            }
+            (_, Some(_), Ok(out)) => failures.push(format!(
+                "{name}: expected an error, succeeded with: {out:?}"
+            )),
+            (None, None, _) => failures.push(format!("{name}: has neither a .out nor a .err file")),
+        }
+    }
+
+    assert!(checked > 0, "no cases found in {}", dir.display());
+    assert!(
+        failures.is_empty(),
+        "{} of {checked} cases failed:\n\n{}",
+        failures.len(),
+        failures.join("\n\n")
+    );
+}

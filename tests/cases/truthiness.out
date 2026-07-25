@@ -1,0 +1,10 @@
+zero is falsy
+empty string is falsy
+empty list is falsy
+nil is falsy
+one is truthy
+true
+false
+default
+set
+2

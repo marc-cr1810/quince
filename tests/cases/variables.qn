@@ -1,0 +1,8 @@
+let x = 1
+x = x + 1
+print(x)
+const k = 10
+print(k)
+let s = "a"
+s = s + "b"
+print(s)
