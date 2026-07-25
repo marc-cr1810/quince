@@ -183,3 +183,79 @@ pub static CLASS: BuiltinType = BuiltinType {
     name: "class",
     methods: &[],
 };
+
+/// Every builtin type, for the tools that need to enumerate rather than look up.
+///
+/// [`Value::class`](crate::value::Value::class) maps a value to its type, which
+/// is the direction the evaluator needs and the direction that cannot be walked
+/// backwards — there is no way to ask Rust for every `static BuiltinType`. So
+/// this list is maintained by hand, and the honest question is what a stale one
+/// costs.
+///
+/// Forgetting a type here means its methods go unoffered by REPL completion.
+/// Forgetting to update a hand-written list of method *names* meant the REPL
+/// offering methods that do not exist, which is how this list came to be. One
+/// failure is a gap and the other is a lie, and the lie was the one being told
+/// every time a method was added or renamed. Types are added once and rarely;
+/// methods are added constantly.
+pub static BUILTINS: &[&BuiltinType] = &[
+    &NIL, &BOOL, &INT, &FLOAT, &STR, &LIST, &DICT, &FUNCTION, &CLASS,
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::heap::Object;
+    use crate::value::Native;
+
+    static DUMMY: Native = Native {
+        name: "dummy",
+        arity: None,
+        func: |_interp, _args, _span| Ok(Value::Nil),
+    };
+
+    #[test]
+    fn builtins_covers_every_type_a_value_can_have() {
+        // `Value::class` is the exhaustive match, so anything missing from
+        // BUILTINS is a type some value can name and no tool can enumerate.
+        // `Instance` is the one variant with no entry here, by definition: its
+        // type is a user class, not a builtin.
+        let mut heap = Heap::new();
+        let values = [
+            Value::Nil,
+            Value::Bool(true),
+            Value::Int(0),
+            Value::Float(0.0),
+            Value::from("s"),
+            Value::List(heap.alloc(Object::List(vec![]))),
+            Value::Dict(heap.alloc(Object::Dict(Dict::new()))),
+            Value::Native(&DUMMY),
+            Value::Class(heap.alloc(Object::Class(UserClass {
+                name: "C".to_string(),
+                methods: HashMap::new(),
+                parent: None,
+            }))),
+        ];
+
+        for value in values {
+            let name = value.type_name(&heap);
+            assert!(
+                BUILTINS.iter().any(|builtin| builtin.name == name),
+                "{name} is missing from BUILTINS"
+            );
+        }
+    }
+
+    #[test]
+    fn every_listed_method_is_reachable_by_name() {
+        for builtin in BUILTINS {
+            for (name, _) in builtin.methods {
+                assert!(
+                    builtin.method(name).is_some(),
+                    "{}.{name} is listed but does not look up",
+                    builtin.name
+                );
+            }
+        }
+    }
+}

@@ -9,6 +9,7 @@ use rustyline::validate::Validator;
 use rustyline::Context;
 use rustyline::Helper;
 
+use quince::class;
 use quince::color::Style;
 use quince::interp::Interp;
 use quince::lexer::Lexer;
@@ -24,10 +25,17 @@ const META_COMMANDS: &[&str] = &[
     ":help", ":vars", ":type", ":ast", ":tokens", ":clear", ":load", ":time",
 ];
 
-const METHOD_NAMES: &[&str] = &[
-    "push", "pop", "len", "join", "insert", "remove", "clear", "slice", "contains", "keys",
-    "values", "split", "trim", "starts_with", "ends_with", "replace", "to_uppercase", "to_lowercase",
-];
+/// Every method name any builtin type has, read off the type tables rather than
+/// restated, so completion cannot offer a method the language does not have.
+fn method_names() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = class::BUILTINS
+        .iter()
+        .flat_map(|builtin| builtin.methods.iter().map(|(name, _)| *name))
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+}
 
 #[derive(Clone)]
 pub struct QuinceHelper {
@@ -62,7 +70,7 @@ impl Completer for QuinceHelper {
         }
 
         if start > 0 && line.as_bytes().get(start - 1) == Some(&b'.') {
-            for method in METHOD_NAMES {
+            for method in method_names() {
                 if method.starts_with(word) {
                     matches.push(Pair {
                         display: method.to_string(),
@@ -129,7 +137,7 @@ impl Hinter for QuinceHelper {
         if word.starts_with(':') {
             candidates.extend(META_COMMANDS.iter().copied());
         } else if start > 0 && line.as_bytes().get(start - 1) == Some(&b'.') {
-            candidates.extend(METHOD_NAMES.iter().copied());
+            candidates.extend(method_names());
         } else {
             candidates.extend(KEYWORDS.iter().copied());
             if let Ok(globals) = self.globals.lock() {
@@ -484,6 +492,28 @@ pub fn run_repl(use_color_stdout: bool, use_color_stderr: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn completion_offers_the_methods_that_exist_and_no_others() {
+        // The list this replaced was written from memory: it offered `pop`,
+        // `insert`, `clear`, `slice`, `contains`, and Rust's `to_uppercase`,
+        // none of which are Quince methods, and omitted `chars`, `upper`, and
+        // `lower`, which are. Deriving it makes that unrepresentable; this
+        // fails if anyone hand-writes the list again.
+        let names = method_names();
+
+        for real in ["chars", "upper", "lower", "push", "keys", "remove", "join"] {
+            assert!(names.contains(&real), "{real} should be offered");
+        }
+        for fake in ["pop", "insert", "clear", "slice", "contains", "to_uppercase", "len"] {
+            assert!(!names.contains(&fake), "{fake} is not a method");
+        }
+    }
 }
 
 fn handle_meta_command(

@@ -134,6 +134,8 @@ Flat `src/*.rs`, matching the wrapt layout.
 |---|---|
 | `main.rs` | entry point, wires CLI to the pipeline |
 | `cli.rs` | clap definitions — `run`, `repl` |
+| `repl.rs` | the interactive prompt — editing, highlighting, completion |
+| `color.rs` | ANSI styles, and the decision to emit them at all |
 | `lexer.rs` | source → `Token` stream, tracks spans |
 | `token.rs` | `Token`, `TokenKind` |
 | `ast.rs` | `Expr`, `Stmt` node definitions |
@@ -728,6 +730,231 @@ The error names `const` rather than only saying "frozen", because freezing has e
 one cause and the reader's next question is always what did this. The value it names may
 be several steps from the `const` that froze it — that is what deep means.
 
+## The REPL
+
+`rustyline` handles line editing, history, and the terminal. Hand-rolling that would be
+the one place in this project where writing it ourselves buys nothing: there is no design
+being expressed in cursor movement and termios, unlike the grammar, where owning the code
+is the whole point. The dependency stops at the terminal — everything about what the input
+*means* stays ours.
+
+### The parser decides when input is finished
+
+`impl Validator for QuinceHelper {}` is empty, and deliberately so. rustyline's validator
+hook wants to answer "is this input complete" from the text alone, which in practice means
+counting delimiters — a second parser, worse than the real one, disagreeing with it at the
+edges. The decision instead lives at the `compile` call in the loop: if parsing fails at a
+span at or past the end of the buffer, the input is unfinished and the prompt reads another
+line; a failure anywhere earlier is a real error, reported against the accumulated buffer.
+
+Only the parser knows what complete means, and this keeps exactly one thing knowing it. It
+is still a heuristic rather than an incremental parser, and the residual wart is honest: an
+error that genuinely occurs at the end of the input is indistinguishable from an unfinished
+one, so the prompt keeps asking for more. ctrl-c clears the buffer, which is the escape
+hatch, and the reason it clears rather than exits.
+
+### Brace counting drives only cosmetics
+
+`count_open_braces` sets the indent rustyline pre-fills on a continuation line, and the
+matching auto-dedent when a line starts with `}`. It walks characters and is blind to
+braces inside strings and comments, so `"{"` inflates the indent by one.
+
+That is tolerable precisely because of the split above. The counter can only ever produce
+wrong *indentation*; it can never produce a wrong parse, because nothing semantic asks it
+anything. Keeping the sloppy counter and the exact decision in separate jobs is what makes
+the sloppy one safe to keep. The same blindness is in `find_matching_brackets`, with the
+same justification — a bracket highlighted in the wrong place is a cosmetic bug.
+
+### Highlighting re-lexes, and degrades to a prefix
+
+The highlighter runs the real lexer over the line on every keystroke. When the line does
+not lex — and it will not, constantly, since an open quote is a lex error until it closes —
+it retries on the text before the error span rather than giving up. Everything typed so far
+keeps its colour instead of the line flopping to plain the moment a string is opened.
+
+Re-lexing per keystroke is affordable because a line is short and a human is slow. This is
+one of the few places where the eventual bytecode VM changes nothing.
+
+### Completion cannot borrow the interpreter
+
+rustyline owns the `Helper`, so the helper cannot hold a reference to the `Interp` the loop
+is mutating. Global names are copied into an `Arc<Mutex<Vec<String>>>` once per iteration
+instead, which costs a `Vec<String>` per line entered — not per keystroke — and buys
+completion that knows about variables defined a moment ago.
+
+Method completion started as a hand-written literal and had drifted before it was a day
+old: it offered `pop`, `insert`, `clear`, `slice`, `contains`, and `len`, none of which
+exist, along with `to_uppercase` and `to_lowercase`, whose real names are `upper` and
+`lower`. It omitted `chars`, `upper`, and `lower`, which are real. Those are Rust's names,
+which is the tell — the list was written from memory rather than read off the types.
+
+It now derives from `class::BUILTINS`, so completion cannot name a method the language
+does not have. This is the Bindings argument in a different costume: a duplicate that has
+to be kept in step by hand will not be, and the fix is to remove the duplicate rather than
+to be more careful with it.
+
+What that leaves is a smaller hand-written list — `BUILTINS` itself, since Rust cannot be
+asked for every `static BuiltinType`. The trade is deliberate. Forgetting a type there
+means its methods go unoffered; forgetting a method name in the old list meant the prompt
+lying about the API. A gap is not a lie, and types are added once where methods are added
+constantly. A test asserts `BUILTINS` covers every type `Value::class` can return.
+
+### Meta-commands
+
+Commands begin with `:` and are recognised only when the buffer is empty, so a line
+continuing an expression is never intercepted:
+
+| Command | Effect |
+|---|---|
+| `:help` | list the commands |
+| `:vars` | globals with their values and types |
+| `:type <expr>` | evaluate, report the type, discard the value |
+| `:ast <expr>` | dump the resolved AST |
+| `:tokens <expr>` | dump the token stream with spans |
+| `:load <file>` | run a file into the current session |
+| `:time <expr>` | evaluate and report elapsed time |
+| `:clear` | clear the screen and reset the interpreter |
+
+`:ast` and `:tokens` exist because a language implementation's best debugging tool is the
+ability to ask what it actually parsed, and putting that behind a rebuild is friction paid
+on every question. They dump the pipeline's own structures, so they cannot drift from it.
+
+`:type` and `:time` evaluate their argument, with the side effects that implies — `:time
+xs.push(1)` grows the list. `:clear` resets state as well as the screen, which is two jobs
+under one name and should probably become two commands the first time someone loses a
+session to it.
+
+## Errors as values — `try`, `catch`, `throw`
+
+**Designed, not built.** This section is the decision record written before the code, so
+that what gets built is the thing that was argued for rather than the first thing that
+compiled.
+
+```
+try {
+    risky()
+} catch e {
+    print(e.message)
+}
+```
+
+`catch e` takes no parentheses, matching `if cond {` and `for x in xs {` — nothing else in
+the grammar parenthesises a header, and this should not start.
+
+### Unwinding is already correct, and that is why this is affordable
+
+Three stacks have to be restored when an error unwinds past them: `scopes`, `temps`, and
+`depth`. All three already are. Every site that pushes binds the result *before* it pops
+rather than propagating with `?` — `exec_scoped` pushes the scope, runs, pops, then returns
+the `Result`; `call` does the same around `depth`; `eval_seq` spells out an `Err` arm that
+truncates before returning; `eval_pair` truncates before it unwraps `second?`.
+
+That discipline exists for the collector, not for this feature, and it means `catch` needs
+no unwinding machinery of its own — by the time a handler runs, all three stacks are back
+to their depth at the `try`.
+
+What changes is not the correctness but the *consequence* of getting it wrong. Today an
+error is fatal, so a site that forgot to restore would leak roots into a process that is
+about to exit, and nothing could observe it. A caught error resumes with those stacks
+still deep, and `while true { try { churn() } catch e { } }` turns a latent leak into
+unbounded growth. `catch` does not create the hazard; it removes the thing that has been
+hiding it. That earns a test in the shape of `a_loop_does_not_grow_the_heap_without_bound`
+— catch in a loop, assert the heap stays bounded and all three stacks return to baseline.
+
+### The error becomes a value only if someone catches it
+
+The obvious design is to make every raised error a heap object at the point it is raised.
+It is wrong twice over. Half the raise sites hold `&self`, not `&mut self` — `index_get`,
+`attr`, `no_attr`, and the free functions `frozen` and `type_error` all take `&Heap` —
+so allocating at raise time means widening a dozen signatures to `&mut` for the benefit of
+the rare path. And an uncaught error is about to be printed and thrown away, so allocating
+for it is work done exclusively for the case that discards it.
+
+So `QuinceError` stays the Rust struct it is while unwinding, and is *reified* into a
+Quince value at the `catch`, which is the one place that has `&mut self` and the only place
+the value can be observed. Uncaught errors never allocate at all.
+
+Reification needs to know what class to build, which is the one change the propagating type
+does need: a `kind` alongside `message` and `span`. Message strings are for humans and
+programs should never match on them — a `kind` is what lets `catch` eventually filter, and
+retrofitting one after programs are written against message text is not a thing that can be
+done quietly.
+
+### `throw`, and why it is not deferred
+
+`try`/`catch` without `throw` is a smaller feature, and shipping it first is tempting. It
+is the wrong order. Catch-only means the caught thing can be a builtin type of the
+implementation's choosing; adding `throw` afterwards means user values arrive at `catch e`,
+and whatever `e` was before has to change to accommodate them. That is a language break
+dressed as a feature addition, and the corpus grows every week.
+
+So `Error` is a class, allocated as a `UserClass` at startup and bound as a global. That is
+not a compromise for want of better machinery — it is what makes `class MyError extends
+Error` work with no new machinery at all, reusing the `extends` chain and method lookup
+that v0.4 already built. `QuinceError` carries an optional payload for the user-thrown
+case, so a thrown instance is what the handler binds, unchanged and unwrapped.
+
+The cost is honest: `Error` is an ordinary global, so a program can shadow it. That is the
+same exposure `print` and `len` already have, and inventing a protected namespace for one
+name is worse than the thing it prevents.
+
+### The payload crosses the unwind unrooted
+
+A thrown instance travels inside `QuinceError` through frames that root nothing. It is
+reachable from no scope and no `temps` entry for the whole unwind, and it survives only
+because collection happens between statements and unwinding executes none. `alloc` does not
+collect — deliberately, see Collection — so even the handler's own scope allocation cannot
+take the payload out from under it before it is bound.
+
+That is three separate invariants holding one value alive. They are all already true and
+none of them are stated anywhere near each other, which is exactly how this breaks later:
+the day `alloc` learns to collect, this is the code that fails, and it will fail as a
+use-after-free in a `catch` that has nothing obviously to do with allocation. If the payload
+ever outlives a single unwind, it goes in `temps` and stops depending on any of it.
+
+### The recursion limit stays catchable
+
+Making one error uncatchable means `catch e` no longer means catch `e`, and every program
+using a handler for cleanup acquires a hole in it. The uniform rule is worth more than the
+footgun it admits.
+
+And the footgun is mostly Python's, not ours. There, catching `RecursionError` resumes at
+the depth where it fired, still one call from the ceiling. Here `depth` is decremented by
+every `call` frame the error unwinds through, so a handler at the `try`'s depth resumes at
+the `try`'s depth — a `try` at depth 5 around a runaway recursion runs its handler at depth
+5, with the whole stack available again. That falls straight out of the unwind discipline
+above and is a reason to keep that discipline exactly as it is.
+
+### What this does not bring
+
+**No `finally`.** It earns its keep by releasing things, and the language holds no
+releasable resource — no files, no sockets, no locks. Adding it now would mean deciding
+what a `return` inside a `finally` does to a `return` inside its `try`, which is a genuinely
+hard question asked on behalf of no one. It waits for I/O.
+
+**No typed `catch`.** `catch e` binds everything raised. `catch e: TypeError` is a
+*narrowing* of a form that already parses, so it stays addable later without breaking a
+line of existing code — which is the same reasoning that made redeclaration an error rather
+than a shadow. The `kind` field is what keeps that door open.
+
+**No interaction with `return` whatsoever**, which is worth stating because it looks like
+there should be one. `return` travels as `Flow::Return`, a value in the `Ok` channel;
+errors travel in the `Err` channel. A `return` inside a `try` passes through the handler
+untouched because it is not the kind of thing a handler can see. `finally` is precisely the
+feature that would force those two channels to meet, which is a second reason it waits.
+
+### Resolution
+
+`catch e` declares a binding, so the catch block is a scope like any other and `e` is its
+first slot — the same treatment `for x in xs` gets. The `try` block is a separate scope,
+and its bindings are deliberately not visible to the handler: a `let` inside `try` may not
+have run when the error fired, so the handler could otherwise read a slot that was never
+written. That is the "used before it is declared" case the resolver already reports, and
+keeping the scopes separate means it cannot arise here at all.
+
+Both blocks are real scopes in both the resolver and the evaluator, which is the invariant
+from Resolution above — one runtime scope per lexical block, no more and no fewer.
+
 ## Roadmap
 
 **v0.1 — walking skeleton**
@@ -761,8 +988,9 @@ its own truthiness, printing, equality, indexing, or iteration. `push`, `keys`,
 `values`, and `remove` began as free functions standing in for methods; dispatch landed
 and they moved onto their types, leaving `print`, `len`, and `type` as the only globals.
 There are no tuples, which is why iterating a dict yields keys rather than pairs. The
-REPL is line-at-a-time and continues reading when a parse fails at end of input, which is a
-heuristic rather than a real incremental parser.
+REPL grew line editing, history, highlighting, completion, and meta-commands on top of
+`rustyline` — see The REPL above — but the continuation rule is still the original
+heuristic, not an incremental parser.
 
 Deferred from the lexer, both cheap to add: hex/binary/octal literals (Zephyr has
 them) and block comments (whose nesting behaviour is a real decision).
@@ -800,9 +1028,18 @@ piece of work and are listed under v0.5 rather than left implied here.
 **v0.5 — robustness**
 `try`/`catch` and span-accurate diagnostics everywhere. GC is done.
 
+`try`/`catch`/`throw` is designed but not built — see Errors as values above. It goes
+first of the three, because it settles what a `QuinceError` *is* before protocol slots
+start threading one through `display`, `is_truthy`, and `equals` at every call site. The
+diagnostics sweep goes last, when nothing else is still moving spans around.
+
 `final` and `const` landed here first, out of order, because they were a rename with a
 feature hiding inside it — see Bindings above. Renaming a keyword only gets cheaper the
 earlier it happens, and the corpus was 59 files at the time.
+
+The REPL work landed here too, and is robustness of a different kind: it is the surface
+where the language gets used before it is finished, and `:ast` and `:tokens` shorten the
+loop on every question asked of the parser from here on.
 
 Protocol slots belong here too — the point at which `is_truthy`, `display`, `equals`,
 indexing, and iteration stop being closed matches over `Value` and gain one arm that
