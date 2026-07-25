@@ -2,6 +2,7 @@ use std::fmt;
 use std::rc::Rc;
 
 use crate::ast::FnDecl;
+use crate::class::{self, BuiltinType};
 use crate::error::QuinceError;
 use crate::heap::{Heap, ObjId};
 use crate::interp::Interp;
@@ -68,19 +69,28 @@ impl Value {
         }
     }
 
-    /// The name used in type errors. Kept in one place so messages stay
-    /// consistent as variants are added.
-    pub fn type_name(&self) -> &'static str {
+    /// The type this value belongs to.
+    ///
+    /// Many-to-one, and deliberately so: a Quince function and a builtin are
+    /// both `function`, because nothing a program can do distinguishes them.
+    /// This is the one place that decision is recorded, and once methods exist
+    /// it is also where they are found.
+    pub fn class(&self) -> &'static BuiltinType {
         match self {
-            Value::Nil => "nil",
-            Value::Bool(_) => "bool",
-            Value::Int(_) => "int",
-            Value::Float(_) => "float",
-            Value::Str(_) => "string",
-            Value::List(_) => "list",
-            Value::Dict(_) => "dict",
-            Value::Function(_) | Value::Native(_) => "function",
+            Value::Nil => &class::NIL,
+            Value::Bool(_) => &class::BOOL,
+            Value::Int(_) => &class::INT,
+            Value::Float(_) => &class::FLOAT,
+            Value::Str(_) => &class::STR,
+            Value::List(_) => &class::LIST,
+            Value::Dict(_) => &class::DICT,
+            Value::Function(_) | Value::Native(_) => &class::FUNCTION,
         }
+    }
+
+    /// The name used in type errors and by `type(x)`.
+    pub fn type_name(&self) -> &'static str {
+        self.class().name
     }
 
     /// Python-style truthiness: `nil`, `false`, zero, and empty collections are
@@ -205,16 +215,54 @@ impl From<&str> for Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dict::Dict;
     use crate::heap::Object;
+
+    static DUMMY: Native = Native {
+        name: "dummy",
+        arity: None,
+        func: |_interp, _args, _span| Ok(Value::Nil),
+    };
 
     #[test]
     fn type_names_are_stable() {
-        let heap = Heap::new();
-        let _ = &heap;
+        let mut heap = Heap::new();
         assert_eq!(Value::Nil.type_name(), "nil");
+        assert_eq!(Value::Bool(true).type_name(), "bool");
         assert_eq!(Value::Int(1).type_name(), "int");
         assert_eq!(Value::Float(1.0).type_name(), "float");
         assert_eq!(Value::from("a").type_name(), "string");
+
+        let list = Value::List(heap.alloc(Object::List(vec![])));
+        let dict = Value::Dict(heap.alloc(Object::Dict(Dict::new())));
+        assert_eq!(list.type_name(), "list");
+        assert_eq!(dict.type_name(), "dict");
+    }
+
+    #[test]
+    fn every_value_maps_to_its_own_type() {
+        // `class` is a hand-written table, so a value pointing at the wrong
+        // entry is a plausible mistake that `type_name` alone would not catch:
+        // two types could share a name and still be distinct.
+        let mut heap = Heap::new();
+        let list = Value::List(heap.alloc(Object::List(vec![])));
+        let dict = Value::Dict(heap.alloc(Object::Dict(Dict::new())));
+
+        assert!(std::ptr::eq(Value::Int(1).class(), &class::INT));
+        assert!(std::ptr::eq(list.class(), &class::LIST));
+        assert!(std::ptr::eq(dict.class(), &class::DICT));
+        assert!(!std::ptr::eq(list.class(), dict.class()));
+    }
+
+    #[test]
+    fn builtins_and_quince_functions_share_one_type() {
+        // The many-to-one case: nothing a program can do tells them apart, so
+        // they must not report different types.
+        assert_eq!(Value::Native(&DUMMY).type_name(), "function");
+        assert!(std::ptr::eq(
+            Value::Native(&DUMMY).class(),
+            &class::FUNCTION
+        ));
     }
 
     #[test]

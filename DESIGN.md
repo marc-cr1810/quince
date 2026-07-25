@@ -144,6 +144,7 @@ Flat `src/*.rs`, matching the wrapt layout.
 | `interp.rs` | tree-walking evaluator |
 | `env.rs` | scopes and variable binding |
 | `dict.rs` | insertion-ordered map, and the values admitted as keys |
+| `class.rs` | the type every value belongs to, and where its behaviour is found |
 | `error.rs` | `QuinceError` with spans, user-facing diagnostics |
 
 Hand-written lexer and parser, no parser-generator dependency. For a language whose
