@@ -1,4 +1,4 @@
-use crate::env::Env;
+use crate::env::{Env, Globals};
 use crate::value::{Function, Value};
 
 /// A handle into the [`Heap`].
@@ -14,6 +14,9 @@ pub struct ObjId(u32);
 pub enum Object {
     List(Vec<Value>),
     Env(Env),
+    /// The top-level scope. Exactly one exists, and it is the collector's
+    /// permanent root.
+    Globals(Globals),
     Function(Function),
 }
 
@@ -147,6 +150,20 @@ impl Heap {
         }
     }
 
+    pub fn globals(&self, id: ObjId) -> &Globals {
+        match self.get(id) {
+            Object::Globals(globals) => globals,
+            other => panic!("expected the global scope, found {other:?}"),
+        }
+    }
+
+    pub fn globals_mut(&mut self, id: ObjId) -> &mut Globals {
+        match self.get_mut(id) {
+            Object::Globals(globals) => globals,
+            other => panic!("expected the global scope, found {other:?}"),
+        }
+    }
+
     pub fn function(&self, id: ObjId) -> &Function {
         match self.get(id) {
             Object::Function(func) => func,
@@ -176,6 +193,7 @@ fn trace(object: &Object, worklist: &mut Vec<ObjId>) {
     match object {
         Object::List(items) => worklist.extend(items.iter().filter_map(Value::handle)),
         Object::Env(env) => env.trace(worklist),
+        Object::Globals(globals) => globals.trace(worklist),
         Object::Function(func) => worklist.push(func.env),
     }
 }

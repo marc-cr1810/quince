@@ -8,7 +8,6 @@ use clap::Parser as _;
 use quince::error::QuinceError;
 use quince::interp::Interp;
 use quince::lexer::Lexer;
-use quince::parser::Parser;
 use quince::value::Value;
 
 use crate::cli::{Cli, Command, Dump};
@@ -40,7 +39,8 @@ fn run(source: &str, path: &str, dump: Option<Dump>) {
         return;
     }
 
-    let program = report(Parser::new(tokens).parse(), source, path);
+    // Dumped after resolution, so the slot each name was assigned is visible.
+    let program = report(quince::compile_tokens(tokens), source, path);
 
     if dump == Some(Dump::Ast) {
         for stmt in &program {

@@ -35,10 +35,43 @@ pub enum LogicalOp {
     Or,
 }
 
+/// Where the resolver decided a name lives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Slot {
+    /// `hops` scopes out from the current one, then slot `index`. The runtime
+    /// scope chain mirrors lexical nesting exactly, which is what makes a
+    /// static hop count valid.
+    Local { hops: u16, index: u16 },
+    /// Not found in any enclosing local scope, so it is looked up by name at
+    /// run time. Globals stay dynamic because the REPL defines them a line at
+    /// a time, and because a program may call a function declared further down.
+    Global,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Expr {
     pub kind: ExprKind,
     pub span: Span,
+}
+
+/// A variable reference, before and after resolution.
+///
+/// `slot` is `None` as the parser leaves it and `Some` once the resolver has
+/// run. The evaluator treats `None` as a bug in the pipeline rather than a
+/// condition to handle.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Var {
+    pub name: String,
+    pub slot: Option<Slot>,
+}
+
+impl Var {
+    pub fn new(name: impl Into<String>) -> Self {
+        Var {
+            name: name.into(),
+            slot: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -48,7 +81,7 @@ pub enum ExprKind {
     Str(String),
     Bool(bool),
     Nil,
-    Ident(String),
+    Var(Var),
     List(Vec<Expr>),
     Unary {
         op: UnaryOp,
@@ -88,6 +121,10 @@ pub enum ExprKind {
 pub struct Block {
     pub stmts: Vec<Stmt>,
     pub span: Span,
+    /// How many slots this block's scope needs, filled in by the resolver, so
+    /// the scope can be allocated at its final size in one go. For a function
+    /// body this counts the parameters too, which occupy the first slots.
+    pub slot_count: u16,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -118,10 +155,16 @@ pub enum StmtKind {
         name: String,
         value: Expr,
         mutable: bool,
+        /// Where the binding goes. Always `Local { hops: 0, .. }` or `Global`.
+        slot: Option<Slot>,
     },
     /// Shared so a closure can hold the body without deep-copying it each time
     /// the declaration is executed.
-    Fn(Rc<FnDecl>),
+    Fn {
+        decl: Rc<FnDecl>,
+        /// Where the function's own name is bound, as for `Let`.
+        slot: Option<Slot>,
+    },
     If {
         cond: Expr,
         then: Block,
@@ -136,6 +179,9 @@ pub enum StmtKind {
         var: String,
         iter: Expr,
         body: Block,
+        /// The loop variable lives in the body's scope, since a fresh one is
+        /// made per iteration.
+        slot: Option<Slot>,
     },
     Return(Option<Expr>),
     Block(Block),

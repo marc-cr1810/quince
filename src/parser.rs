@@ -1,5 +1,5 @@
 use crate::ast::{
-    BinaryOp, Block, Expr, ExprKind, FnDecl, LogicalOp, Param, Stmt, StmtKind, UnaryOp,
+    BinaryOp, Block, Expr, ExprKind, FnDecl, LogicalOp, Param, Stmt, StmtKind, UnaryOp, Var,
 };
 use crate::error::QuinceError;
 use crate::token::{Span, Token, TokenKind};
@@ -92,6 +92,7 @@ impl Parser {
 
         Ok(Stmt {
             kind: StmtKind::Let {
+                slot: None,
                 name,
                 value,
                 mutable,
@@ -118,7 +119,10 @@ impl Parser {
         let body = self.block()?;
         let span = start.to(body.span);
         Ok(Stmt {
-            kind: StmtKind::Fn(std::rc::Rc::new(FnDecl { name, params, body })),
+            kind: StmtKind::Fn {
+                decl: std::rc::Rc::new(FnDecl { name, params, body }),
+                slot: None,
+            },
             span,
         })
     }
@@ -174,7 +178,12 @@ impl Parser {
         let body = self.block()?;
         let span = start.to(body.span);
         Ok(Stmt {
-            kind: StmtKind::For { var, iter, body },
+            kind: StmtKind::For {
+                var,
+                iter,
+                body,
+                slot: None,
+            },
             span,
         })
     }
@@ -214,6 +223,7 @@ impl Parser {
         Ok(Block {
             stmts,
             span: open.span.to(close.span),
+            slot_count: 0,
         })
     }
 
@@ -359,7 +369,7 @@ impl Parser {
             TokenKind::True => ExprKind::Bool(true),
             TokenKind::False => ExprKind::Bool(false),
             TokenKind::Nil => ExprKind::Nil,
-            TokenKind::Ident(name) => ExprKind::Ident(name),
+            TokenKind::Ident(name) => ExprKind::Var(Var::new(name)),
 
             TokenKind::LParen => {
                 let inner = self.expression()?;
@@ -487,7 +497,7 @@ impl Parser {
 fn is_assignable(expr: &Expr) -> bool {
     matches!(
         expr.kind,
-        ExprKind::Ident(_) | ExprKind::Index { .. } | ExprKind::Field { .. }
+        ExprKind::Var(_) | ExprKind::Index { .. } | ExprKind::Field { .. }
     )
 }
 
@@ -518,7 +528,7 @@ mod tests {
             ExprKind::Str(s) => format!("{s:?}"),
             ExprKind::Bool(b) => b.to_string(),
             ExprKind::Nil => "nil".into(),
-            ExprKind::Ident(name) => name.clone(),
+            ExprKind::Var(var) => var.name.clone(),
             ExprKind::List(items) => format!("[{}]", joined(items)),
             ExprKind::Unary { op, rhs } => {
                 let op = match op {
@@ -739,7 +749,7 @@ mod tests {
     #[test]
     fn return_may_omit_its_value() {
         let stmts = parse_ok("fn f() {\n  return\n}");
-        let StmtKind::Fn(decl) = &stmts[0].kind else {
+        let StmtKind::Fn { decl, .. } = &stmts[0].kind else {
             panic!("expected a fn");
         };
         assert!(matches!(decl.body.stmts[0].kind, StmtKind::Return(None)));
@@ -748,7 +758,7 @@ mod tests {
     #[test]
     fn return_takes_a_value_on_the_same_line() {
         let stmts = parse_ok("fn f() { return 1 + 2 }");
-        let StmtKind::Fn(decl) = &stmts[0].kind else {
+        let StmtKind::Fn { decl, .. } = &stmts[0].kind else {
             panic!("expected a fn");
         };
         let StmtKind::Return(Some(value)) = &decl.body.stmts[0].kind else {
@@ -760,7 +770,7 @@ mod tests {
     #[test]
     fn functions_declare_parameters() {
         let stmts = parse_ok("fn add(a, b,) { return a + b }");
-        let StmtKind::Fn(decl) = &stmts[0].kind else {
+        let StmtKind::Fn { decl, .. } = &stmts[0].kind else {
             panic!("expected a fn");
         };
         assert_eq!(decl.name, "add");
@@ -806,7 +816,7 @@ mod tests {
         let src = include_str!("../examples/hello.qn");
         let stmts = parse_ok(src);
         assert_eq!(stmts.len(), 3, "fn, let, if");
-        assert!(matches!(stmts[0].kind, StmtKind::Fn(_)));
+        assert!(matches!(stmts[0].kind, StmtKind::Fn { .. }));
         assert!(matches!(stmts[1].kind, StmtKind::Let { .. }));
         assert!(matches!(stmts[2].kind, StmtKind::If { .. }));
     }

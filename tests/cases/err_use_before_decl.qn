@@ -1,0 +1,7 @@
+# Declarations are hoisted to the top of their scope, so the slot exists —
+# but nothing has been put in it yet.
+fn f() {
+    print(x)
+    let x = 1
+}
+f()

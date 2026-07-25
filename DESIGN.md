@@ -111,6 +111,7 @@ Flat `src/*.rs`, matching the wrapt layout.
 | `token.rs` | `Token`, `TokenKind` |
 | `ast.rs` | `Expr`, `Stmt` node definitions |
 | `parser.rs` | recursive-descent + Pratt for expression precedence |
+| `resolver.rs` | binds every name to a slot, or to the global scope |
 | `value.rs` | `Value` enum, `ObjId`, heap object types |
 | `heap.rs` | the arena, allocation, mark-and-sweep collection |
 | `interp.rs` | tree-walking evaluator |
@@ -120,6 +121,46 @@ Flat `src/*.rs`, matching the wrapt layout.
 Hand-written lexer and parser, no parser-generator dependency. For a language whose
 syntax we control and will change often, hand-rolled recursive descent stays easier to
 evolve and produces far better error messages.
+
+## Resolution
+
+Between parsing and evaluation, every name is rewritten to a `(hops, index)`
+pair: walk out `hops` scopes, then read slot `index`. A local scope becomes a
+flat `Vec` of slots instead of a `HashMap<String, Binding>`, so reading a
+variable stops hashing a string against a chain of maps. Parameters take a
+function scope's first slots in order, so a call binds them without consulting
+their names at all.
+
+The hop count is only valid because the runtime scope chain mirrors lexical
+nesting exactly — one runtime scope per lexical block, no more and no fewer.
+That invariant is now load-bearing, and anything that adds a scope has to add
+one in both places.
+
+**Globals stay dynamic**, looked up by name. The REPL introduces them a line at
+a time, and a program may call a function declared further down the file, so
+neither can be pinned to a slot. This is the same split CPython makes, and it is
+why an undefined *global* is still a run-time error.
+
+Declarations are collected before a scope's bodies are resolved, so a nested
+function can call a sibling declared below it — mutual recursion between nested
+functions works, which is how the name-keyed evaluator behaved. The cost is that
+a slot can be reached before its `let` has run, which is reported as "used
+before it is declared" rather than reading a stale value.
+
+Two errors moved from run time to compile time, and are now caught even in code
+that never executes:
+
+- assigning to a `const` local
+- declaring the same name twice in one scope
+
+The second is a **language change**: redeclaring used to shadow silently. With
+slots the two declarations are separate storage, so a closure created between
+them would quietly keep the older one. Making it an error is the restrictive
+choice on purpose — an error can be relaxed later, a semantics cannot. Shadowing
+across nested scopes is untouched.
+
+The resolver is also the first half of the work a bytecode compiler needs, so
+none of it is throwaway if the VM happens.
 
 ### Errors are a feature
 
@@ -149,7 +190,8 @@ for item in [1, 2, 3] {
 ```
 
 - Dynamic typing, optional annotations later (as Zephyr has)
-- `let` / `const` bindings
+- `let` / `const` bindings; a name may be declared only once per scope, but may
+  shadow one from an enclosing scope
 - Braces, not significant whitespace — simpler to parse, fewer edge cases
 - `#` line comments, which leaves `//` free for floor division and makes a `#!`
   shebang line a comment for free
@@ -241,9 +283,15 @@ shape of the evaluator (see Collection above) and retrofitting a root set is far
 worse than growing one. A loop churning six million objects now peaks at 2.9 MB
 instead of growing without bound.
 
-Still missing: `try`/`catch`, dicts, classes, and string methods. The REPL is
-line-at-a-time and continues reading when a parse fails at end of input, which is
-a heuristic rather than a real incremental parser.
+The resolver landed next, for the same reason — it changes what a scope *is*,
+and every later pass would have had to be rewritten around it. `fib(25)` went
+from 0.17s to 0.10s, against CPython's 0.03s on the same machine.
+
+Still missing: `try`/`catch`, dicts, classes, and string methods. Lists have no
+concatenation or `append`, so building one incrementally means preallocating and
+assigning by index. The REPL is line-at-a-time and continues reading when a parse
+fails at end of input, which is a heuristic rather than a real incremental
+parser.
 
 Deferred from the lexer, both cheap to add: hex/binary/octal literals (Zephyr has
 them) and block comments (whose nesting behaviour is a real decision).

@@ -1,8 +1,9 @@
 use std::io::Write;
 use std::rc::Rc;
 
-use crate::ast::{BinaryOp, Block, Expr, ExprKind, LogicalOp, Stmt, StmtKind, UnaryOp};
-use crate::env::{self, AssignError, Env};
+use crate::ast::Slot;
+use crate::ast::{BinaryOp, Block, Expr, ExprKind, LogicalOp, Stmt, StmtKind, UnaryOp, Var};
+use crate::env::{self, AssignError, Env, Globals};
 use crate::error::QuinceError;
 use crate::heap::{Heap, ObjId, Object};
 use crate::token::Span;
@@ -42,9 +43,9 @@ impl Interp {
     /// Output is injected so tests can capture what a program prints.
     pub fn with_output(out: Box<dyn Write>) -> Self {
         let mut heap = Heap::new();
-        let globals = heap.alloc(Object::Env(Env::new(None)));
+        let globals = heap.alloc(Object::Globals(Globals::new()));
         for native in BUILTINS {
-            heap.env_mut(globals)
+            heap.globals_mut(globals)
                 .declare(native.name, Value::Native(native), false);
         }
         Interp {
@@ -137,24 +138,21 @@ impl Interp {
                 name,
                 value,
                 mutable,
+                slot,
             } => {
                 let value = self.eval(value, env)?;
-                self.heap
-                    .env_mut(env)
-                    .declare(name.clone(), value, *mutable);
+                self.bind(slot, name, value, *mutable, env);
                 Ok(Flow::Normal)
             }
 
-            StmtKind::Fn(decl) => {
+            StmtKind::Fn { decl, slot } => {
                 // Declared before the body ever runs, and closing over the scope
                 // it is declared in, so the function can call itself.
                 let func = self.heap.alloc(Object::Function(Function {
                     decl: Rc::clone(decl),
                     env,
                 }));
-                self.heap
-                    .env_mut(env)
-                    .declare(decl.name.clone(), Value::Function(func), false);
+                self.bind(slot, &decl.name, Value::Function(func), false, env);
                 Ok(Flow::Normal)
             }
 
@@ -181,7 +179,9 @@ impl Interp {
                 Ok(Flow::Normal)
             }
 
-            StmtKind::For { var, iter, body } => self.exec_for(var, iter, body, env),
+            StmtKind::For {
+                iter, body, slot, ..
+            } => self.exec_for(slot, iter, body, env),
 
             StmtKind::Return(value) => {
                 let value = match value {
@@ -197,7 +197,7 @@ impl Interp {
 
     fn exec_for(
         &mut self,
-        var: &str,
+        slot: &Option<Slot>,
         iter: &Expr,
         body: &Block,
         env: ObjId,
@@ -220,23 +220,29 @@ impl Interp {
         // list, and then nothing on the heap refers to these items at all.
         let mark = self.temps.len();
         self.temps.extend(items.iter().cloned());
-        let result = self.iterate(var, items, body, env);
+        let result = self.iterate(slot, items, body, env);
         self.temps.truncate(mark);
         result
     }
 
     fn iterate(
         &mut self,
-        var: &str,
+        slot: &Option<Slot>,
         items: Vec<Value>,
         body: &Block,
         env: ObjId,
     ) -> Result<Flow, QuinceError> {
+        let index = match resolved(slot) {
+            Slot::Local { index, .. } => index,
+            Slot::Global => unreachable!("a loop variable is always a local"),
+        };
         for item in items {
             // A fresh scope per iteration, so a closure made inside the loop
             // captures that iteration's value rather than sharing one binding.
-            let scope = self.heap.alloc(Object::Env(Env::new(Some(env))));
-            self.heap.env_mut(scope).declare(var, item, true);
+            let scope = self
+                .heap
+                .alloc(Object::Env(Env::new(Some(env), body.slot_count)));
+            self.heap.env_mut(scope).set(index, item);
             if let Flow::Return(value) = self.exec_scoped(&body.stmts, scope)? {
                 return Ok(Flow::Return(value));
             }
@@ -245,8 +251,21 @@ impl Interp {
     }
 
     fn exec_block(&mut self, block: &Block, env: ObjId) -> Result<Flow, QuinceError> {
-        let scope = self.heap.alloc(Object::Env(Env::new(Some(env))));
+        let scope = self
+            .heap
+            .alloc(Object::Env(Env::new(Some(env), block.slot_count)));
         self.exec_scoped(&block.stmts, scope)
+    }
+
+    /// Stores a freshly declared value in the slot the resolver picked for it.
+    fn bind(&mut self, slot: &Option<Slot>, name: &str, value: Value, mutable: bool, env: ObjId) {
+        match resolved(slot) {
+            Slot::Local { index, .. } => self.heap.env_mut(env).set(index, value),
+            Slot::Global => self
+                .heap
+                .globals_mut(self.globals)
+                .declare(name, value, mutable),
+        }
     }
 
     /// Runs `stmts` in `scope`, keeping the scope rooted for as long as it is
@@ -281,8 +300,7 @@ impl Interp {
             ExprKind::Bool(b) => Ok(Value::Bool(*b)),
             ExprKind::Nil => Ok(Value::Nil),
 
-            ExprKind::Ident(name) => env::lookup(&self.heap, env, name)
-                .ok_or_else(|| QuinceError::new(format!("undefined variable `{name}`"), expr.span)),
+            ExprKind::Var(var) => self.read(var, env, expr.span),
 
             ExprKind::List(items) => {
                 let values = items
@@ -349,19 +367,66 @@ impl Interp {
         }
     }
 
+    /// Reads a variable through the slot the resolver assigned it.
+    fn read(&mut self, var: &Var, env: ObjId, span: Span) -> Result<Value, QuinceError> {
+        match resolved(&var.slot) {
+            Slot::Local { hops, index } => {
+                let scope = env::ancestor(&self.heap, env, hops);
+                self.heap.env(scope).get(index).cloned().ok_or_else(|| {
+                    // Declarations are hoisted to the top of their scope, so a
+                    // slot can be reached before its `let` has run.
+                    QuinceError::new(
+                        format!("`{}` is used before it is declared", var.name),
+                        span,
+                    )
+                })
+            }
+            Slot::Global => self
+                .heap
+                .globals(self.globals)
+                .get(&var.name)
+                .cloned()
+                .ok_or_else(|| {
+                    QuinceError::new(format!("undefined variable `{}`", var.name), span)
+                }),
+        }
+    }
+
     fn assign(&mut self, target: &Expr, value: Value, env: ObjId) -> Result<Value, QuinceError> {
         match &target.kind {
-            ExprKind::Ident(name) => match env::assign(&mut self.heap, env, name, value.clone()) {
-                Ok(()) => Ok(value),
-                Err(AssignError::Undefined) => Err(QuinceError::new(
-                    format!("undefined variable `{name}`"),
-                    target.span,
-                )),
-                Err(AssignError::Immutable) => Err(QuinceError::new(
-                    format!("cannot assign to constant `{name}`"),
-                    target.span,
-                )),
-            },
+            ExprKind::Var(var) => {
+                match resolved(&var.slot) {
+                    // The resolver already rejected assignment to a `const`
+                    // local, so reaching a slot means it is writable.
+                    Slot::Local { hops, index } => {
+                        let scope = env::ancestor(&self.heap, env, hops);
+                        self.heap.env_mut(scope).set(index, value.clone());
+                    }
+                    Slot::Global => {
+                        let name = &var.name;
+                        match self
+                            .heap
+                            .globals_mut(self.globals)
+                            .assign(name, value.clone())
+                        {
+                            Ok(()) => {}
+                            Err(AssignError::Undefined) => {
+                                return Err(QuinceError::new(
+                                    format!("undefined variable `{name}`"),
+                                    target.span,
+                                ));
+                            }
+                            Err(AssignError::Immutable) => {
+                                return Err(QuinceError::new(
+                                    format!("cannot assign to constant `{name}`"),
+                                    target.span,
+                                ));
+                            }
+                        }
+                    }
+                }
+                Ok(value)
+            }
 
             ExprKind::Index {
                 target: list,
@@ -433,11 +498,14 @@ impl Interp {
                     ));
                 }
 
-                let scope = self.heap.alloc(Object::Env(Env::new(Some(func.env))));
-                for (param, arg) in func.decl.params.iter().zip(args) {
-                    self.heap
-                        .env_mut(scope)
-                        .declare(param.name.clone(), arg, true);
+                // Parameters are the body scope's first slots, in order, so
+                // binding them needs no names at all.
+                let scope = self.heap.alloc(Object::Env(Env::new(
+                    Some(func.env),
+                    func.decl.body.slot_count,
+                )));
+                for (index, arg) in args.into_iter().enumerate() {
+                    self.heap.env_mut(scope).set(index as u16, arg);
                 }
 
                 self.depth += 1;
@@ -526,6 +594,12 @@ impl Default for Interp {
     fn default() -> Self {
         Interp::new()
     }
+}
+
+/// A slot the resolver failed to fill would mean the resolver never ran, which
+/// is a wiring bug rather than anything a program can cause.
+fn resolved(slot: &Option<Slot>) -> Slot {
+    slot.expect("the resolver must run before evaluation")
 }
 
 fn as_float(value: &Value) -> f64 {
@@ -675,6 +749,10 @@ static TYPE: Native = Native {
 mod tests {
     use super::*;
 
+    fn global(interp: &Interp, name: &str) -> Option<Value> {
+        interp.heap.globals(interp.globals).get(name).cloned()
+    }
+
     fn run(source: &str) -> Interp {
         let program = crate::compile(source).expect("the test program should parse");
         let mut interp = Interp::with_output(Box::new(Vec::new()));
@@ -711,7 +789,7 @@ mod tests {
              let survived = f()");
 
         assert!(interp.heap.collections > 0, "the collector never ran");
-        let Some(Value::List(id)) = env::lookup(&interp.heap, interp.globals, "survived") else {
+        let Some(Value::List(id)) = global(&interp, "survived") else {
             panic!("the closure did not return its captured list");
         };
         assert_eq!(interp.heap.list(id).len(), 3);
@@ -734,10 +812,7 @@ mod tests {
              }");
 
         assert!(interp.heap.collections > 0, "the collector never ran");
-        assert_eq!(
-            env::lookup(&interp.heap, interp.globals, "total"),
-            Some(Value::Int(3))
-        );
+        assert_eq!(global(&interp, "total"), Some(Value::Int(3)));
     }
 
     #[test]

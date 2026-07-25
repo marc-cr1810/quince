@@ -103,3 +103,20 @@ fn cases_produce_their_expected_output() {
         failures.join("\n\n")
     );
 }
+
+/// The corpus runs the interpreter in-process, which once let the binary ship
+/// without the resolver while every other test passed. This covers the wiring.
+#[test]
+fn the_binary_runs_a_program_end_to_end() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_quince"))
+        .args(["run", "examples/hello.qn"])
+        .output()
+        .expect("the binary should run");
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "hello, world\n");
+}
