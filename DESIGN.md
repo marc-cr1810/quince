@@ -51,6 +51,40 @@ Rejected alternatives:
 
 Handles get us to a real collector later without changing the object representation.
 
+### Collection
+
+Mark and sweep, over the arena. A freed slot becomes a hole rather than being
+removed, so live handles never shift, and the holes are reused by later
+allocations. A collection triggers once the live set passes a threshold, which
+then grows to twice the survivors — a program with a genuinely large heap should
+not collect on every statement.
+
+The hard part is not the marking, it's the **root set**. A tree-walking
+interpreter keeps live values in Rust locals: while `a + b` is evaluating `b`,
+the value of `a` exists only as a local variable in `eval`, and no scan of the
+heap can find it. Collecting at an arbitrary allocation would free it.
+
+So collection happens at exactly one **safe point** — the top of `exec`, before
+each statement. There, the live set is small and nameable:
+
+- the globals scope,
+- every scope currently being executed. A callee's scope hangs off the *closure*
+  it came from, not off its caller, so the caller's scope is unreachable from the
+  callee and each active frame has to be a root of its own. `exec_scoped` is the
+  only place a scope is entered, which is what keeps this list complete.
+- values a frame holds across a nested statement. There is one: the snapshot
+  `for` takes of the list it iterates, whose items may be dropped from the
+  original list by the loop body.
+
+The tests deliberately break each half of that root set to confirm the suite
+notices — an untested collector is indistinguishable from a broken one.
+
+The cost of this design is that a tight expression can allocate without ever
+collecting; `[[[[…]]]]` is bounded by the source text, so the exposure is a
+program's nesting depth rather than its runtime. A bytecode VM would fix this
+properly, because its operands live on a stack the collector owns rather than on
+Rust's — which is one of the better arguments for building one.
+
 ## Architecture
 
 ```
@@ -78,7 +112,7 @@ Flat `src/*.rs`, matching the wrapt layout.
 | `ast.rs` | `Expr`, `Stmt` node definitions |
 | `parser.rs` | recursive-descent + Pratt for expression precedence |
 | `value.rs` | `Value` enum, `ObjId`, heap object types |
-| `heap.rs` | the arena, allocation, (later) collection |
+| `heap.rs` | the arena, allocation, mark-and-sweep collection |
 | `interp.rs` | tree-walking evaluator |
 | `env.rs` | scopes and variable binding |
 | `error.rs` | `QuinceError` with spans, user-facing diagnostics |
@@ -202,10 +236,14 @@ Scopes live in the heap alongside other objects. A closure captures the scope it
 defined in, and that scope holds the closure — so every recursive function is a
 cycle, and `Rc<RefCell<Env>>` would leak on essentially all of them.
 
-Still missing: garbage collection (nothing is ever freed), `try`/`catch`, dicts,
-classes, and string methods. The REPL is line-at-a-time and continues reading when a
-parse fails at end of input, which is a heuristic rather than a real incremental
-parser.
+Garbage collection landed early, out of roadmap order, because it constrains the
+shape of the evaluator (see Collection above) and retrofitting a root set is far
+worse than growing one. A loop churning six million objects now peaks at 2.9 MB
+instead of growing without bound.
+
+Still missing: `try`/`catch`, dicts, classes, and string methods. The REPL is
+line-at-a-time and continues reading when a parse fails at end of input, which is
+a heuristic rather than a real incremental parser.
 
 Deferred from the lexer, both cheap to add: hex/binary/octal literals (Zephyr has
 them) and block comments (whose nesting behaviour is a real decision).
@@ -222,7 +260,7 @@ Lists, dicts, strings with methods, indexing, iteration.
 Classes, methods, inheritance, `self`.
 
 **v0.5 — robustness**
-`try`/`catch`, real GC over the arena, span-accurate diagnostics everywhere.
+`try`/`catch` and span-accurate diagnostics everywhere. GC is done.
 
 **Later**
 Bytecode VM, async/await, module system, sized integer types — all things Zephyr has,

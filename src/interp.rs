@@ -21,6 +21,15 @@ enum Flow {
 pub struct Interp {
     pub heap: Heap,
     globals: ObjId,
+    /// Every scope currently being executed, innermost last.
+    ///
+    /// A called function's scope hangs off the *closure* it came from, not off
+    /// the caller, so the caller's scope is unreachable from the callee. Each
+    /// active frame therefore has to be a root in its own right.
+    scopes: Vec<ObjId>,
+    /// Values a Rust frame is holding across a safe point, which no walk of the
+    /// heap could find. See [`Interp::collect_if_needed`].
+    temps: Vec<Value>,
     depth: usize,
     out: Box<dyn Write>,
 }
@@ -41,6 +50,8 @@ impl Interp {
         Interp {
             heap,
             globals,
+            scopes: Vec::new(),
+            temps: Vec::new(),
             depth: 0,
             out,
         }
@@ -56,22 +67,66 @@ impl Interp {
     /// Evaluates a program, returning the value of a trailing expression so the
     /// REPL can echo it.
     pub fn run_repl(&mut self, program: &[Stmt]) -> Result<Option<Value>, QuinceError> {
+        let mark = self.temps.len();
         let mut last = None;
         for stmt in program {
-            last = match &stmt.kind {
-                StmtKind::Expr(expr) => Some(self.eval(expr, self.globals)?),
+            let value = match &stmt.kind {
+                StmtKind::Expr(expr) => {
+                    self.collect_if_needed();
+                    Some(self.eval(expr, self.globals)?)
+                }
                 _ => {
                     self.exec(stmt, self.globals)?;
                     None
                 }
             };
+            // The value waiting to be echoed lives in a Rust local across every
+            // later statement, so it is rooted like any other temporary. Today
+            // this cannot actually be observed — a value is only ever echoed
+            // when its statement was the last one, and nothing runs after that
+            // — so it is here to keep the rule "a value held across a safe
+            // point is rooted" true without exception.
+            self.temps.truncate(mark);
+            self.temps.extend(value.clone());
+            last = value;
         }
+        self.temps.truncate(mark);
         Ok(last)
+    }
+
+    // -- garbage collection ------------------------------------------------
+
+    /// Collects, if the heap has grown enough to be worth it.
+    ///
+    /// **Only ever call this between statements.** A tree-walking evaluator
+    /// keeps live values in Rust locals — the left operand of a `+` while the
+    /// right one is still being evaluated, say — and the collector cannot see
+    /// the Rust stack. Between statements that set is small and explicit: the
+    /// active scopes, plus the handful of frames that deliberately hold a value
+    /// across a nested statement, which push it onto `temps`.
+    ///
+    /// The alternative, collecting inside `alloc`, would mean rooting every
+    /// intermediate value in every expression. That is what a bytecode VM gets
+    /// for free by keeping its operands on a stack it owns, and it is a good
+    /// reason to want one.
+    fn collect_if_needed(&mut self) {
+        if !self.heap.should_collect() {
+            return;
+        }
+        let mut roots = Vec::with_capacity(self.scopes.len() + self.temps.len() + 1);
+        roots.push(self.globals);
+        roots.extend(&self.scopes);
+        roots.extend(self.temps.iter().filter_map(Value::handle));
+        self.heap.collect(&roots);
     }
 
     // -- statements --------------------------------------------------------
 
     fn exec(&mut self, stmt: &Stmt, env: ObjId) -> Result<Flow, QuinceError> {
+        // The one safe point in the evaluator. Every statement passes through
+        // here, and nothing above it on the Rust stack holds an unrooted value.
+        self.collect_if_needed();
+
         match &stmt.kind {
             StmtKind::Expr(expr) => {
                 self.eval(expr, env)?;
@@ -160,12 +215,29 @@ impl Interp {
             }
         };
 
+        // The snapshot is the one place a Rust frame holds values across whole
+        // statements. It has to be rooted: the loop body may drop the original
+        // list, and then nothing on the heap refers to these items at all.
+        let mark = self.temps.len();
+        self.temps.extend(items.iter().cloned());
+        let result = self.iterate(var, items, body, env);
+        self.temps.truncate(mark);
+        result
+    }
+
+    fn iterate(
+        &mut self,
+        var: &str,
+        items: Vec<Value>,
+        body: &Block,
+        env: ObjId,
+    ) -> Result<Flow, QuinceError> {
         for item in items {
             // A fresh scope per iteration, so a closure made inside the loop
             // captures that iteration's value rather than sharing one binding.
             let scope = self.heap.alloc(Object::Env(Env::new(Some(env))));
             self.heap.env_mut(scope).declare(var, item, true);
-            if let Flow::Return(value) = self.exec_stmts(&body.stmts, scope)? {
+            if let Flow::Return(value) = self.exec_scoped(&body.stmts, scope)? {
                 return Ok(Flow::Return(value));
             }
         }
@@ -174,7 +246,20 @@ impl Interp {
 
     fn exec_block(&mut self, block: &Block, env: ObjId) -> Result<Flow, QuinceError> {
         let scope = self.heap.alloc(Object::Env(Env::new(Some(env))));
-        self.exec_stmts(&block.stmts, scope)
+        self.exec_scoped(&block.stmts, scope)
+    }
+
+    /// Runs `stmts` in `scope`, keeping the scope rooted for as long as it is
+    /// on the Rust stack.
+    ///
+    /// Every scope is created and entered here, which is what makes the root
+    /// set complete — a scope allocated anywhere else would be collected out
+    /// from under the frame using it.
+    fn exec_scoped(&mut self, stmts: &[Stmt], scope: ObjId) -> Result<Flow, QuinceError> {
+        self.scopes.push(scope);
+        let result = self.exec_stmts(stmts, scope);
+        self.scopes.pop();
+        result
     }
 
     fn exec_stmts(&mut self, stmts: &[Stmt], env: ObjId) -> Result<Flow, QuinceError> {
@@ -356,7 +441,7 @@ impl Interp {
                 }
 
                 self.depth += 1;
-                let result = self.exec_stmts(&func.decl.body.stmts, scope);
+                let result = self.exec_scoped(&func.decl.body.stmts, scope);
                 self.depth -= 1;
 
                 match result? {
@@ -585,3 +670,86 @@ static TYPE: Native = Native {
     arity: Some(1),
     func: |_heap, _out, args, _span| Ok(Value::Str(Rc::from(args[0].type_name()))),
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run(source: &str) -> Interp {
+        let program = crate::compile(source).expect("the test program should parse");
+        let mut interp = Interp::with_output(Box::new(Vec::new()));
+        interp.run(&program).expect("the test program should run");
+        interp
+    }
+
+    #[test]
+    fn a_loop_does_not_grow_the_heap_without_bound() {
+        // Two allocations an iteration — the scope and the list — so without a
+        // collector this settles at several thousand live objects.
+        let interp = run("let i = 0\nwhile i < 2000 {\n let x = [1, 2, 3]\n i = i + 1\n}");
+
+        assert!(interp.heap.collections > 0, "the collector never ran");
+        assert!(
+            interp.heap.live() < 600,
+            "heap grew to {} objects",
+            interp.heap.live()
+        );
+    }
+
+    #[test]
+    fn a_captured_scope_survives_collection() {
+        // The closure is reachable only through `f`, and its captured scope only
+        // through the closure. Tracing has to follow both links.
+        let interp = run("fn make() {\n\
+             let n = [1, 2, 3]\n\
+             fn get() { return n }\n\
+             return get\n\
+             }\n\
+             let f = make()\n\
+             let i = 0\n\
+             while i < 2000 {\n let junk = [0]\n i = i + 1\n }\n\
+             let survived = f()");
+
+        assert!(interp.heap.collections > 0, "the collector never ran");
+        let Some(Value::List(id)) = env::lookup(&interp.heap, interp.globals, "survived") else {
+            panic!("the closure did not return its captured list");
+        };
+        assert_eq!(interp.heap.list(id).len(), 3);
+    }
+
+    #[test]
+    fn the_iteration_snapshot_survives_the_list_it_came_from() {
+        // The first iteration overwrites every element, so the lists the *later*
+        // iterations still have to visit are reachable only from the snapshot
+        // held in `exec_for`'s Rust frame.
+        let interp = run("let items = [[1], [2], [3]]\n\
+             let total = 0\n\
+             for pair in items {\n\
+             items[0] = 0\n\
+             items[1] = 0\n\
+             items[2] = 0\n\
+             let i = 0\n\
+             while i < 400 {\n let junk = [0]\n i = i + 1\n }\n\
+             total = total + len(pair)\n\
+             }");
+
+        assert!(interp.heap.collections > 0, "the collector never ran");
+        assert_eq!(
+            env::lookup(&interp.heap, interp.globals, "total"),
+            Some(Value::Int(3))
+        );
+    }
+
+    #[test]
+    fn an_unreachable_recursive_function_is_collected() {
+        // A function whose scope holds the function: the cycle that rules out
+        // reference counting. Redefining `f` should still reclaim the old one.
+        let interp = run("let i = 0\nwhile i < 2000 {\n fn f() { return f }\n i = i + 1\n}");
+
+        assert!(
+            interp.heap.live() < 600,
+            "heap grew to {} objects",
+            interp.heap.live()
+        );
+    }
+}

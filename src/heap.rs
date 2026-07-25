@@ -17,32 +17,104 @@ pub enum Object {
     Function(Function),
 }
 
+/// Live objects at which a collection is worth doing. Below this the mark phase
+/// costs more than the memory it reclaims.
+const MIN_THRESHOLD: usize = 256;
+
 /// The arena holding every object that can participate in a reference cycle.
 ///
 /// Strings deliberately live outside it — see [`Value::Str`].
-#[derive(Default)]
 pub struct Heap {
-    objects: Vec<Object>,
+    /// A freed slot becomes `None` rather than being removed, so that live
+    /// handles never shift. Reclaimed indices are reused via `free`.
+    objects: Vec<Option<Object>>,
+    free: Vec<u32>,
+    live: usize,
+    threshold: usize,
+    /// How many collections have run. Exposed for tests and `--stats`.
+    pub collections: usize,
 }
 
 impl Heap {
     pub fn new() -> Self {
-        Heap::default()
+        Heap {
+            objects: Vec::new(),
+            free: Vec::new(),
+            live: 0,
+            threshold: MIN_THRESHOLD,
+            collections: 0,
+        }
     }
 
-    /// Nothing is ever freed yet. Collection needs the interpreter's roots, so
-    /// it arrives with the evaluator rather than being guessed at now.
     pub fn alloc(&mut self, object: Object) -> ObjId {
-        self.objects.push(object);
-        ObjId((self.objects.len() - 1) as u32)
+        self.live += 1;
+        match self.free.pop() {
+            Some(index) => {
+                self.objects[index as usize] = Some(object);
+                ObjId(index)
+            }
+            None => {
+                self.objects.push(Some(object));
+                ObjId((self.objects.len() - 1) as u32)
+            }
+        }
     }
 
+    /// Whether the heap has grown enough since the last collection to be worth
+    /// another. Deciding this here keeps the policy out of the evaluator, which
+    /// only knows *when* collecting is safe.
+    pub fn should_collect(&self) -> bool {
+        self.live >= self.threshold
+    }
+
+    /// Mark and sweep, returning the number of objects reclaimed.
+    ///
+    /// `roots` are the handles reachable from outside the heap. Anything not
+    /// reachable from one of them is freed, so an incomplete root set is a
+    /// use-after-free — see the safe-point rules in `interp.rs`.
+    pub fn collect(&mut self, roots: &[ObjId]) -> usize {
+        let mut marked = vec![false; self.objects.len()];
+        let mut worklist: Vec<ObjId> = roots.to_vec();
+
+        // Marking on pop rather than on push is what makes cycles terminate: a
+        // handle may be queued many times, but its children are traced once.
+        while let Some(id) = worklist.pop() {
+            let index = id.0 as usize;
+            if marked[index] {
+                continue;
+            }
+            marked[index] = true;
+            trace(self.get(id), &mut worklist);
+        }
+
+        let mut freed = 0;
+        for (index, slot) in self.objects.iter_mut().enumerate() {
+            if !marked[index] && slot.take().is_some() {
+                self.free.push(index as u32);
+                freed += 1;
+            }
+        }
+
+        self.live -= freed;
+        // Grow the threshold with the surviving set, so a program with a large
+        // live heap does not collect on every statement.
+        self.threshold = (self.live * 2).max(MIN_THRESHOLD);
+        self.collections += 1;
+        freed
+    }
+
+    /// A handle that outlives its object is a collector bug — a missing root —
+    /// not something a Quince program can cause.
     pub fn get(&self, id: ObjId) -> &Object {
-        &self.objects[id.0 as usize]
+        self.objects[id.0 as usize]
+            .as_ref()
+            .expect("handle points at a collected object")
     }
 
     pub fn get_mut(&mut self, id: ObjId) -> &mut Object {
-        &mut self.objects[id.0 as usize]
+        self.objects[id.0 as usize]
+            .as_mut()
+            .expect("handle points at a collected object")
     }
 
     /// Handles only ever come from `alloc`, so a mismatched variant is a bug in
@@ -82,12 +154,29 @@ impl Heap {
         }
     }
 
-    pub fn len(&self) -> usize {
-        self.objects.len()
+    /// Objects currently allocated. Not the arena's size — freed slots are
+    /// still there, waiting to be reused.
+    pub fn live(&self) -> usize {
+        self.live
     }
+}
 
-    pub fn is_empty(&self) -> bool {
-        self.objects.is_empty()
+impl Default for Heap {
+    fn default() -> Self {
+        Heap::new()
+    }
+}
+
+/// Pushes every handle an object keeps alive.
+///
+/// Adding a variant to [`Object`] makes this fail to compile, which is the
+/// point: a collector that silently forgets to trace a new object type produces
+/// bugs that are almost impossible to find.
+fn trace(object: &Object, worklist: &mut Vec<ObjId>) {
+    match object {
+        Object::List(items) => worklist.extend(items.iter().filter_map(Value::handle)),
+        Object::Env(env) => env.trace(worklist),
+        Object::Function(func) => worklist.push(func.env),
     }
 }
 
@@ -101,7 +190,7 @@ mod tests {
         let a = heap.alloc(Object::List(vec![]));
         let b = heap.alloc(Object::List(vec![]));
         assert_ne!(a, b);
-        assert_eq!(heap.len(), 2);
+        assert_eq!(heap.live(), 2);
     }
 
     #[test]
@@ -129,5 +218,74 @@ mod tests {
             panic!("expected a nested list");
         };
         assert_eq!(inner, id);
+    }
+
+    #[test]
+    fn collection_frees_unreachable_objects() {
+        let mut heap = Heap::new();
+        let kept = heap.alloc(Object::List(vec![]));
+        heap.alloc(Object::List(vec![]));
+
+        assert_eq!(heap.collect(&[kept]), 1);
+        assert_eq!(heap.live(), 1);
+        assert!(heap.list(kept).is_empty());
+    }
+
+    #[test]
+    fn collection_follows_handles_held_inside_objects() {
+        let mut heap = Heap::new();
+        let inner = heap.alloc(Object::List(vec![]));
+        let outer = heap.alloc(Object::List(vec![Value::List(inner)]));
+
+        assert_eq!(heap.collect(&[outer]), 0);
+        assert_eq!(heap.live(), 2);
+    }
+
+    #[test]
+    fn an_unreachable_cycle_is_collected() {
+        // The case `Rc` cannot handle, and the reason the arena exists.
+        let mut heap = Heap::new();
+        let a = heap.alloc(Object::List(vec![]));
+        let b = heap.alloc(Object::List(vec![Value::List(a)]));
+        heap.list_mut(a).push(Value::List(b));
+
+        assert_eq!(heap.collect(&[]), 2);
+        assert_eq!(heap.live(), 0);
+    }
+
+    #[test]
+    fn a_reachable_cycle_survives_and_terminates() {
+        let mut heap = Heap::new();
+        let id = heap.alloc(Object::List(vec![]));
+        heap.list_mut(id).push(Value::List(id));
+
+        assert_eq!(heap.collect(&[id]), 0);
+        assert_eq!(heap.live(), 1);
+    }
+
+    #[test]
+    fn freed_slots_are_reused() {
+        let mut heap = Heap::new();
+        let kept = heap.alloc(Object::List(vec![]));
+        let stale = heap.alloc(Object::List(vec![]));
+        heap.collect(&[kept]);
+
+        let fresh = heap.alloc(Object::List(vec![Value::Int(1)]));
+        assert_eq!(fresh, stale, "the free slot should have been reused");
+        assert_eq!(heap.live(), 2);
+    }
+
+    #[test]
+    fn the_threshold_grows_with_the_surviving_set() {
+        let mut heap = Heap::new();
+        let mut roots = Vec::new();
+        for _ in 0..MIN_THRESHOLD {
+            roots.push(heap.alloc(Object::List(vec![])));
+        }
+        assert!(heap.should_collect());
+
+        heap.collect(&roots);
+        // Everything survived, so collecting again immediately would be futile.
+        assert!(!heap.should_collect());
     }
 }

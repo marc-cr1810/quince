@@ -48,6 +48,17 @@ pub enum Value {
 }
 
 impl Value {
+    /// The heap object this value refers to, if any.
+    ///
+    /// The collector's view of a value: everything else is inline and cannot
+    /// keep anything alive.
+    pub fn handle(&self) -> Option<ObjId> {
+        match self {
+            Value::List(id) | Value::Function(id) => Some(*id),
+            _ => None,
+        }
+    }
+
     /// The name used in type errors. Kept in one place so messages stay
     /// consistent as variants are added.
     pub fn type_name(&self) -> &'static str {

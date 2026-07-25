@@ -32,6 +32,18 @@ impl Env {
     pub fn declare(&mut self, name: impl Into<String>, value: Value, mutable: bool) {
         self.vars.insert(name.into(), Binding { value, mutable });
     }
+
+    /// Pushes every handle this scope keeps alive, for the collector's mark
+    /// phase. The parent link counts: an inner scope keeps its enclosing ones
+    /// reachable.
+    pub fn trace(&self, worklist: &mut Vec<ObjId>) {
+        worklist.extend(
+            self.vars
+                .values()
+                .filter_map(|binding| binding.value.handle()),
+        );
+        worklist.extend(self.parent);
+    }
 }
 
 pub enum AssignError {

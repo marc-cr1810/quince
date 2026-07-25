@@ -1,0 +1,29 @@
+# Everything here has to survive several collections: the loop below allocates
+# far more than the collector's threshold, so it runs many times over.
+
+fn counter() {
+    let n = 0
+    fn tick() {
+        n = n + 1
+        return n
+    }
+    return tick
+}
+
+let c = counter()
+let kept = [1, [2, 3]]
+
+# A cycle, which is what rules out reference counting: the list holds itself.
+let loop = []
+loop = [loop]
+
+let i = 0
+while i < 3000 {
+    let garbage = [i, [i, i], "discarded"]
+    i = i + 1
+}
+
+print(c())
+print(len(kept))
+print(kept[1][1])
+print(len(loop))
