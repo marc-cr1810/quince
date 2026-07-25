@@ -277,6 +277,12 @@ impl Interp {
             .collect()
     }
 
+    pub fn set_global(&mut self, name: impl Into<String>, value: Value) {
+        self.heap
+            .globals_mut(self.globals)
+            .declare(name, value, true);
+    }
+
     // -- garbage collection ------------------------------------------------
 
     /// Collects, if the heap has grown enough to be worth it.

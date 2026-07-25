@@ -32,10 +32,44 @@ fn method_names() -> Vec<&'static str> {
     names
 }
 
+fn method_names_for_type(type_name: &str) -> Vec<&'static str> {
+    for builtin in class::BUILTINS {
+        if builtin.name() == type_name {
+            let mut names: Vec<&'static str> = builtin
+                .seed()
+                .methods
+                .iter()
+                .map(|(name, _)| *name)
+                .collect();
+            names.sort_unstable();
+            names.dedup();
+            return names;
+        }
+    }
+    method_names()
+}
+
+fn extract_var_before_dot(line: &str, dot_pos: usize) -> Option<&str> {
+    if dot_pos == 0 {
+        return None;
+    }
+    let prefix = &line[..dot_pos];
+    let start = prefix
+        .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let var_name = prefix[start..].trim();
+    if var_name.is_empty() {
+        None
+    } else {
+        Some(var_name)
+    }
+}
+
 #[derive(Clone)]
 pub struct QuinceHelper {
     pub use_color: bool,
-    pub globals: Arc<Mutex<Vec<String>>>,
+    pub globals: Arc<Mutex<Vec<(String, String)>>>,
 }
 
 impl Helper for QuinceHelper {}
@@ -65,7 +99,21 @@ impl Completer for QuinceHelper {
         }
 
         if start > 0 && line.as_bytes().get(start - 1) == Some(&b'.') {
-            for method in method_names() {
+            let methods = if let Some(var_name) = extract_var_before_dot(line, start - 1) {
+                if let Ok(globals) = self.globals.lock() {
+                    if let Some((_, type_name)) = globals.iter().find(|(k, _)| k == var_name) {
+                        method_names_for_type(type_name)
+                    } else {
+                        method_names()
+                    }
+                } else {
+                    method_names()
+                }
+            } else {
+                method_names()
+            };
+
+            for method in methods {
                 if method.starts_with(word) {
                     matches.push(Pair {
                         display: method.to_string(),
@@ -78,7 +126,7 @@ impl Completer for QuinceHelper {
 
         let mut string_candidates = Vec::new();
         if let Ok(globals) = self.globals.lock() {
-            string_candidates = globals.clone();
+            string_candidates = globals.iter().map(|(k, _)| k.clone()).collect();
         }
 
         for cand in KEYWORDS {
@@ -132,11 +180,24 @@ impl Hinter for QuinceHelper {
         if word.starts_with(':') {
             candidates.extend(META_COMMANDS.iter().copied());
         } else if start > 0 && line.as_bytes().get(start - 1) == Some(&b'.') {
-            candidates.extend(method_names());
+            let methods = if let Some(var_name) = extract_var_before_dot(line, start - 1) {
+                if let Ok(globals) = self.globals.lock() {
+                    if let Some((_, type_name)) = globals.iter().find(|(k, _)| k == var_name) {
+                        method_names_for_type(type_name)
+                    } else {
+                        method_names()
+                    }
+                } else {
+                    method_names()
+                }
+            } else {
+                method_names()
+            };
+            candidates.extend(methods);
         } else {
             candidates.extend(KEYWORDS.iter().copied());
             if let Ok(globals) = self.globals.lock() {
-                for g in globals.iter() {
+                for (g, _) in globals.iter() {
                     if g.starts_with(word) && g != word {
                         return Some(g[word.len()..].to_string());
                     }
@@ -155,6 +216,70 @@ impl Hinter for QuinceHelper {
 }
 
 impl Validator for QuinceHelper {}
+
+
+#[cfg(test)]
+pub fn is_input_incomplete(input: &str) -> bool {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let tokens = match Lexer::new(input).tokenize() {
+        Ok(tokens) => tokens,
+        Err(_) => {
+            return true;
+        }
+    };
+
+    let mut parens = 0i32;
+    let mut brackets = 0i32;
+    let mut braces = 0i32;
+    let mut last_kind = None;
+
+    for token in &tokens {
+        match token.kind {
+            TokenKind::LParen => parens += 1,
+            TokenKind::RParen => parens = (parens - 1).max(0),
+            TokenKind::LBracket => brackets += 1,
+            TokenKind::RBracket => brackets = (brackets - 1).max(0),
+            TokenKind::LBrace => braces += 1,
+            TokenKind::RBrace => braces = (braces - 1).max(0),
+            TokenKind::Eof => {}
+            ref kind => last_kind = Some(kind.clone()),
+        }
+    }
+
+    if parens > 0 || brackets > 0 || braces > 0 {
+        return true;
+    }
+
+    if let Some(kind) = last_kind {
+        matches!(
+            kind,
+            TokenKind::Plus
+                | TokenKind::Minus
+                | TokenKind::Star
+                | TokenKind::Slash
+                | TokenKind::SlashSlash
+                | TokenKind::Percent
+                | TokenKind::Assign
+                | TokenKind::Eq
+                | TokenKind::Ne
+                | TokenKind::Lt
+                | TokenKind::Le
+                | TokenKind::Gt
+                | TokenKind::Ge
+                | TokenKind::AndAnd
+                | TokenKind::OrOr
+                | TokenKind::Comma
+                | TokenKind::Dot
+        )
+    } else {
+        false
+    }
+}
+
 
 impl Highlighter for QuinceHelper {
     fn highlight<'l>(&self, line: &'l str, pos: usize) -> Cow<'l, str> {
@@ -240,7 +365,13 @@ impl Highlighter for QuinceHelper {
             return Cow::Borrowed(prompt);
         }
 
-        if prompt.starts_with('>') {
+        if prompt.starts_with(">>>") {
+            let rest = &prompt[3..];
+            Cow::Owned(format!("{}{rest}", Style::BOLD_GREEN.paint(">>>", true)))
+        } else if prompt.starts_with("...") {
+            let rest = &prompt[3..];
+            Cow::Owned(format!("{}{rest}", Style::BOLD_YELLOW.paint("...", true)))
+        } else if prompt.starts_with('>') {
             Cow::Owned(format!("{} ", Style::BOLD_GREEN.paint(">", true)))
         } else if prompt.starts_with('.') {
             let rest = &prompt[1..];
@@ -413,7 +544,7 @@ pub fn run_repl(use_color_stdout: bool, use_color_stderr: bool) -> Result<()> {
 
     let config = rustyline::Config::builder().auto_add_history(true).build();
     let mut rl = rustyline::Editor::with_config(config)?;
-    let globals_store = Arc::new(Mutex::new(Vec::new()));
+    let globals_store: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
 
     rl.set_helper(Some(QuinceHelper {
         use_color: use_color_stdout,
@@ -426,15 +557,19 @@ pub fn run_repl(use_color_stdout: bool, use_color_stderr: bool) -> Result<()> {
     loop {
         // Sync global variables for tab autocompletion
         if let Ok(mut store) = globals_store.lock() {
-            *store = interp.get_globals().into_iter().map(|(k, _)| k).collect();
+            *store = interp
+                .get_globals()
+                .into_iter()
+                .map(|(k, v)| (k, v.type_name(&interp.heap).to_string()))
+                .collect();
         }
 
         let open_braces = count_open_braces(&buffer);
         let mut line = match if buffer.is_empty() {
-            rl.readline("> ")
+            rl.readline(">>> ")
         } else {
             let initial = "    ".repeat(open_braces);
-            rl.readline_with_initial(". ", (&initial, ""))
+            rl.readline_with_initial("... ", (&initial, ""))
         } {
             Ok(line) => line,
             Err(rustyline::error::ReadlineError::Interrupted) => {
@@ -454,7 +589,7 @@ pub fn run_repl(use_color_stdout: bool, use_color_stderr: bool) -> Result<()> {
         if line.trim_start().starts_with('}') && line.starts_with("    ") {
             line = line[4..].to_string();
             if use_color_stdout {
-                let prompt_dot = Style::BOLD_YELLOW.paint(".", true);
+                let prompt_dot = Style::BOLD_YELLOW.paint("...", true);
                 let highlighted = match rl.helper() {
                     Some(h) => h.highlight(&line, line.len()),
                     None => Cow::Borrowed(&line[..]),
@@ -462,7 +597,7 @@ pub fn run_repl(use_color_stdout: bool, use_color_stderr: bool) -> Result<()> {
                 print!("\x1B[1A\x1B[2K{prompt_dot} {highlighted}\n");
                 let _ = std::io::Write::flush(&mut std::io::stdout());
             } else {
-                print!("\x1B[1A\x1B[2K. {line}\n");
+                print!("\x1B[1A\x1B[2K... {line}\n");
                 let _ = std::io::Write::flush(&mut std::io::stdout());
             }
         }
@@ -497,13 +632,17 @@ pub fn run_repl(use_color_stdout: bool, use_color_stderr: bool) -> Result<()> {
 
         match interp.run_repl(&program) {
             Ok(Some(Value::Nil)) | Ok(None) => {}
-            Ok(Some(value)) => println!("{}", value.display_pretty(&interp.heap, use_color_stdout)),
+            Ok(Some(value)) => {
+                println!("{}", value.display_pretty(&interp.heap, use_color_stdout));
+                interp.set_global("_", value);
+            }
             Err(err) => eprintln!("{}", err.report_styled(&source, "<repl>", use_color_stderr)),
         }
     }
 
     Ok(())
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -551,7 +690,43 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn validator_detects_incomplete_expressions() {
+        assert!(is_input_incomplete("1 +"));
+        assert!(is_input_incomplete("fn foo() {"));
+        assert!(is_input_incomplete("print([1, 2,"));
+        assert!(is_input_incomplete("\"unterminated string"));
+        assert!(!is_input_incomplete("1 + 2"));
+        assert!(!is_input_incomplete("let x = 10"));
+    }
+
+    #[test]
+    fn context_aware_method_completion_filters_by_type() {
+        let string_methods = method_names_for_type("string");
+        assert!(string_methods.contains(&"upper"));
+        assert!(string_methods.contains(&"lower"));
+        assert!(!string_methods.contains(&"push"));
+        assert!(!string_methods.contains(&"keys"));
+
+        let list_methods = method_names_for_type("list");
+        assert!(list_methods.contains(&"push"));
+        assert!(!list_methods.contains(&"upper"));
+    }
+
+    #[test]
+    fn repl_binds_last_value_to_underscore() {
+        let mut interp = Interp::new();
+        let program = quince::compile("10 + 20").unwrap();
+        if let Ok(Some(val)) = interp.run_repl(&program) {
+            interp.set_global("_", val);
+        }
+        let check_pgm = quince::compile("_ * 2").unwrap();
+        let res = interp.run_repl(&check_pgm).unwrap();
+        assert_eq!(res, Some(Value::Int(60)));
+    }
 }
+
 
 fn handle_meta_command(
     input: &str,
