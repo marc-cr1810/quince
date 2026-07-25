@@ -109,6 +109,16 @@ pub enum ExprKind {
         target: Box<Expr>,
         index: Box<Expr>,
     },
+    /// `xs[a:b]`, with either bound omissible: `xs[:b]`, `xs[a:]`, `xs[:]`.
+    ///
+    /// A separate node rather than an `Index` holding a range, because there is
+    /// no range value in the language and inventing one to carry two optional
+    /// ints would be a worse trade than a second node.
+    Slice {
+        target: Box<Expr>,
+        start: Option<Box<Expr>>,
+        end: Option<Box<Expr>>,
+    },
     Field {
         target: Box<Expr>,
         name: String,

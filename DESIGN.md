@@ -336,6 +336,43 @@ Two consequences follow from rules the language had already committed to:
 rather than `false`, for the same reason `d[[]]` is: answering `false` would hide the
 mistake that produced it.
 
+### Strings
+
+**Indexed by character, not by byte.** `len` had already committed the language to
+counting characters, so a byte subscript would have made `len` and `[]` describe
+different strings — the same kind of contradiction as `1` and `1.0` being separate dict
+keys, and no more defensible. `"héllo"[1]` is `é`.
+
+The cost is real and worth naming: storage is UTF-8, so a subscript walks the string.
+`while i < len(s) { s[i] }` is quadratic. That is the price of the subscript agreeing
+with the length, and it is fixable later behind the same semantics — an index cache, or
+a representation that stores its own char boundaries — where a byte subscript could
+never have been fixed at all. `chars` returns a list for anyone who wants to pay the
+walk once.
+
+The alternative considered was omitting `s[i]` entirely, on the grounds that O(n) hidden
+behind O(1) syntax is exactly the sort of lie this document refuses elsewhere, and that
+omitting is the reversible direction. It lost to the argument that a scripting language
+whose strings cannot be indexed is answering a question nobody asked.
+
+**Slices are clamped; subscripts are checked.** `s[:100]` on a five-character string is
+the whole string, not an error, because a slice asks for *at most* that many — clamping
+is what lets "take the first n" be written without a length test in front of it. A
+single out-of-range subscript stays an error, because it cannot be anything but a
+mistake. An inverted range is empty rather than an error, for the same reason.
+
+Negative bounds count from the end, which lists already did.
+
+Lists slice too, with identical rules, and the result is a new list rather than a view.
+A view would need borrow tracking that the object model has no way to express, and
+would make `xs[1:3].push(9)` mutate `xs` at a distance.
+
+Methods are `chars`, `ends_with`, `join`, `lower`, `replace`, `split`, `starts_with`,
+`trim`, and `upper`. `join` takes the separator as receiver — `", ".join(parts)` — which
+reads oddly the first time and is right: the separator is what decides how pieces go
+together. Splitting on `""` is an error rather than a synonym for `chars`, since they
+are different requests and answering one with the other hides the confusion.
+
 ### The `{` conflict that did not happen
 
 This section used to predict that dict literals would make `if x { }` ambiguous, and
@@ -569,9 +606,12 @@ Lists and dicts are done, with indexing, iteration, concatenation, and membershi
 Dispatch is done too — see Dispatch above — so `list` and `dict` have methods and the
 globals that stood in for them are gone.
 
-Strings are what remain: they have `+`, comparison, `in`, and `len`, and no methods at
-all. No indexing, no slicing, no `split`/`join`/`trim`/case conversion. That is now a
-matter of filling in a table rather than of building anything.
+Strings are done too — indexing, slicing, and nine methods — so **v0.3 is complete**.
+See Strings above for what the character-versus-byte decision cost and bought.
+
+Slicing was the only part that was not just filling in the table: it needed a `Slice`
+node, since there is no range value in the language and inventing one to carry two
+optional ints would have been the worse trade.
 
 **v0.4 — objects**
 Classes, methods, inheritance, `self`.

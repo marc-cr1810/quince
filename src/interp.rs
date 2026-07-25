@@ -480,6 +480,24 @@ impl Interp {
                 self.index_get(&target, &index, expr.span)
             }
 
+            ExprKind::Slice { target, start, end } => {
+                // Three sub-expressions, so neither `eval_pair` nor a hand-
+                // rolled pair of marks fits. `eval_seq` already roots each
+                // value against the ones evaluated after it, which is exactly
+                // the guarantee needed here.
+                let mut parts: Vec<&Expr> = Vec::with_capacity(3);
+                parts.push(target);
+                parts.extend(start.as_deref());
+                parts.extend(end.as_deref());
+
+                let mut values = self.eval_seq(parts, env)?.into_iter();
+                let target = values.next().expect("the target is always evaluated");
+                let start = start.as_ref().map(|_| values.next().expect("a bound"));
+                let end = end.as_ref().map(|_| values.next().expect("a bound"));
+
+                self.slice(&target, start.as_ref(), end.as_ref(), expr.span)
+            }
+
             // Only reached when a method is not being called immediately — the
             // fused path above handles `x.m(…)`. Binding it makes a method an
             // ordinary value rather than syntax that works in one position.
@@ -610,10 +628,47 @@ impl Interp {
                     )
                 })
             }
+            // Indexed by character, not by byte, because `len` already counts
+            // characters — a subscript that disagreed with the length would be
+            // indefensible. The cost is a walk, since the storage is UTF-8.
+            Value::Str(text) => {
+                let chars: Vec<char> = text.chars().collect();
+                let offset = resolve_index(index, chars.len(), "string", span)?;
+                Ok(Value::Str(Rc::from(chars[offset].to_string())))
+            }
+
             _ => {
                 let (id, offset) = self.list_index(target, index, span)?;
                 Ok(self.heap.list(id)[offset].clone())
             }
+        }
+    }
+
+    /// `target[start:end]`, on a string or a list.
+    fn slice(
+        &mut self,
+        target: &Value,
+        start: Option<&Value>,
+        end: Option<&Value>,
+        span: Span,
+    ) -> Result<Value, QuinceError> {
+        match target {
+            Value::Str(text) => {
+                let chars: Vec<char> = text.chars().collect();
+                let (from, to) = slice_bounds(start, end, chars.len(), span)?;
+                Ok(Value::Str(Rc::from(
+                    chars[from..to].iter().collect::<String>(),
+                )))
+            }
+            Value::List(id) => {
+                let (from, to) = slice_bounds(start, end, self.heap.list(*id).len(), span)?;
+                let items = self.heap.list(*id)[from..to].to_vec();
+                Ok(Value::List(self.heap.alloc(Object::List(items))))
+            }
+            other => Err(QuinceError::new(
+                format!("cannot slice {}", other.type_name()),
+                span,
+            )),
         }
     }
 
@@ -630,22 +685,8 @@ impl Interp {
                 span,
             ));
         };
-        let Value::Int(raw) = index else {
-            return Err(QuinceError::new(
-                format!("list index must be an int, found {}", index.type_name()),
-                span,
-            ));
-        };
-
-        let len = self.heap.list(*id).len();
-        let offset = if *raw < 0 { *raw + len as i64 } else { *raw };
-        if offset < 0 || offset >= len as i64 {
-            return Err(QuinceError::new(
-                format!("index {raw} is out of range for a list of length {len}"),
-                span,
-            ));
-        }
-        Ok((*id, offset as usize))
+        let offset = resolve_index(index, self.heap.list(*id).len(), "list", span)?;
+        Ok((*id, offset))
     }
 
     fn call(&mut self, target: Value, args: Vec<Value>, span: Span) -> Result<Value, QuinceError> {
@@ -990,6 +1031,60 @@ fn type_error(op: BinaryOp, lhs: &Value, rhs: &Value, span: Span) -> QuinceError
     )
 }
 
+/// Resolves a subscript against a length, accepting Python-style negatives.
+///
+/// Shared by lists and strings so the two cannot drift apart on what `-1`
+/// means or on how an out-of-range index reads.
+fn resolve_index(index: &Value, len: usize, what: &str, span: Span) -> Result<usize, QuinceError> {
+    let Value::Int(raw) = index else {
+        return Err(QuinceError::new(
+            format!("{what} index must be an int, found {}", index.type_name()),
+            span,
+        ));
+    };
+
+    let offset = if *raw < 0 { *raw + len as i64 } else { *raw };
+    if offset < 0 || offset >= len as i64 {
+        return Err(QuinceError::new(
+            format!("index {raw} is out of range for a {what} of length {len}"),
+            span,
+        ));
+    }
+    Ok(offset as usize)
+}
+
+/// Resolves slice bounds, which are **clamped rather than checked**.
+///
+/// `xs[:100]` asks for at most a hundred, not for a hundred that must exist, so
+/// clamping is what makes "take the first n" writable without a length test
+/// first. A subscript keeps erroring, because a single out-of-range index can
+/// only be a mistake. An inverted range yields nothing rather than erroring,
+/// for the same reason.
+fn slice_bounds(
+    start: Option<&Value>,
+    end: Option<&Value>,
+    len: usize,
+    span: Span,
+) -> Result<(usize, usize), QuinceError> {
+    let len = len as i64;
+    let resolve = |bound: Option<&Value>, default: i64| -> Result<i64, QuinceError> {
+        let Some(bound) = bound else {
+            return Ok(default);
+        };
+        let Value::Int(raw) = bound else {
+            return Err(QuinceError::new(
+                format!("slice bounds must be ints, found {}", bound.type_name()),
+                span,
+            ));
+        };
+        Ok(if *raw < 0 { *raw + len } else { *raw })
+    };
+
+    let from = resolve(start, 0)?.clamp(0, len);
+    let to = resolve(end, len)?.clamp(0, len);
+    Ok((from as usize, to.max(from) as usize))
+}
+
 /// Finds a method on a value, or explains that the type has none by that name.
 fn method_of(receiver: &Value, name: &str, span: Span) -> Result<&'static Native, QuinceError> {
     receiver.class().method(name).ok_or_else(|| {
@@ -1115,6 +1210,152 @@ pub static REMOVE: Native = Native {
             format!("`remove` needs a dict, but was given {}", other.type_name()),
             span,
         )),
+    },
+};
+
+// -- string methods --------------------------------------------------------
+
+/// The receiver of a string method.
+///
+/// Dispatch guarantees the type: the method was reached through
+/// `class::STR`'s table, which nothing but a string can name.
+fn text(args: &[Value]) -> &Rc<str> {
+    match &args[0] {
+        Value::Str(text) => text,
+        other => unreachable!("a string method received {}", other.type_name()),
+    }
+}
+
+/// A string argument, or an error naming what arrived instead.
+fn text_arg(args: &[Value], at: usize, name: &str, span: Span) -> Result<Rc<str>, QuinceError> {
+    match &args[at] {
+        Value::Str(text) => Ok(Rc::clone(text)),
+        other => Err(QuinceError::new(
+            format!(
+                "`{name}` needs a string, but was given {}",
+                other.type_name()
+            ),
+            span,
+        )),
+    }
+}
+
+pub static UPPER: Native = Native {
+    name: "upper",
+    arity: Some(1),
+    func: |_interp, args, _span| Ok(Value::Str(Rc::from(text(args).to_uppercase()))),
+};
+
+pub static LOWER: Native = Native {
+    name: "lower",
+    arity: Some(1),
+    func: |_interp, args, _span| Ok(Value::Str(Rc::from(text(args).to_lowercase()))),
+};
+
+pub static TRIM: Native = Native {
+    name: "trim",
+    arity: Some(1),
+    func: |_interp, args, _span| Ok(Value::Str(Rc::from(text(args).trim()))),
+};
+
+pub static STARTS_WITH: Native = Native {
+    name: "starts_with",
+    arity: Some(2),
+    func: |_interp, args, span| {
+        let prefix = text_arg(args, 1, "starts_with", span)?;
+        Ok(Value::Bool(text(args).starts_with(prefix.as_ref())))
+    },
+};
+
+pub static ENDS_WITH: Native = Native {
+    name: "ends_with",
+    arity: Some(2),
+    func: |_interp, args, span| {
+        let suffix = text_arg(args, 1, "ends_with", span)?;
+        Ok(Value::Bool(text(args).ends_with(suffix.as_ref())))
+    },
+};
+
+pub static REPLACE: Native = Native {
+    name: "replace",
+    arity: Some(3),
+    func: |_interp, args, span| {
+        let from = text_arg(args, 1, "replace", span)?;
+        if from.is_empty() {
+            return Err(QuinceError::new(
+                "`replace` needs something to look for, but was given \"\"".to_string(),
+                span,
+            ));
+        }
+        let to = text_arg(args, 2, "replace", span)?;
+        Ok(Value::Str(Rc::from(
+            text(args).replace(from.as_ref(), to.as_ref()),
+        )))
+    },
+};
+
+/// Splitting on `""` is an error rather than yielding the characters, because
+/// the two are different requests and `chars` already answers the second one.
+pub static SPLIT: Native = Native {
+    name: "split",
+    arity: Some(2),
+    func: |interp, args, span| {
+        let sep = text_arg(args, 1, "split", span)?;
+        if sep.is_empty() {
+            return Err(QuinceError::new(
+                "`split` needs a separator, but was given \"\" — use `chars` instead".to_string(),
+                span,
+            ));
+        }
+        let parts: Vec<Value> = text(args)
+            .split(sep.as_ref())
+            .map(|part| Value::Str(Rc::from(part)))
+            .collect();
+        Ok(Value::List(interp.heap.alloc(Object::List(parts))))
+    },
+};
+
+pub static CHARS: Native = Native {
+    name: "chars",
+    arity: Some(1),
+    func: |interp, args, _span| {
+        let chars: Vec<Value> = text(args)
+            .chars()
+            .map(|c| Value::Str(Rc::from(c.to_string())))
+            .collect();
+        Ok(Value::List(interp.heap.alloc(Object::List(chars))))
+    },
+};
+
+/// The separator is the receiver, as in Python: `", ".join(xs)`. Reads badly
+/// once, but it is the string that decides how the pieces are put together.
+pub static JOIN: Native = Native {
+    name: "join",
+    arity: Some(2),
+    func: |interp, args, span| {
+        let Value::List(id) = &args[1] else {
+            return Err(QuinceError::new(
+                format!("`join` needs a list, but was given {}", args[1].type_name()),
+                span,
+            ));
+        };
+
+        let mut parts = Vec::with_capacity(interp.heap.list(*id).len());
+        for item in interp.heap.list(*id) {
+            match item {
+                Value::Str(part) => parts.push(Rc::clone(part)),
+                other => {
+                    return Err(QuinceError::new(
+                        format!(
+                            "`join` needs a list of strings, but found {}",
+                            other.type_name()
+                        ),
+                        span,
+                    ));
+                }
+            }
+        }
+        Ok(Value::Str(Rc::from(parts.join(text(args)))))
     },
 };
 
@@ -1250,6 +1491,22 @@ mod tests {
 
         assert!(interp.heap.collections > 0, "the collector never ran");
         assert_eq!(global(&interp, "kept"), Some(Value::Int(4)));
+    }
+
+    #[test]
+    fn a_slice_target_survives_evaluating_its_bounds() {
+        // The list being sliced sits in a Rust frame while the bounds run, and
+        // a bound is an arbitrary expression that can reach a safe point. Pins
+        // that `Slice` goes through `eval_seq` rather than hand-rolling it.
+        let interp = run(&format!(
+            "fn mk() {{ return [1, 2, 3, 4] }}\n\
+             {}\
+             let kept = len(mk()[1:churn()])",
+            churn("3")
+        ));
+
+        assert!(interp.heap.collections > 0, "the collector never ran");
+        assert_eq!(global(&interp, "kept"), Some(Value::Int(2)));
     }
 
     #[test]

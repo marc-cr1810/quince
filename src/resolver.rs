@@ -269,6 +269,14 @@ impl Resolver {
                 self.expr(index)
             }
 
+            ExprKind::Slice { target, start, end } => {
+                self.expr(target)?;
+                for bound in [start, end].into_iter().flatten() {
+                    self.expr(bound)?;
+                }
+                Ok(())
+            }
+
             ExprKind::Field { target, .. } => self.expr(target),
 
             ExprKind::Assign { target, value } => {

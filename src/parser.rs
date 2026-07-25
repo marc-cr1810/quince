@@ -346,14 +346,37 @@ impl Parser {
                 }
                 TokenKind::LBracket if !newline => {
                     self.advance();
-                    let index = self.expression()?;
-                    let close = self.expect(TokenKind::RBracket, "after the index")?;
-                    Expr {
-                        span: expr.span.to(close.span),
-                        kind: ExprKind::Index {
-                            target: Box::new(expr),
-                            index: Box::new(index),
-                        },
+
+                    // An empty lower bound is only legal in a slice, so a `:`
+                    // here settles which form this is before anything is parsed.
+                    let start = match self.check(&TokenKind::Colon) {
+                        true => None,
+                        false => Some(self.expression()?),
+                    };
+
+                    if !self.eat(&TokenKind::Colon) {
+                        let close = self.expect(TokenKind::RBracket, "after the index")?;
+                        Expr {
+                            span: expr.span.to(close.span),
+                            kind: ExprKind::Index {
+                                target: Box::new(expr),
+                                index: Box::new(start.expect("a non-slice index has a value")),
+                            },
+                        }
+                    } else {
+                        let end = match self.check(&TokenKind::RBracket) {
+                            true => None,
+                            false => Some(self.expression()?),
+                        };
+                        let close = self.expect(TokenKind::RBracket, "after the slice")?;
+                        Expr {
+                            span: expr.span.to(close.span),
+                            kind: ExprKind::Slice {
+                                target: Box::new(expr),
+                                start: start.map(Box::new),
+                                end: end.map(Box::new),
+                            },
+                        }
                     }
                 }
                 _ => return Ok(expr),
@@ -606,6 +629,10 @@ mod tests {
             ExprKind::Index { target, index } => {
                 format!("(index {} {})", sexpr(target), sexpr(index))
             }
+            ExprKind::Slice { target, start, end } => {
+                let bound = |b: &Option<Box<Expr>>| b.as_deref().map_or(String::new(), sexpr);
+                format!("(slice {} {} {})", sexpr(target), bound(start), bound(end))
+            }
             ExprKind::Field { target, name } => format!("(. {} {name})", sexpr(target)),
             ExprKind::Assign { target, value } => {
                 format!("(= {} {})", sexpr(target), sexpr(value))
@@ -679,6 +706,28 @@ mod tests {
         assert_eq!(expr_of("a.b.c"), "(. (. a b) c)");
         assert_eq!(expr_of("a[0][1]"), "(index (index a 0) 1)");
         assert_eq!(expr_of("a.b(1)[2]"), "(index (call (. a b) 1) 2)");
+    }
+
+    #[test]
+    fn a_colon_in_a_subscript_makes_it_a_slice() {
+        // Which form it is turns on the `:`, and either bound may be missing,
+        // so all four shapes have to be distinguished from a plain index.
+        assert_eq!(expr_of("a[1:2]"), "(slice a 1 2)");
+        assert_eq!(expr_of("a[1:]"), "(slice a 1 )");
+        assert_eq!(expr_of("a[:2]"), "(slice a  2)");
+        assert_eq!(expr_of("a[:]"), "(slice a  )");
+        assert_eq!(expr_of("a[1]"), "(index a 1)");
+    }
+
+    #[test]
+    fn slice_bounds_are_full_expressions() {
+        // The bounds parse with `expression`, so a `:` cannot be mistaken for
+        // the start of one and arithmetic in a bound needs no parentheses.
+        assert_eq!(
+            expr_of("a[i + 1:len(a) - 1]"),
+            "(slice a (+ i 1) (- (call len a) 1))"
+        );
+        assert_eq!(expr_of("a[:2][0]"), "(index (slice a  2) 0)");
     }
 
     #[test]

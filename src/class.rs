@@ -7,7 +7,10 @@
 //!
 //! User classes arrive with v0.4; see Dispatch in DESIGN.md for the shape.
 
-use crate::interp::{KEYS, PUSH, REMOVE, VALUES};
+use crate::interp::{
+    CHARS, ENDS_WITH, JOIN, KEYS, LOWER, PUSH, REMOVE, REPLACE, SPLIT, STARTS_WITH, TRIM, UPPER,
+    VALUES,
+};
 use crate::value::Native;
 
 /// A type built into the language.
@@ -49,7 +52,17 @@ pub static FLOAT: BuiltinType = BuiltinType {
 };
 pub static STR: BuiltinType = BuiltinType {
     name: "string",
-    methods: &[],
+    methods: &[
+        ("chars", &CHARS),
+        ("ends_with", &ENDS_WITH),
+        ("join", &JOIN),
+        ("lower", &LOWER),
+        ("replace", &REPLACE),
+        ("split", &SPLIT),
+        ("starts_with", &STARTS_WITH),
+        ("trim", &TRIM),
+        ("upper", &UPPER),
+    ],
 };
 pub static LIST: BuiltinType = BuiltinType {
     name: "list",
