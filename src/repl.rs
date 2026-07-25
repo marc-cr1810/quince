@@ -32,21 +32,34 @@ fn method_names() -> Vec<&'static str> {
     names
 }
 
-fn method_names_for_type(type_name: &str) -> Vec<&'static str> {
+use std::collections::HashMap;
+
+fn method_names_for_type(
+    type_name: &str,
+    custom_methods: &HashMap<String, Vec<String>>,
+) -> Vec<String> {
+    if let Some(methods) = custom_methods.get(type_name) {
+        let mut names = methods.clone();
+        names.sort();
+        names.dedup();
+        return names;
+    }
+
     for builtin in class::BUILTINS {
         if builtin.name() == type_name {
-            let mut names: Vec<&'static str> = builtin
+            let mut names: Vec<String> = builtin
                 .seed()
                 .methods
                 .iter()
-                .map(|(name, _)| *name)
+                .map(|(name, _)| name.to_string())
                 .collect();
-            names.sort_unstable();
+            names.sort();
             names.dedup();
             return names;
         }
     }
-    method_names()
+
+    method_names().into_iter().map(String::from).collect()
 }
 
 fn extract_var_before_dot(line: &str, dot_pos: usize) -> Option<&str> {
@@ -70,6 +83,7 @@ fn extract_var_before_dot(line: &str, dot_pos: usize) -> Option<&str> {
 pub struct QuinceHelper {
     pub use_color: bool,
     pub globals: Arc<Mutex<Vec<(String, String)>>>,
+    pub custom_methods: Arc<Mutex<HashMap<String, Vec<String>>>>,
 }
 
 impl Helper for QuinceHelper {}
@@ -99,25 +113,30 @@ impl Completer for QuinceHelper {
         }
 
         if start > 0 && line.as_bytes().get(start - 1) == Some(&b'.') {
+            let custom_map = self
+                .custom_methods
+                .lock()
+                .map(|m| m.clone())
+                .unwrap_or_default();
             let methods = if let Some(var_name) = extract_var_before_dot(line, start - 1) {
                 if let Ok(globals) = self.globals.lock() {
                     if let Some((_, type_name)) = globals.iter().find(|(k, _)| k == var_name) {
-                        method_names_for_type(type_name)
+                        method_names_for_type(type_name, &custom_map)
                     } else {
-                        method_names()
+                        method_names().into_iter().map(String::from).collect()
                     }
                 } else {
-                    method_names()
+                    method_names().into_iter().map(String::from).collect()
                 }
             } else {
-                method_names()
+                method_names().into_iter().map(String::from).collect()
             };
 
             for method in methods {
                 if method.starts_with(word) {
                     matches.push(Pair {
-                        display: method.to_string(),
-                        replacement: method.to_string(),
+                        display: method.clone(),
+                        replacement: method,
                     });
                 }
             }
@@ -178,24 +197,29 @@ impl Hinter for QuinceHelper {
 
         let mut candidates = Vec::new();
         if word.starts_with(':') {
-            candidates.extend(META_COMMANDS.iter().copied());
+            candidates.extend(META_COMMANDS.iter().copied().map(String::from));
         } else if start > 0 && line.as_bytes().get(start - 1) == Some(&b'.') {
+            let custom_map = self
+                .custom_methods
+                .lock()
+                .map(|m| m.clone())
+                .unwrap_or_default();
             let methods = if let Some(var_name) = extract_var_before_dot(line, start - 1) {
                 if let Ok(globals) = self.globals.lock() {
                     if let Some((_, type_name)) = globals.iter().find(|(k, _)| k == var_name) {
-                        method_names_for_type(type_name)
+                        method_names_for_type(type_name, &custom_map)
                     } else {
-                        method_names()
+                        method_names().into_iter().map(String::from).collect()
                     }
                 } else {
-                    method_names()
+                    method_names().into_iter().map(String::from).collect()
                 }
             } else {
-                method_names()
+                method_names().into_iter().map(String::from).collect()
             };
             candidates.extend(methods);
         } else {
-            candidates.extend(KEYWORDS.iter().copied());
+            candidates.extend(KEYWORDS.iter().copied().map(String::from));
             if let Ok(globals) = self.globals.lock() {
                 for (g, _) in globals.iter() {
                     if g.starts_with(word) && g != word {
@@ -214,6 +238,7 @@ impl Hinter for QuinceHelper {
         None
     }
 }
+
 
 impl Validator for QuinceHelper {}
 
@@ -545,24 +570,38 @@ pub fn run_repl(use_color_stdout: bool, use_color_stderr: bool) -> Result<()> {
     let config = rustyline::Config::builder().auto_add_history(true).build();
     let mut rl = rustyline::Editor::with_config(config)?;
     let globals_store: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let custom_methods_store: Arc<Mutex<HashMap<String, Vec<String>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
 
     rl.set_helper(Some(QuinceHelper {
         use_color: use_color_stdout,
         globals: Arc::clone(&globals_store),
+        custom_methods: Arc::clone(&custom_methods_store),
     }));
 
     let mut interp = Interp::new();
     let mut buffer = String::new();
 
     loop {
-        // Sync global variables for tab autocompletion
+        // Sync global variables and custom class methods for tab autocompletion
         if let Ok(mut store) = globals_store.lock() {
-            *store = interp
-                .get_globals()
-                .into_iter()
-                .map(|(k, v)| (k, v.type_name(&interp.heap).to_string()))
-                .collect();
+            let mut vars = Vec::new();
+            let mut custom_map = HashMap::new();
+            for (k, v) in interp.get_globals() {
+                let type_name = v.type_name(&interp.heap).to_string();
+                vars.push((k, type_name));
+                if let Value::Class(id) = v {
+                    let class_obj = interp.heap.class(id);
+                    let methods: Vec<String> = class_obj.methods.keys().cloned().collect();
+                    custom_map.insert(class_obj.name.clone(), methods);
+                }
+            }
+            *store = vars;
+            if let Ok(mut methods_store) = custom_methods_store.lock() {
+                *methods_store = custom_map;
+            }
         }
+
 
         let open_braces = count_open_braces(&buffer);
         let mut line = match if buffer.is_empty() {
@@ -703,16 +742,25 @@ mod tests {
 
     #[test]
     fn context_aware_method_completion_filters_by_type() {
-        let string_methods = method_names_for_type("string");
-        assert!(string_methods.contains(&"upper"));
-        assert!(string_methods.contains(&"lower"));
-        assert!(!string_methods.contains(&"push"));
-        assert!(!string_methods.contains(&"keys"));
+        let custom_map = HashMap::from([(
+            "Point".to_string(),
+            vec!["distance".to_string(), "move".to_string()],
+        )]);
 
-        let list_methods = method_names_for_type("list");
-        assert!(list_methods.contains(&"push"));
-        assert!(!list_methods.contains(&"upper"));
+        let string_methods = method_names_for_type("string", &HashMap::new());
+        assert!(string_methods.contains(&"upper".to_string()));
+        assert!(string_methods.contains(&"lower".to_string()));
+        assert!(!string_methods.contains(&"push".to_string()));
+        assert!(!string_methods.contains(&"keys".to_string()));
+
+        let list_methods = method_names_for_type("list", &HashMap::new());
+        assert!(list_methods.contains(&"push".to_string()));
+        assert!(!list_methods.contains(&"upper".to_string()));
+
+        let point_methods = method_names_for_type("Point", &custom_map);
+        assert_eq!(point_methods, vec!["distance".to_string(), "move".to_string()]);
     }
+
 
     #[test]
     fn repl_binds_last_value_to_underscore() {
