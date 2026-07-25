@@ -1,0 +1,9 @@
+# A class cannot extend a type built into the language. The methods it would
+# inherit are natives that only work on the builtin's own values, and an instance
+# of a subclass is not one — so this is refused where it is written rather than
+# left to fail inside `upper`.
+class MyStr extends string {
+    fn shout() {
+        return self.upper()
+    }
+}

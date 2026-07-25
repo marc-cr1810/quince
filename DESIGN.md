@@ -754,9 +754,16 @@ Three decisions it forced, none of them recoverable from the diff:
 Two things ruled out rather than deferred. `type(x)` keeps returning a **string**: it is
 tempting to hand back the class once `int` is a value, but `Error`'s constructor does
 `self.kind = type(self)` and the corpus asserts a string, so the change would break
-working code for a nicety. And `extends` on a builtin is refused at class-definition
-time — it becomes syntactically expressible and is semantically empty, since a subclass
-instance is an `Object::Instance` that no arithmetic path reaches.
+working code for a nicety. And `extends` on a builtin is refused at class-definition time.
+
+That last one was written here as "semantically empty" before it was implemented, and it
+was worse than that. `class MyStr extends string {}` then `MyStr().upper()` reached
+`string`'s `upper` — a native that matches on `Value::Str` and treats anything else as
+`unreachable!` — and panicked the interpreter. Ordinary Quince code, a hard crash, and it
+only became expressible because the types became values: until then `extends string` was
+an undefined variable and the hole was closed by accident. The refusal is one check at
+class-definition time rather than a receiver guard in every native, which is the same
+trade as `op` being validated where it is written.
 
 ### `extend`, and the one thing it must not do
 

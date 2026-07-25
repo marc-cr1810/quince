@@ -355,6 +355,28 @@ impl Interp {
                 // that `Class::method` walks.
                 let parent = match parent {
                     Some(parent) => match self.read(parent, env, stmt.span)? {
+                        // A builtin's methods are natives that match on the
+                        // receiver's `Value` variant, and an instance of a
+                        // subclass is an `Object::Instance` — so `MyStr().upper()`
+                        // would reach `string`'s `upper` holding something that is
+                        // not a string, which every native treats as
+                        // unreachable. Refused here, once, rather than guarded in
+                        // each of them.
+                        //
+                        // Only expressible at all since the builtin types became
+                        // values; before that `extends string` was an undefined
+                        // variable and the hole was closed by accident.
+                        Value::Class(id) if self.heap.class(id).builtin.is_some() => {
+                            let builtin = self.heap.class(id).name.clone();
+                            return Err(QuinceError::new(
+                                format!("`{name}` cannot extend `{builtin}`"),
+                                stmt.span,
+                            )
+                            .with_kind(ErrorKind::Type)
+                            .with_help(format!(
+                                "`{builtin}`'s methods only work on a {builtin}, and an instance of `{name}` is not one"
+                            )));
+                        }
                         Value::Class(id) => Some(id),
                         other => {
                             return Err(QuinceError::new(
@@ -2103,6 +2125,48 @@ mod tests {
         let mut interp = Interp::with_output(Box::new(Vec::new()));
         interp.run(&program).expect("the test program should run");
         interp
+    }
+
+    #[test]
+    fn a_type_name_is_a_global_unless_the_lexer_claimed_it() {
+        // The exception set is derived from `TokenKind::keyword`, so it can grow
+        // without anyone touching this file — a type named after a future keyword
+        // would silently stop being bound. Pinned here so that becomes a failure,
+        // and stated as two lists so the reason stays legible.
+        let interp = Interp::with_output(Box::new(Vec::new()));
+
+        for builtin in BUILTIN_TYPES {
+            let name = builtin.name();
+            let bound = global(&interp, name);
+            match TokenKind::keyword(name) {
+                Some(_) => assert!(
+                    bound.is_none(),
+                    "`{name}` is a keyword, so no global could ever be read under it"
+                ),
+                None => assert_eq!(
+                    bound,
+                    Some(Value::Class(interp.heap.builtin_class(*builtin))),
+                    "`{name}` should be bound to its own class"
+                ),
+            }
+        }
+
+        // The two that are keywords today. Written out so that one of them
+        // ceasing to be a keyword is a decision rather than a diff.
+        assert!(global(&interp, "nil").is_none());
+        assert!(global(&interp, "class").is_none());
+    }
+
+    #[test]
+    fn a_class_cannot_extend_a_builtin_type() {
+        // Expressible only since the types became values, and a crash rather than
+        // an error if it gets through: `string`'s `upper` is a native that treats
+        // a non-string receiver as unreachable.
+        let program = crate::compile("class MyStr extends string {\n}").expect("should parse");
+        let mut interp = Interp::with_output(Box::new(Vec::new()));
+        let err = interp.run(&program).expect_err("should be refused");
+
+        assert_eq!(err.message, "`MyStr` cannot extend `string`");
     }
 
     #[test]
