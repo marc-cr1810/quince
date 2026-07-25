@@ -42,7 +42,7 @@ try {
 # parent through the same lookup any subclass uses, and `kind` follows the
 # receiver's class without `Error` knowing the subclass exists.
 class ParseError extends Error {
-    fn init(message, line) {
+    op init(message, line) {
         super.init(message)
         self.line = line
     }

@@ -1,0 +1,7 @@
+# `op` names a closed set, so a misspelling is caught where it is written
+# rather than becoming a method nothing ever calls.
+class C {
+    op innit(x) {
+        self.x = x
+    }
+}

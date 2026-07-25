@@ -1,0 +1,5 @@
+# An `op` is called on an instance, so there is nothing out here for one to
+# belong to.
+op init(x) {
+    print(x)
+}

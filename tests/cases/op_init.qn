@@ -1,0 +1,46 @@
+# `op init` is the constructor. A method merely *named* `init` is not one —
+# marking is what the language reads, not the name.
+
+class Point {
+    op init(x, y) {
+        self.x = x
+        self.y = y
+    }
+}
+
+let p = Point(3, 4)
+print(p.x, p.y)
+
+# A subclass that declares no `op init` of its own constructs with its parent's,
+# inherited when the class is built rather than searched for per construction.
+class Point3 extends Point {
+}
+
+let q = Point3(1, 2)
+print(q.x, q.y)
+
+# One that declares its own can still delegate by name: `op init` is a marked
+# entry in the ordinary method table, not a thing kept somewhere else.
+class Labelled extends Point {
+    op init(x, y, label) {
+        super.init(x, y)
+        self.label = label
+    }
+}
+
+let r = Labelled(5, 6, "corner")
+print(r.x, r.y, r.label)
+
+# An unmarked `init` is an ordinary method. It does not run at construction, and
+# it stays callable by name like anything else — including returning a value,
+# which a constructor has no way to do.
+class Manual {
+    fn init(n) {
+        self.n = n
+        return n * 2
+    }
+}
+
+let m = Manual()
+print(m.init(21))
+print(m.n)

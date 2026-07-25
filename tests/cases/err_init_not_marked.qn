@@ -1,0 +1,10 @@
+# A method merely named `init` is an ordinary method: marking is what makes a
+# constructor. The report says so, since this is the one mistake the rule allows.
+class Point {
+    fn init(x, y) {
+        self.x = x
+        self.y = y
+    }
+}
+
+let p = Point(1, 2)

@@ -479,6 +479,18 @@ protocols a user class will eventually want to implement. They stay matches unti
 classes exist, and then gain protocol slots on `Class` alone, leaving the builtin path
 untouched.
 
+**The last sentence did not survive either**, and for a reason worth stating: slots on
+user classes alone are an asymmetry, and the requirement is the opposite one — a builtin
+type and a user-defined type should be able to do the same things, so that `extend int`
+is a feature the language can grow into rather than one its object model forbids. See
+One class representation below for what replaces this.
+
+The paragraph above it is half wrong too. Overriding printing really is one arm inside
+an existing match — but `is_truthy`, `equals`, and `display` are infallible and take
+`&Heap`, and calling a user method needs `&mut Interp` and can fail. So all three move
+onto `Interp` and start returning `Result`, which is the same break the section below
+predicts for `NativeFn`, arriving from the other direction and going unnoticed here.
+
 ### The signature that has to break
 
 `NativeFn` receives `&mut Heap` but not the interpreter, so a builtin cannot call back
@@ -665,6 +677,110 @@ instance onto `temps`, precisely because a body writing `self = nil` would drop 
 heap-visible reference to the object under construction. Pinning `self` removed the
 hazard, so the root went with it — a language rule doing the work a defensive root was
 doing before. `self_cannot_be_reassigned` in `resolver.rs` is what holds the other end up.
+
+## One class representation
+
+The requirement that settles this: **a builtin type and a user-defined type should be
+able to do the same things.** Not as symmetry for its own sake — it is what makes
+`extend int { fn abs() { … } }` a feature the language can grow into later rather than
+one the object model has already forbidden.
+
+Dispatch is most of the way there already. `Class::method` hands back a `Value` for both
+arms, and `call_method` handles a `Native` and a `Function` identically, so `"hi".upper()`
+and `p.dist()` travel the same path today. Three things are not:
+
+- `BuiltinType.methods` is a `&'static` slice, so it cannot grow, by construction.
+- a builtin type is not a value. There is no `int` to write, so there is nothing for an
+  extension to attach to.
+- `Class` being an enum means a protocol slot has to live on one arm or be stated twice.
+
+So the enum collapses. Builtin types become ordinary heap class objects at startup,
+seeded from the static tables and bound as globals. `methods` becomes
+`HashMap<String, Value>` rather than `HashMap<String, ObjId>`, which is the load-bearing
+change: `Value::Native` is a `&'static` pointer holding no handle, so a native method and
+a Quince method sit in one table with nothing to reconcile, and `trace` pushes only the
+`Function` entries.
+
+The static `BUILTINS` tables stay, as the seed. Adding a builtin type still fails to
+compile until it is listed, and `Value::class` stays an exhaustive match — into a table of
+`ObjId` rather than to a `&'static`. Exhaustiveness is the property the Dispatch section
+defends, and it survives.
+
+### Slots are cached fields, not lookups
+
+The trap: if `is_truthy` becomes "look up `bool` on my class", every `if` in the language
+hashes the string `"bool"`. That is the hottest path there is, and it would spend exactly
+what the linear-scan decision above was protecting.
+
+So a slot is a field on the class, resolved once when the class is built, and a builtin
+whose slot is `None` falls through to the match that already exists — costing nothing
+until someone extends it. Inheritance is a copy-down at creation rather than a chain walk
+at use, which is safe for the same reason `UserClass::method`'s loop terminates: a parent
+is fully built before the class naming it exists.
+
+### The guard already existed
+
+Once `int` is a global holding a mutable class, `int.bool = fn() { … }` is expressible and
+would make `0` truthy program-wide. Builtin classes therefore ship frozen — the freeze is
+a property of the object, and `FrozenError` is already a kind with a class, so that line
+raises a good error without a guard being written for it.
+
+Two things ruled out rather than deferred. `type(x)` keeps returning a **string**: it is
+tempting to hand back the class once `int` is a value, but `Error`'s constructor does
+`self.kind = type(self)` and the corpus asserts a string, so the change would break
+working code for a nicety. And `extends` on a builtin is refused at class-definition
+time — it becomes syntactically expressible and is semantically empty, since a subclass
+instance is an `Object::Instance` that no arithmetic path reaches.
+
+## `op` marks what the language calls
+
+`init` was a magic string. `class Point { fn innit(x, y) { … } }` compiled to a class with
+no constructor and no complaint, because being the constructor was inferred from the name.
+Every slot added multiplies that: `fn lenght`, `fn to_str`, `fn equals` — each one an
+override that silently is not one.
+
+So a method the language calls is declared with `op` instead of `fn`:
+
+```quince
+class Stack {
+    op init(items) { self.items = items }
+    fn peek()      { return self.items[len(self.items) - 1] }
+}
+```
+
+`Op` is a closed set and `Op::from_name` is the only way in, so `op innit` is an error
+where it is written. It is checked in the parser rather than the resolver because
+everything the check needs is local — the name and its span, both in hand before the body
+is parsed. `op` at the top level is refused too: there is nothing out there for one to
+belong to.
+
+An unmarked method keeps its name. `fn init` is an ordinary method, callable as `c.init()`
+and free to return a value, which a constructor cannot. That is the permissive rule of the
+two available, and it is the one that keeps `len`, `str`, `get`, `eq`, and `iter` usable as
+ordinary method names — reserving eight good names to catch one mistake is the worse trade.
+
+The mistake it allows is paid for at the point of failure instead. Constructing a class
+whose `init` is unmarked reports the arity error it was always going to report, plus a
+help line naming the actual cause. Which is the whole argument for marking: not that `op`
+reads better, but that a misspelling becomes an error and a near-miss becomes an
+instruction.
+
+`QuinceError` grew a `help` field for that, rendered as rustc's `= help:` line. It is
+deliberately separate from `message`, because `message` is what a `catch` sees and a
+handler should not have to skip past advice aimed at a terminal.
+
+### What the marking costs
+
+`init` moved, so every class in the corpus changed — 15 sites across 8 files, plus the
+`Error` prelude, which is written in Quince and so migrated like any other program. That
+is the cheapest this rename will ever be, and it only ever gets more expensive; the same
+argument that moved `const` to `final` at 59 corpus files.
+
+Arity is not checked at the declaration yet. `op` knows how many parameters each operation
+takes, so `op eq(a, b)` should be an error in the class body rather than at the first
+comparison — but `init` takes any number, so the check would have had nothing to act on.
+It arrives with the first fixed-arity operation, for the reason Sequencing above already
+records: a commit whose content nothing exercises is worse than the later diff it avoids.
 
 ## Bindings — `let`, `final`, `const`
 
@@ -1150,7 +1266,15 @@ that was actually thrown, so a `ParseError` says `error[ParseError]` — which i
 `QuinceError` carries a `label` beside its `kind`: the name lives on the instance's class and
 `report` has no heap to look it up in, so it is captured at the raise.
 
-What v0.5 still owes: protocol slots, then the diagnostics sweep.
+`op` landed next, and reordered what follows it. Marking a method as one the language
+calls is a prerequisite for the slots rather than a nicety alongside them: the machinery
+that validates a closed set of operations wants to exist while that set has one member, so
+that every operation after the first is a line added to a list which already checks
+itself. It also moved `init` while the corpus was 8 classes.
+
+What v0.5 still owes, in order: **one class representation**, then the slots themselves,
+then the diagnostics sweep. Collapsing `Class` goes first because slots written against
+the enum would be rewritten by it — see One class representation above.
 
 `final` and `const` landed here first, out of order, because they were a rename with a
 feature hiding inside it — see Bindings above. Renaming a keyword only gets cheaper the
@@ -1165,6 +1289,13 @@ indexing, and iteration stop being closed matches over `Value` and gain one arm 
 asks the class. Deferred to a single pass on purpose: doing them one at a time means
 five separate decisions about what a class may override and no way to keep them
 consistent.
+
+One rule for the diagnostics sweep, worth writing down before it starts: **"protocol
+slot" is a word for this document, not for a report.** Implementation vocabulary — slot,
+protocol, reify, arena, safe point — never appears in a message a Quince programmer
+reads, because a diagnostic is read by someone who has not read `class.rs`. Where a closed
+set is involved, list its members instead of naming the category: `op` can define: init
+is more use than any noun for what `init` is.
 
 **Later**
 Bytecode VM, async/await, module system, sized integer types — all things Zephyr has,

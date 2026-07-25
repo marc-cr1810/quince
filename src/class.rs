@@ -86,6 +86,18 @@ pub struct UserClass {
     /// `super`.
     pub methods: HashMap<String, ObjId>,
     pub parent: Option<ObjId>,
+    /// The `op init` construction runs, or the one inherited from an ancestor.
+    ///
+    /// Resolved once when the class is built rather than looked up by name on
+    /// every `Point(1, 2)`, and copied down from the parent so no chain is
+    /// walked at construction time. That copy is safe for the same reason
+    /// [`UserClass::method`]'s loop terminates: a parent is fully built before
+    /// the class naming it exists.
+    ///
+    /// Held beside `methods` rather than instead of an entry in it, because the
+    /// method is still reachable by name — `super.init(msg)` is how a subclass
+    /// constructor delegates.
+    pub init: Option<ObjId>,
 }
 
 impl UserClass {
@@ -131,9 +143,6 @@ impl Instance {
         self.fields.trace(worklist);
     }
 }
-
-/// The name a constructor has to be given for `Point(1, 2)` to reach it.
-pub const INIT: &str = "init";
 
 pub static NIL: BuiltinType = BuiltinType {
     name: "nil",
@@ -234,6 +243,7 @@ mod tests {
                 name: "C".to_string(),
                 methods: HashMap::new(),
                 parent: None,
+                init: None,
             }))),
         ];
 

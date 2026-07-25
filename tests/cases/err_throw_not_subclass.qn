@@ -1,5 +1,5 @@
 class Plain {
-    fn init() {
+    op init() {
         self.message = "looks like one"
     }
 }

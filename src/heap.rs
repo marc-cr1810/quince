@@ -500,6 +500,7 @@ mod tests {
                     slot_count: 0,
                     span: crate::token::Span::new(0, 0),
                 },
+                op: None,
             }),
             env: scope,
         }));

@@ -1,9 +1,10 @@
+use std::collections::HashMap;
 use std::io::Write;
 use std::rc::Rc;
 
 use crate::ast::Slot;
-use crate::ast::{BinaryOp, Block, Expr, ExprKind, LogicalOp, Stmt, StmtKind, UnaryOp, Var};
-use crate::class::{self, Instance, UserClass};
+use crate::ast::{BinaryOp, Block, Expr, ExprKind, LogicalOp, Op, Stmt, StmtKind, UnaryOp, Var};
+use crate::class::{Instance, UserClass};
 use crate::dict::{Dict, Key, NotAKey};
 use crate::env::{self, AssignError, Env, Globals};
 use crate::error::{ERROR_KINDS, ErrorKind, QuinceError};
@@ -63,9 +64,13 @@ pub fn with_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
 /// `kind` is set from `type(self)`, which is already the receiver's class name —
 /// so a user's `class ParseError extends Error` that calls `super.init(message)`
 /// reports `ParseError` without anything here knowing it exists.
+///
+/// Written in the language it defines, `op` and all: this compiles through the
+/// same parser as user code, so the prelude cannot drift from what a program is
+/// allowed to write.
 const BASE_ERROR: &str = "\
 class Error {
-    fn init(message) {
+    op init(message) {
         self.message = message
         self.kind = type(self)
     }
@@ -363,20 +368,29 @@ impl Interp {
                 // Methods close over that scope, exactly as a `fn` at the same
                 // position would. Nothing here reaches a safe point, so the
                 // functions are safe unrooted until the class owning them exists.
-                let table = methods
-                    .iter()
-                    .map(|decl| {
-                        let func = self.heap.alloc(Object::Function(Function {
-                            decl: Rc::clone(decl),
-                            env: enclosing,
-                        }));
-                        (decl.name.clone(), func)
-                    })
-                    .collect();
+                let mut table = HashMap::with_capacity(methods.len());
+                let mut own_init = None;
+                for decl in methods {
+                    let func = self.heap.alloc(Object::Function(Function {
+                        decl: Rc::clone(decl),
+                        env: enclosing,
+                    }));
+                    if decl.op == Some(Op::Init) {
+                        own_init = Some(func);
+                    }
+                    table.insert(decl.name.clone(), func);
+                }
+
+                // Inherited rather than searched for: a class that declares no
+                // `op init` of its own constructs with its parent's, which is
+                // what `class TypeError extends Error {}` relies on.
+                let init = own_init.or_else(|| parent.and_then(|id| self.heap.class(id).init));
+
                 let class = self.heap.alloc(Object::Class(UserClass {
                     name: name.clone(),
                     methods: table,
                     parent,
+                    init,
                 }));
                 self.bind(slot, name, Value::Class(class), false, env);
                 Ok(Flow::Normal)
@@ -1186,7 +1200,10 @@ impl Interp {
                     fields: Dict::new(),
                 })));
 
-                match self.heap.class(id).method(class::INIT, &self.heap) {
+                // The `op init` the class resolved when it was built, not a
+                // lookup of the name `init` — a method merely *called* `init` is
+                // an ordinary method, and construction must not reach it.
+                match self.heap.class(id).init.map(Value::Function) {
                     // `init` runs Quince code, so it reaches safe points, and
                     // the instance needs no root here: it sits in slot 0 of the
                     // constructor's scope, which `exec_scoped` roots for the
@@ -1202,7 +1219,24 @@ impl Interp {
                     // No constructor, so the only correct call passes nothing.
                     None => {
                         let name = self.heap.class(id).name.clone();
-                        check_arity(&name, 0, args.len(), span)?;
+                        // Marking is what makes a constructor a constructor, so
+                        // a plain `fn init` is the likeliest reason to be here
+                        // with arguments in hand. Saying so turns the one mistake
+                        // the marking rule allows into an instruction.
+                        let unmarked = self
+                            .heap
+                            .class(id)
+                            .method(Op::Init.name(), &self.heap)
+                            .is_some();
+                        check_arity(&name, 0, args.len(), span).map_err(|err| {
+                            if unmarked {
+                                err.with_help(format!(
+                                    "`{name}` has a method `init`, but only `op init` runs when a class is constructed"
+                                ))
+                            } else {
+                                err
+                            }
+                        })?;
                     }
                 }
                 Ok(instance)
@@ -2096,7 +2130,7 @@ mod tests {
         // fail. This is the invariant a `finally` would have broken, by running
         // statements during the unwind — see DESIGN.md.
         let interp = run("class Deep extends Error {\n\
-             \x20   fn init(message, n) {\n\
+             \x20   op init(message, n) {\n\
              \x20       super.init(message)\n\
              \x20       self.n = n\n\
              \x20   }\n\
@@ -2286,7 +2320,7 @@ mod tests {
         let interp = run(&format!(
             "{}\
              class C {{\n\
-             fn init(n) {{\n\
+             op init(n) {{\n\
              self.n = n\n\
              let junk = churn()\n\
              }}\n\
@@ -2377,7 +2411,7 @@ mod tests {
         // The list is reachable only through the field, so this is the instance
         // half of what `Dict::trace` already does for a dict.
         let interp = run(&format!(
-            "class Box {{ fn init() {{ self.items = [1, 2, 3] }} }}\n\
+            "class Box {{ op init() {{ self.items = [1, 2, 3] }} }}\n\
              let b = Box()\n\
              {}\
              let junk = churn()\n\

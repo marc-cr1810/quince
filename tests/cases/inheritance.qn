@@ -1,5 +1,5 @@
 class Animal {
-    fn init(name) {
+    op init(name) {
         self.name = name
     }
     fn speak() {
@@ -11,7 +11,7 @@ class Animal {
 }
 
 class Dog extends Animal {
-    fn init(name, breed) {
+    op init(name, breed) {
         super.init(name)
         self.breed = breed
     }

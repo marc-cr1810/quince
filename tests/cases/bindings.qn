@@ -40,7 +40,7 @@ print(handlers[0]())
 
 # `init` runs before the freeze, which is why a frozen instance can exist at all.
 class Point {
-    fn init(x) { self.x = x }
+    op init(x) { self.x = x }
     fn grow() { self.x = self.x + 1 }
 }
 final p = Point(1)

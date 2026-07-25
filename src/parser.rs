@@ -1,5 +1,5 @@
 use crate::ast::{
-    self, BinaryOp, BindKind, Block, Expr, ExprKind, FnDecl, LogicalOp, Param, Stmt, StmtKind,
+    self, BinaryOp, BindKind, Block, Expr, ExprKind, FnDecl, LogicalOp, Op, Param, Stmt, StmtKind,
     UnaryOp, Var,
 };
 use crate::error::QuinceError;
@@ -66,6 +66,13 @@ impl Parser {
         match self.peek().kind {
             TokenKind::Let | TokenKind::Final | TokenKind::Const => self.let_stmt(),
             TokenKind::Fn => self.fn_stmt(),
+            // An `op` is a method the language calls on an instance, so there is
+            // nothing for one to belong to out here.
+            TokenKind::Op => Err(QuinceError::new(
+                "`op` is only valid inside a class body",
+                self.peek().span,
+            )
+            .with_help("use `fn` for a function that is called by name")),
             TokenKind::Class => self.class_stmt(),
             TokenKind::If => self.if_stmt(),
             TokenKind::While => self.while_stmt(),
@@ -122,15 +129,38 @@ impl Parser {
         })
     }
 
-    /// Parses `fn name(params) { … }`, starting at the `fn`.
+    /// Parses `fn name(params) { … }` or `op name(params) { … }`, starting at
+    /// the keyword.
     ///
     /// A method gets `self` inserted as its first parameter, which is the whole
     /// of what makes the receiver implicit — see [`ast::SELF`]. Its span is the
     /// method's name, since there is no source text to point at and an error
     /// about `self` should land on the method that has one.
+    ///
+    /// An `op` is validated here rather than in the resolver because everything
+    /// the check needs is local: the name, the span, and the parameters, all in
+    /// hand before the body is parsed.
     fn fn_decl(&mut self, method: bool) -> Result<FnDecl, QuinceError> {
-        self.advance();
-        let (name, name_span) = self.expect_ident("after `fn`")?;
+        let keyword = self.advance().kind.clone();
+        let is_op = keyword == TokenKind::Op;
+        let after = if is_op { "after `op`" } else { "after `fn`" };
+        let (name, name_span) = self.expect_ident(after)?;
+
+        let op = if is_op {
+            // Listing the set beats naming it: the list is short, it is the
+            // answer to "then what can I write", and it grows with the language.
+            Some(Op::from_name(&name).ok_or_else(|| {
+                let names: Vec<&str> = ast::OPS.iter().map(|op| op.name()).collect();
+                QuinceError::new(
+                    format!("`{name}` is not an operation a class can define"),
+                    name_span,
+                )
+                .with_help(format!("`op` can define: {}", names.join(", ")))
+            })?)
+        } else {
+            None
+        };
+
         self.expect(TokenKind::LParen, "after the function name")?;
 
         let mut params = Vec::new();
@@ -155,7 +185,12 @@ impl Parser {
         self.expect(TokenKind::RParen, "after the parameter list")?;
 
         let body = self.block()?;
-        Ok(FnDecl { name, params, body })
+        Ok(FnDecl {
+            name,
+            params,
+            body,
+            op,
+        })
     }
 
     fn class_stmt(&mut self) -> Result<Stmt, QuinceError> {
@@ -173,7 +208,7 @@ impl Parser {
 
         let mut methods = Vec::new();
         while !self.check(&TokenKind::RBrace) && !self.at_end() {
-            if !self.check(&TokenKind::Fn) {
+            if !self.check(&TokenKind::Fn) && !self.check(&TokenKind::Op) {
                 return Err(QuinceError::new(
                     format!("expected a method, found {}", self.peek().kind),
                     self.peek().span,
@@ -1035,6 +1070,58 @@ mod tests {
         assert_eq!(decl.name, "add");
         let names: Vec<_> = decl.params.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, vec!["a", "b"]);
+    }
+
+    /// The methods of the one class in `src`.
+    fn methods_of(src: &str) -> Vec<std::rc::Rc<FnDecl>> {
+        let stmts = parse_ok(src);
+        let StmtKind::Class { methods, .. } = &stmts[0].kind else {
+            panic!("expected a class");
+        };
+        methods.clone()
+    }
+
+    #[test]
+    fn op_marks_a_method_the_language_calls() {
+        let methods = methods_of("class C { op init(x) { self.x = x } }");
+        assert_eq!(methods[0].name, "init");
+        assert_eq!(methods[0].op, Some(Op::Init));
+    }
+
+    #[test]
+    fn fn_leaves_a_method_ordinary_even_when_named_after_an_op() {
+        // The whole point of marking: the name alone decides nothing, so this is
+        // a method called as `c.init()` and nothing more.
+        let methods = methods_of("class C { fn init(x) { self.x = x } }");
+        assert_eq!(methods[0].name, "init");
+        assert_eq!(methods[0].op, None);
+    }
+
+    #[test]
+    fn a_misspelled_op_is_rejected_where_it_is_written() {
+        let err = parse_err("class C { op innit(x) { self.x = x } }");
+        assert!(
+            err.message.contains("`innit` is not an operation"),
+            "{}",
+            err.message
+        );
+        // The list is the suggestion, so it has to be there.
+        let help = err.help.expect("should say what op can define");
+        assert!(help.contains("init"), "{help}");
+        // Pointing at the name, not at the `op`.
+        assert_eq!(&"class C { op innit(x) { self.x = x } }"[13..18], "innit");
+        assert_eq!(err.span.start, 13);
+    }
+
+    #[test]
+    fn op_outside_a_class_is_rejected() {
+        let err = parse_err("op init(x) { }");
+        assert!(
+            err.message.contains("only valid inside a class body"),
+            "{}",
+            err.message
+        );
+        assert!(err.help.is_some(), "should point at `fn`");
     }
 
     #[test]

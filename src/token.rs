@@ -35,6 +35,9 @@ pub enum TokenKind {
     Ident(String),
 
     Fn,
+    /// Introduces a method the language calls on the program's behalf, rather
+    /// than one the program calls by name. See [`crate::ast::Op`].
+    Op,
     Class,
     Extends,
     /// Keywords rather than identifiers so that using one where it has no
@@ -95,6 +98,7 @@ impl TokenKind {
     pub fn keyword(word: &str) -> Option<TokenKind> {
         let kind = match word {
             "fn" => TokenKind::Fn,
+            "op" => TokenKind::Op,
             "class" => TokenKind::Class,
             "extends" => TokenKind::Extends,
             "self" => TokenKind::SelfKw,
@@ -129,6 +133,7 @@ impl fmt::Display for TokenKind {
             TokenKind::Ident(name) => write!(f, "{name}"),
 
             TokenKind::Fn => write!(f, "fn"),
+            TokenKind::Op => write!(f, "op"),
             TokenKind::Class => write!(f, "class"),
             TokenKind::Extends => write!(f, "extends"),
             TokenKind::SelfKw => write!(f, "self"),

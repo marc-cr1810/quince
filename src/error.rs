@@ -111,6 +111,16 @@ pub struct QuinceError {
     ///
     /// [`report`]: QuinceError::report
     pub label: Option<String>,
+    /// What to do about it, rendered as a `= help:` line under the caret.
+    ///
+    /// Separate from [`message`] because the two answer different questions —
+    /// the message says what is wrong, the help says what to write instead — and
+    /// because only the message is what a `catch` sees. A handler inspecting
+    /// `err.message` should not have to skip past advice aimed at whoever is
+    /// reading the terminal.
+    ///
+    /// [`message`]: QuinceError::message
+    pub help: Option<String>,
 }
 
 impl QuinceError {
@@ -121,12 +131,21 @@ impl QuinceError {
             kind: ErrorKind::Runtime,
             payload: None,
             label: None,
+            help: None,
         }
     }
 
     /// Classifies an error, as a builder so a raise site adds one line.
     pub fn with_kind(mut self, kind: ErrorKind) -> Self {
         self.kind = kind;
+        self
+    }
+
+    /// Attaches advice, as a builder for the same reason as [`with_kind`].
+    ///
+    /// [`with_kind`]: QuinceError::with_kind
+    pub fn with_help(mut self, help: impl Into<String>) -> Self {
+        self.help = Some(help.into());
         self
     }
 
@@ -146,6 +165,7 @@ impl QuinceError {
             kind: ErrorKind::Thrown,
             payload: Some(payload),
             label: Some(class.into()),
+            help: None,
         }
     }
 
@@ -203,7 +223,7 @@ impl QuinceError {
         let bar = Style::BOLD_CYAN.paint("|", color);
         let caret = Style::BOLD_RED.paint("^".repeat(width), color);
 
-        format!(
+        let mut out = format!(
             "{err_label}: {msg}\n\
              {blank:>gutter$}{arrow} {path}:{line}:{col}\n\
              {blank:>gutter$} {bar}\n\
@@ -211,7 +231,17 @@ impl QuinceError {
              {blank:>gutter$} {bar} {pad}{caret}",
             blank = "",
             pad = " ".repeat(col - 1),
-        )
+        );
+
+        // Aligned under the gutter rather than the caret, as rustc does: the
+        // advice is about the whole error, not about the column.
+        if let Some(help) = &self.help {
+            let eq = Style::BOLD_CYAN.paint("=", color);
+            let tag = Style::BOLD.paint("help:", color);
+            out.push_str(&format!("\n{blank:>gutter$} {eq} {tag} {help}", blank = ""));
+        }
+
+        out
     }
 }
 
@@ -333,6 +363,29 @@ mod tests {
             "{}",
             bare.report(src, "test.qn")
         );
+    }
+
+    #[test]
+    fn help_renders_under_the_caret_and_stays_out_of_the_message() {
+        let src = "let x = @";
+        let err = QuinceError::new("unexpected character '@'", Span::new(8, 9))
+            .with_help("remove it, or quote it as a string");
+        let out = err.report(src, "test.qn");
+        assert!(
+            out.ends_with("= help: remove it, or quote it as a string"),
+            "{out}"
+        );
+        // The line the caret is on has to survive the help being appended.
+        assert!(out.contains("^\n"), "{out}");
+        // What a `catch` sees is unchanged: advice is for the terminal.
+        assert_eq!(err.message, "unexpected character '@'");
+    }
+
+    #[test]
+    fn a_report_without_help_is_byte_identical() {
+        let src = "let x = @";
+        let err = QuinceError::new("unexpected character '@'", Span::new(8, 9));
+        assert!(!err.report(src, "test.qn").contains("help"), "no help line");
     }
 
     #[test]

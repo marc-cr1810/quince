@@ -17,8 +17,8 @@ use quince::token::TokenKind;
 use quince::value::Value;
 
 const KEYWORDS: &[&str] = &[
-    "fn", "class", "extends", "self", "super", "let", "final", "const", "if", "else", "while",
-    "for", "in", "return", "try", "catch", "throw", "true", "false", "nil",
+    "fn", "op", "class", "extends", "self", "super", "let", "final", "const", "if", "else",
+    "while", "for", "in", "return", "try", "catch", "throw", "true", "false", "nil",
 ];
 
 const META_COMMANDS: &[&str] = &[
@@ -366,6 +366,7 @@ fn push_plain_or_bracket(
 fn highlight_token(kind: TokenKind, text: &str, use_color: bool) -> String {
     match kind {
         TokenKind::Fn
+        | TokenKind::Op
         | TokenKind::Class
         | TokenKind::Extends
         | TokenKind::Let

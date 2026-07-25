@@ -1,5 +1,5 @@
 class Point {
-    fn init(x) { self.x = x }
+    op init(x) { self.x = x }
 }
 const p = Point(1)
 p.x = 2

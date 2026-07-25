@@ -1,6 +1,6 @@
 # A class is a value bound to its name, and calling it builds an instance.
 class Point {
-    fn init(x, y) {
+    op init(x, y) {
         self.x = x
         self.y = y
     }
@@ -24,7 +24,7 @@ print(p.x, p.y)
 # `self` is a parameter the parser wrote, so it is an ordinary local. That is
 # what lets a closure nested in a method capture it.
 class Counter {
-    fn init() {
+    op init() {
         self.n = 0
     }
     fn stepper() {
@@ -75,7 +75,7 @@ print(Empty().describe())
 
 # A field shadows a method of the same name, and is called without a receiver.
 class Shadow {
-    fn init() {
+    op init() {
         self.value = fn_two
     }
     fn value() {

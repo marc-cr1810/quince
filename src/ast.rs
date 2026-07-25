@@ -186,12 +186,52 @@ pub const SELF: &str = "self";
 /// reaches it through the same chain that carries [`SELF`].
 pub const SUPER: &str = "super";
 
+/// A method the language calls on the program's behalf.
+///
+/// These are the methods nobody writes a call to: `Point(1, 2)` reaches `init`,
+/// and — once the rest land — `len(x)`, `x == y`, `x[i]`, `if x`, and
+/// `for x in y` will reach the others. Declared with `op` rather than `fn` so
+/// that being one is stated rather than inferred from the name, which is what
+/// makes the misspelling an error instead of a method nothing ever calls.
+///
+/// A closed set on purpose. `Op::from_name` is the only way in, so `op lenght`
+/// cannot compile, and every member has to be listed in [`OPS`] to be reachable
+/// — see `every_listed_op_round_trips_through_its_name`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Op {
+    /// Runs on a freshly built instance. `Point(1, 2)` reaches it.
+    Init,
+}
+
+/// Every [`Op`], for validating a declaration and for listing them in the error
+/// when one does not exist.
+pub static OPS: &[Op] = &[Op::Init];
+
+impl Op {
+    /// The name written after `op`.
+    ///
+    /// An exhaustive match, so a new member cannot be added without giving it
+    /// one — the same guard [`crate::error::ErrorKind::class_name`] uses.
+    pub fn name(self) -> &'static str {
+        match self {
+            Op::Init => "init",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Op> {
+        OPS.iter().copied().find(|op| op.name() == name)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct FnDecl {
     pub name: String,
     /// For a method, `self` is `params[0]`; see [`SELF`].
     pub params: Vec<Param>,
     pub body: Block,
+    /// Set when the declaration used `op`, which the parser allows only inside a
+    /// class body — so a plain function always leaves this `None`.
+    pub op: Option<Op>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -310,4 +350,36 @@ pub enum StmtKind {
     /// on whatever was thrown.
     Throw(Expr),
     Block(Block),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_listed_op_round_trips_through_its_name() {
+        for op in OPS {
+            assert_eq!(
+                Op::from_name(op.name()),
+                Some(*op),
+                "{} does not look up",
+                op.name()
+            );
+        }
+    }
+
+    #[test]
+    fn no_two_ops_share_a_name() {
+        let mut names: Vec<&str> = OPS.iter().map(|op| op.name()).collect();
+        names.sort_unstable();
+        let count = names.len();
+        names.dedup();
+        assert_eq!(names.len(), count, "two ops answer to the same name");
+    }
+
+    #[test]
+    fn a_name_that_is_not_an_op_does_not_look_up() {
+        assert_eq!(Op::from_name("innit"), None);
+        assert_eq!(Op::from_name(""), None);
+    }
 }
