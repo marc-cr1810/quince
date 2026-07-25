@@ -285,5 +285,29 @@ pub enum StmtKind {
         slot: Option<Slot>,
     },
     Return(Option<Expr>),
+    /// `try { … } catch e { … }`.
+    ///
+    /// The handler is mandatory. A `try` with no `catch` would only be useful
+    /// with a `finally` to pair it with, and there is deliberately no `finally` —
+    /// see Errors as values in DESIGN.md.
+    ///
+    /// The two blocks are separate scopes, and the try block's bindings are not
+    /// visible to the handler on purpose: a `let` inside `try` may not have run
+    /// when the error fired, so sharing one scope would let the handler read a
+    /// slot that was never written.
+    Try {
+        body: Block,
+        /// The name the caught error is bound to. It lives in the handler's
+        /// scope, taking slot 0 there, exactly as a `for` loop variable does.
+        binding: String,
+        handler: Block,
+        slot: Option<Slot>,
+    },
+    /// `throw expr`, where `expr` must evaluate to an instance of `Error`.
+    ///
+    /// The restriction is checked at the `throw` rather than at the `catch`, so
+    /// the error names the mistake instead of surfacing later as a missing field
+    /// on whatever was thrown.
+    Throw(Expr),
     Block(Block),
 }

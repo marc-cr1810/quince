@@ -1,0 +1,6 @@
+class Plain {
+    fn init() {
+        self.message = "looks like one"
+    }
+}
+throw Plain()

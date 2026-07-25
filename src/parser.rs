@@ -71,6 +71,8 @@ impl Parser {
             TokenKind::While => self.while_stmt(),
             TokenKind::For => self.for_stmt(),
             TokenKind::Return => self.return_stmt(),
+            TokenKind::Try => self.try_stmt(),
+            TokenKind::Throw => self.throw_stmt(),
             TokenKind::LBrace => {
                 let block = self.block()?;
                 Ok(Stmt {
@@ -264,6 +266,39 @@ impl Parser {
         self.end_of_statement()?;
         Ok(Stmt {
             kind: StmtKind::Return(value),
+            span,
+        })
+    }
+
+    /// Parses `try { … } catch e { … }`.
+    ///
+    /// `catch e` takes no parentheses, matching `if cond {` and `for x in xs {` —
+    /// nothing else in the grammar parenthesises a header and this does not start.
+    fn try_stmt(&mut self) -> Result<Stmt, QuinceError> {
+        let start = self.advance().span;
+        let body = self.block()?;
+        self.expect(TokenKind::Catch, "after the `try` block")?;
+        let (binding, _) = self.expect_ident("after `catch`")?;
+        let handler = self.block()?;
+        let span = start.to(handler.span);
+        Ok(Stmt {
+            kind: StmtKind::Try {
+                body,
+                binding,
+                handler,
+                slot: None,
+            },
+            span,
+        })
+    }
+
+    fn throw_stmt(&mut self) -> Result<Stmt, QuinceError> {
+        let start = self.advance().span;
+        let value = self.expression()?;
+        let span = start.to(value.span);
+        self.end_of_statement()?;
+        Ok(Stmt {
+            kind: StmtKind::Throw(value),
             span,
         })
     }

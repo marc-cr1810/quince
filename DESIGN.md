@@ -826,9 +826,11 @@ session to it.
 
 ## Errors as values — `try`, `catch`, `throw`
 
-**Designed, not built.** This section is the decision record written before the code, so
-that what gets built is the thing that was argued for rather than the first thing that
-compiled.
+**Done.** This section was the decision record written before the code, so that what got
+built is the thing that was argued for rather than the first thing that compiled. It held:
+the unwind discipline needed no changes, reification stayed at the `catch`, and `throw`
+landed with it. Two things the sketch did not settle are recorded below — what `throw`
+accepts, and what `kind` reifies into.
 
 ```
 try {
@@ -896,7 +898,58 @@ case, so a thrown instance is what the handler binds, unchanged and unwrapped.
 
 The cost is honest: `Error` is an ordinary global, so a program can shadow it. That is the
 same exposure `print` and `len` already have, and inventing a protected namespace for one
-name is worse than the thing it prevents.
+name is worse than the thing it prevents. What a `catch` reifies into is *not* exposed to
+it, though: the class handles are captured at startup, before any user code runs, so
+rebinding the name changes what `Error(...)` builds and not what a handler binds.
+
+`Error` is defined in Quince rather than in Rust — a nine-line prelude compiled at startup.
+That is what makes `class MyError extends Error` need no machinery at all: `init` is found
+through the same parent walk a user's own subclass uses, so a subclass declaring no `init`
+takes a message, and `Bare("oops").message` works without `Bare` saying anything.
+
+### `throw` takes an instance of `Error`, and nothing else
+
+The sketch left this open, and the case that settled it is `throw 10` followed by a handler
+reading `e.message`. Binding whatever was thrown is the transparent choice, and it costs
+this: `e` is an `int`, the field access falls through to the int's method table, and the
+program dies with ``int has no method `message` `` pointing at the handler — with the
+thrown `10` nowhere in the message and the `throw` that caused it several lines away.
+
+So the check is at the `throw`, where the error can name the mistake. It also buys an
+invariant worth having: everything a handler binds has a `message` and a `kind`, because
+everything it binds extends `Error`. Bind-anything breaks that and makes every handler
+defensive about what it just caught.
+
+The objection to refusing — that the check is itself a raise, from inside the machinery that
+raises — turned out to be nothing. It is an ordinary raise site with an ordinary kind, and
+it is catchable, because nothing about it is reentrant. Python refuses `raise 10` for the
+same reason and it is the right call.
+
+That restriction also narrowed the propagating type. A payload can only ever be an instance,
+so `QuinceError::payload` is an `Option<ObjId>` rather than an `Option<Value>` — which keeps
+`QuinceError` `PartialEq`, which `Value` is not.
+
+### `kind` names a class, and the classes are generated
+
+`kind` had one job in the sketch — tell reification what class to build — and it does that
+by naming one: `ErrorKind::Index` reifies into `IndexError`. The classes are generated from
+`ERROR_KINDS` at startup as `class IndexError extends Error {}`, so adding a kind cannot
+leave its class undeclared. Getting that wrong would otherwise wait until something raised
+the new kind and a handler went looking for a global nobody bound.
+
+`class_name` is an exhaustive match, which is what makes this hold: a new variant cannot be
+added without naming its class in the same edit.
+
+The instance carries `kind` as a field, and `Error.init` sets it from `type(self)` — which is
+already the receiver's class name. So a user's `class ParseError extends Error` that calls
+`super.init(message)` reports `ParseError` without the prelude knowing it exists. Reification
+sets both fields directly rather than calling `init`, because that path is the runtime
+building an object rather than a program asking for one.
+
+Only some of the forty-odd raise sites are classified. `new` fills in `Runtime`, so the rest
+kept compiling untouched and read as the base `Error` — a gap rather than a lie, and one that
+closes a site at a time. The ones a program is likely to catch are done: type, name,
+attribute, index, key, frozen, recursion, zero division, overflow.
 
 ### The payload crosses the unwind unrooted
 
@@ -928,9 +981,47 @@ above and is a reason to keep that discipline exactly as it is.
 ### What this does not bring
 
 **No `finally`.** It earns its keep by releasing things, and the language holds no
-releasable resource — no files, no sockets, no locks. Adding it now would mean deciding
-what a `return` inside a `finally` does to a `return` inside its `try`, which is a genuinely
-hard question asked on behalf of no one. It waits for I/O.
+releasable resource — no files, no sockets, no locks. It waits for I/O.
+
+The second reason was going to be that adding it means deciding what a `return` inside a
+`finally` does to a `return` inside its `try`. That reason does not survive contact with the
+field, and the correction is worth recording because it changes what to build later rather
+than whether to build it now.
+
+Five languages have `finally`, and the ones that allowed abrupt exit from it all regret it.
+Java defines the `finally` block's reason for leaving as *replacing* the try block's, so a
+`return` there discards a pending exception silently — SpotBugs and Error Prone both flag it.
+JavaScript and Ruby's `ensure` do the same. Python is walking it back: [PEP
+765](https://peps.python.org/pep-0765/) withdraws `return`/`break`/`continue` that exit a
+`finally`, with CPython emitting a `SyntaxWarning`, on the grounds that the semantics are
+surprising — its second attempt, after PEP 601 was rejected. C# is the one that got it right
+first: leaving a `finally` by `return`, `break`, or `goto` is a *compile error*, and Swift
+forbids the same for `defer`. That rule collapses the whole precedence question to nothing,
+and it costs a static check.
+
+So the hard question is one a language may simply refuse to answer, and if `finally` ever
+lands here it should refuse it in the resolver. What remains is masking — a `finally` that
+throws while an error is already in flight — which every language patched late and none
+patched first: Java's `addSuppressed` arrived in 7 with try-with-resources, Python chains
+through `__context__`, and JavaScript's `using` proposal reinvented suppression twenty years
+after Java. With `kind` in place, Quince's version is a `cause` field and one change to
+`report`, cheap if designed alongside `kind` rather than bolted on.
+
+The larger signal is that everyone is migrating *away* from `finally` toward scoped
+ownership — C++ RAII, Rust's `Drop`, `defer` in Go, Zig, and Swift, `with` in Python, `using`
+in C# and JavaScript. Quince is written in one of the languages that decided a cleanup block
+was the manual version of something the type can do once. So when there is a file to close,
+the thing to reach for is probably a `with`-shaped form over a `close` protocol slot, landing
+on the protocol-slot work rather than as a second mechanism beside it.
+
+Both RAII languages also make a destructor that throws *during* unwinding fatal —
+`std::terminate` in C++, abort in Rust. Neither was willing to own two errors in flight at
+once, which is the same masking problem seen from the other end.
+
+One honest cost of waiting: `Flow` has two arms today, so the precedence table `finally`
+would need has three rows. `break` and `continue` make it five arms, and every one needs an
+answer. The table is smallest now, so this is worth revisiting when loop control flow lands
+rather than drifting until I/O shows up.
 
 **No typed `catch`.** `catch e` binds everything raised. `catch e: TypeError` is a
 *narrowing* of a form that already parses, so it stays addable later without breaking a
@@ -983,8 +1074,8 @@ and `in`. Adding them turned up a use-after-free in the collector that had been
 there since it landed — see Collection — so the root set grew to cover intermediate
 expression values at the same time.
 
-Still missing: `try`/`catch`, and the protocol slots that would let a user class decide
-its own truthiness, printing, equality, indexing, or iteration. `push`, `keys`,
+Still missing: the protocol slots that would let a user class decide its own truthiness,
+printing, equality, indexing, or iteration. `try`/`catch`/`throw` landed in v0.5. `push`, `keys`,
 `values`, and `remove` began as free functions standing in for methods; dispatch landed
 and they moved onto their types, leaving `print`, `len`, and `type` as the only globals.
 There are no tuples, which is why iterating a dict yields keys rather than pairs. The
@@ -1028,10 +1119,38 @@ piece of work and are listed under v0.5 rather than left implied here.
 **v0.5 — robustness**
 `try`/`catch` and span-accurate diagnostics everywhere. GC is done.
 
-`try`/`catch`/`throw` is designed but not built — see Errors as values above. It goes
-first of the three, because it settles what a `QuinceError` *is* before protocol slots
-start threading one through `display`, `is_truthy`, and `equals` at every call site. The
-diagnostics sweep goes last, when nothing else is still moving spans around.
+`try`/`catch`/`throw` is **done** — see Errors as values above. It went first of the three,
+because it settles what a `QuinceError` *is* before protocol slots start threading one
+through `display`, `is_truthy`, and `equals` at every call site. The diagnostics sweep goes
+last, when nothing else is still moving spans around.
+
+The unwind discipline turned out to be the whole feature: because every site that pushes a
+scope, a temp, or a frame restores it before propagating, `catch` needed no unwinding
+machinery of its own. What the milestone actually added was a reason to *test* that
+discipline — while an error was fatal, a site that forgot to restore leaked roots into a
+process about to exit, where nothing could observe it.
+`a_loop_that_catches_does_not_grow_the_heap` is what observes it now.
+
+`a_thrown_payload_survives_the_unwind` guards the other half, and it is the one to keep an
+eye on. A thrown instance is rooted by nothing for the whole unwind, alive only because
+collection happens between statements and unwinding executes none. The test was checked by
+forcing a collection at the `catch` with the payload unrooted, which fails it — so it is a
+real guard and not a passing assertion. It is also the test that would fail the day `alloc`
+learns to collect, or the day anything runs statements mid-unwind.
+
+An uncaught error reports its kind as `error[IndexError]: …`, in that bracket rather than as
+a `TypeError: …` prefix, because this report already borrows rustc's shape — the `-->`, the
+gutter, the caret — and rustc puts its code in exactly that position.
+
+The bracket is omitted when it would say nothing: an unclassified error reads `error: …`
+exactly as it did before kinds existed, and so does a literal `throw Error("…")`, since
+`error[Error]` is noise. That leaves the bracket meaning "the kind is known", which is a
+standing nudge to classify the raise sites that still are not. A `throw` reports the class
+that was actually thrown, so a `ParseError` says `error[ParseError]` — which is why
+`QuinceError` carries a `label` beside its `kind`: the name lives on the instance's class and
+`report` has no heap to look it up in, so it is captured at the raise.
+
+What v0.5 still owes: protocol slots, then the diagnostics sweep.
 
 `final` and `const` landed here first, out of order, because they were a rename with a
 feature hiding inside it — see Bindings above. Renaming a keyword only gets cheaper the

@@ -230,6 +230,28 @@ impl Resolver {
                 None => Ok(()),
             },
 
+            StmtKind::Try {
+                body,
+                binding,
+                handler,
+                slot,
+            } => {
+                // Two scopes, not one. A `let` inside the try block may not have
+                // run when the error fired, so a handler that could see its slots
+                // could read one that was never written — which is the "used
+                // before it is declared" case this pass already reports, and
+                // separate scopes mean it cannot arise here at all.
+                self.block(body)?;
+                // The binding belongs to the handler's scope and takes slot 0
+                // there, the same treatment `for x in xs` gets.
+                handler.slot_count =
+                    self.scoped(&mut handler.stmts, &[(binding.clone(), true, span)])?;
+                *slot = Some(Slot::Local { hops: 0, index: 0 });
+                Ok(())
+            }
+
+            StmtKind::Throw(value) => self.expr(value),
+
             StmtKind::Block(block) => self.block(block),
         }
     }

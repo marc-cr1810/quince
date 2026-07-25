@@ -1,0 +1,8 @@
+# A `let` inside `try` may not have run when the error fired, so the
+# handler deliberately cannot see it.
+try {
+    let inner = 1
+    print(nope)
+} catch e {
+    print(inner)
+}

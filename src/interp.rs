@@ -6,7 +6,7 @@ use crate::ast::{BinaryOp, Block, Expr, ExprKind, LogicalOp, Stmt, StmtKind, Una
 use crate::class::{self, Instance, UserClass};
 use crate::dict::{Dict, Key, NotAKey};
 use crate::env::{self, AssignError, Env, Globals};
-use crate::error::QuinceError;
+use crate::error::{ERROR_KINDS, ErrorKind, QuinceError};
 use crate::heap::{Heap, ObjId, Object};
 use crate::token::Span;
 use crate::value::{BoundMethod, Function, Native, Value};
@@ -52,6 +52,35 @@ pub fn with_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
     })
 }
 
+/// The base class every error extends, defined in Quince rather than in Rust.
+///
+/// That is not a compromise for want of better machinery — it is what makes
+/// `class MyError extends Error` work with no new machinery at all, reusing the
+/// `extends` chain and the method lookup that classes already have. A subclass
+/// that declares no `init` inherits this one, so `TypeError("boom")` builds a
+/// perfectly ordinary instance with a `message`.
+///
+/// `kind` is set from `type(self)`, which is already the receiver's class name —
+/// so a user's `class ParseError extends Error` that calls `super.init(message)`
+/// reports `ParseError` without anything here knowing it exists.
+const BASE_ERROR: &str = "\
+class Error {
+    fn init(message) {
+        self.message = message
+        self.kind = type(self)
+    }
+}
+";
+
+/// The message field, which is for humans.
+const MESSAGE: &str = "message";
+
+/// The kind field, which is what a program should match on.
+///
+/// Message strings get reworded; a kind is the half that stays put, and it is
+/// what a typed `catch e: TypeError` will eventually filter on.
+const KIND: &str = "kind";
+
 /// Why a statement stopped executing.
 enum Flow {
     Normal,
@@ -90,6 +119,14 @@ pub struct Interp {
     temps: Vec<Value>,
     depth: usize,
     out: Box<dyn Write>,
+    /// The class each [`ErrorKind`] reifies into, captured once at startup.
+    ///
+    /// Held here rather than looked up in globals at `catch` time because `Error`
+    /// and its subclasses are ordinary globals, which a program is free to
+    /// shadow — the same exposure `print` and `len` already have. What a handler
+    /// binds must not depend on whether someone rebound the name, so the handles
+    /// are taken before any user code can run.
+    error_classes: Vec<(ErrorKind, ObjId)>,
 }
 
 impl Interp {
@@ -105,14 +142,71 @@ impl Interp {
             heap.globals_mut(globals)
                 .declare(native.name, Value::Native(native), false);
         }
-        Interp {
+        let mut interp = Interp {
             heap,
             globals,
             scopes: Vec::new(),
             temps: Vec::new(),
             depth: 0,
             out,
+            error_classes: Vec::new(),
+        };
+        interp.install_error_classes();
+        interp
+    }
+
+    /// Declares `Error` and one subclass per [`ErrorKind`], then remembers them.
+    ///
+    /// The subclasses are generated from [`ERROR_KINDS`] rather than spelled out,
+    /// so adding a kind cannot leave its class undeclared — the failure that
+    /// would otherwise wait until something raised that kind and a `catch` went
+    /// looking for a global that was never bound.
+    fn install_error_classes(&mut self) {
+        // Taken from the enum rather than written out, so the name in
+        // `BASE_ERROR` and the name subclasses extend cannot drift apart.
+        let base = ErrorKind::Runtime.class_name();
+        let mut source = String::from(BASE_ERROR);
+        for kind in ERROR_KINDS {
+            let name = kind.class_name();
+            if name != base {
+                // An empty body on purpose: `init` comes from `Error` through the
+                // same lookup a user's subclass uses, so there is nothing to say.
+                source.push_str(&format!("class {name} extends {base} {{}}\n"));
+            }
         }
+
+        let program = crate::compile(&source).expect("the error prelude should compile");
+        self.run(&program)
+            .expect("the error prelude only declares classes");
+
+        // The method bodies outlive `program`: a class holds `Function` objects
+        // holding `Rc<FnDecl>`, so dropping the statements leaves the ASTs alive.
+        self.error_classes = ERROR_KINDS
+            .iter()
+            .map(|kind| {
+                let name = kind.class_name();
+                match self.heap.globals(self.globals).get(name) {
+                    Some(Value::Class(id)) => (*kind, *id),
+                    _ => unreachable!("the prelude declares `{name}` as a class"),
+                }
+            })
+            .collect();
+    }
+
+    /// The class an error of `kind` reifies into.
+    ///
+    /// A linear scan over a list this short beats hashing it, and it is reached
+    /// only when an error is actually caught.
+    fn error_class(&self, kind: ErrorKind) -> ObjId {
+        self.error_classes
+            .iter()
+            .find(|(against, _)| *against == kind)
+            .map(|(_, id)| *id)
+            .unwrap_or_else(|| {
+                // `Thrown` carries its own class and never asks; anything else
+                // missing means `install_error_classes` and `ERROR_KINDS` drifted.
+                panic!("no class installed for {kind:?}")
+            })
     }
 
     pub fn run(&mut self, program: &[Stmt]) -> Result<(), QuinceError> {
@@ -159,7 +253,6 @@ impl Interp {
             .map(|(k, v)| (k.to_string(), v.clone()))
             .collect()
     }
-
 
     // -- garbage collection ------------------------------------------------
 
@@ -324,8 +417,129 @@ impl Interp {
                 Ok(Flow::Return(value))
             }
 
+            StmtKind::Try {
+                body,
+                handler,
+                slot,
+                ..
+            } => self.exec_try(body, handler, slot, env),
+
+            StmtKind::Throw(value) => {
+                // Evaluating the operand can fail for reasons of its own, and that
+                // error is the one to report — not whatever `throw` would have made
+                // of a value it never got.
+                let raised = self.eval(value, env)?;
+                Err(self.throw(raised, stmt.span))
+            }
+
             StmtKind::Block(block) => self.exec_block(block, env),
         }
+    }
+
+    /// Runs a `try` block, handing an error to its handler.
+    ///
+    /// `catch` needs no unwinding machinery of its own. Every site that pushes a
+    /// scope, a temp, or a frame binds the result before it pops rather than
+    /// propagating with `?`, so by the time a handler runs, `scopes`, `temps`, and
+    /// `depth` are already back to their depth at the `try`. That discipline
+    /// exists for the collector, and this feature is affordable because of it.
+    ///
+    /// What changes is not the correctness but the consequence of getting it
+    /// wrong: an error used to be fatal, so a site that forgot to restore leaked
+    /// roots into a process about to exit. A caught error resumes with those
+    /// stacks still deep, which turns the same latent bug into unbounded growth —
+    /// see `a_loop_that_catches_does_not_grow_the_heap`.
+    fn exec_try(
+        &mut self,
+        body: &Block,
+        handler: &Block,
+        slot: &Option<Slot>,
+        env: ObjId,
+    ) -> Result<Flow, QuinceError> {
+        let err = match self.exec_block(body, env) {
+            // A `return` inside a `try` travels as `Flow::Return`, a value in the
+            // `Ok` channel, and errors travel in the `Err` channel. It passes
+            // through untouched because it is not the kind of thing a handler can
+            // see. `finally` is precisely the feature that would force those two
+            // channels to meet, and there deliberately is none.
+            Ok(flow) => return Ok(flow),
+            Err(err) => err,
+        };
+
+        let index = match resolved(slot) {
+            Slot::Local { index, .. } => index,
+            Slot::Global => unreachable!("a catch binding is always a local"),
+        };
+
+        // A thrown payload crossed the unwind rooted by nothing, surviving only
+        // because collection happens between statements and unwinding executes
+        // none. Nothing between here and the `set` below reaches a safe point —
+        // `alloc` does not collect — so it is still alive to be bound. A
+        // `finally` would have run statements during that unwind, and this is the
+        // line where that would have become a use-after-free.
+        let caught = self.reify(&err);
+        let scope = self
+            .heap
+            .alloc(Object::Env(Env::new(Some(env), handler.slot_count)));
+        self.heap.env_mut(scope).set(index, caught);
+        self.exec_scoped(&handler.stmts, scope)
+    }
+
+    /// Raises `value`, which has to be an instance of `Error`.
+    ///
+    /// Checked here rather than at the `catch` so the error names the mistake.
+    /// Allowing anything to be thrown would mean a handler binding a bare `int`,
+    /// and the failure would surface as a missing field on it — a complaint about
+    /// `int` methods, several lines from the `throw` that caused it, with the
+    /// thrown value nowhere in the message.
+    ///
+    /// It also keeps a promise worth having: everything a handler binds has a
+    /// `message` and a `kind`, because everything it binds extends `Error`.
+    /// Returns the error to raise rather than raising it, because the caller is
+    /// the one that owes an `Err` either way — evaluating the operand can fail on
+    /// its own, and those two failures must not be confused for each other.
+    fn throw(&mut self, raised: Value, span: Span) -> QuinceError {
+        let Value::Instance(id) = raised else {
+            return QuinceError::new(
+                format!(
+                    "`throw` needs an instance of `Error`, but was given {}",
+                    raised.type_name(&self.heap)
+                ),
+                span,
+            )
+            .with_kind(ErrorKind::Type);
+        };
+
+        let class = self.heap.instance(id).class;
+        if !self.descends_from_error(class) {
+            return QuinceError::new(
+                format!(
+                    "`throw` needs an instance of `Error`, but `{}` does not extend it",
+                    self.heap.class(class).name
+                ),
+                span,
+            )
+            .with_kind(ErrorKind::Type);
+        }
+
+        // Both read for the report an uncaught throw prints. The class is what it
+        // reports *as*, so a `ParseError` says its own name rather than `Error`.
+        //
+        // A subclass that overrides `init` without calling `super.init` has no
+        // `message`, so the class name stands in — a worse message, but never a
+        // second error raised while reporting the first one.
+        let name = self.heap.class(class).name.clone();
+        let message = match self
+            .heap
+            .instance(id)
+            .fields
+            .get(&Key::Str(Rc::from(MESSAGE)))
+        {
+            Some(Value::Str(message)) => message.to_string(),
+            Some(other) => other.display(&self.heap),
+            None => name.clone(),
+        };
+        QuinceError::thrown(id, name, message, span)
     }
 
     fn exec_for(
@@ -347,7 +561,8 @@ impl Interp {
                 return Err(QuinceError::new(
                     format!("cannot iterate over {}", other.type_name(&self.heap)),
                     iter.span,
-                ));
+                )
+                .with_kind(ErrorKind::Type));
             }
         };
 
@@ -391,6 +606,57 @@ impl Interp {
             .heap
             .alloc(Object::Env(Env::new(Some(env), block.slot_count)));
         self.exec_scoped(&block.stmts, scope)
+    }
+
+    /// Turns an error into the value a handler binds.
+    ///
+    /// The one place an error becomes a Quince object, and the only place that
+    /// has the `&mut Heap` to build one — which is the whole reason raising stays
+    /// cheap. Half the raise sites hold `&Heap`, and an uncaught error is about
+    /// to be printed and discarded, so an error that nobody catches allocates
+    /// nothing at all.
+    ///
+    /// Allocates but reaches no safe point, so the instance is safe unrooted
+    /// until the caller stores it.
+    fn reify(&mut self, err: &QuinceError) -> Value {
+        // A `throw` already built its instance, and the handler binds that same
+        // object unchanged and unwrapped — which is what makes a user's own
+        // fields survive the round trip.
+        if let Some(id) = err.payload {
+            return Value::Instance(id);
+        }
+
+        let class = self.error_class(err.kind);
+        let mut fields = Dict::new();
+        fields.insert(
+            Key::Str(Rc::from(MESSAGE)),
+            Value::from(err.message.as_str()),
+        );
+        // Set directly rather than by calling `init`, because this is the runtime
+        // building the object rather than a program asking for one. The values
+        // match what `Error.init` would have produced.
+        fields.insert(Key::Str(Rc::from(KIND)), Value::from(err.kind.class_name()));
+        Value::Instance(
+            self.heap
+                .alloc(Object::Instance(Instance { class, fields })),
+        )
+    }
+
+    /// Whether `class` is `Error` or descends from it.
+    ///
+    /// Walks the same parent chain `UserClass::method` does, and terminates for
+    /// the same reason: a parent is evaluated before the class naming it is
+    /// bound, so the chain cannot contain a cycle.
+    fn descends_from_error(&self, class: ObjId) -> bool {
+        let base = self.error_class(ErrorKind::Runtime);
+        let mut at = Some(class);
+        while let Some(id) = at {
+            if id == base {
+                return true;
+            }
+            at = self.heap.class(id).parent;
+        }
+        false
     }
 
     /// Stores a freshly declared value in the slot the resolver picked for it.
@@ -670,6 +936,7 @@ impl Interp {
                 .cloned()
                 .ok_or_else(|| {
                     QuinceError::new(format!("undefined variable `{}`", var.name), span)
+                        .with_kind(ErrorKind::Name)
                 }),
         }
     }
@@ -796,6 +1063,7 @@ impl Interp {
                         format!("key {} is not in the dict", index.repr(&self.heap)),
                         span,
                     )
+                    .with_kind(ErrorKind::Key)
                 })
             }
             // Indexed by character, not by byte, because `len` already counts
@@ -880,7 +1148,8 @@ impl Interp {
                     return Err(QuinceError::new(
                         format!("recursion limit of {MAX_DEPTH} calls exceeded"),
                         span,
-                    ));
+                    )
+                    .with_kind(ErrorKind::Recursion));
                 }
 
                 // Parameters are the body scope's first slots, in order, so
@@ -942,7 +1211,8 @@ impl Interp {
             other => Err(QuinceError::new(
                 format!("{} is not callable", other.type_name(&self.heap)),
                 span,
-            )),
+            )
+            .with_kind(ErrorKind::Type)),
         }
     }
 
@@ -1098,6 +1368,7 @@ impl Interp {
             format!("{} has {what} `{name}`", receiver.type_name(&self.heap)),
             span,
         )
+        .with_kind(ErrorKind::Attr)
     }
 
     // -- operators ---------------------------------------------------------
@@ -1105,10 +1376,9 @@ impl Interp {
     fn unary(&self, op: UnaryOp, value: Value, span: Span) -> Result<Value, QuinceError> {
         match (op, value) {
             (UnaryOp::Not, value) => Ok(Value::Bool(!value.is_truthy(&self.heap))),
-            (UnaryOp::Neg, Value::Int(n)) => n
-                .checked_neg()
-                .map(Value::Int)
-                .ok_or_else(|| QuinceError::new("integer overflow", span)),
+            (UnaryOp::Neg, Value::Int(n)) => n.checked_neg().map(Value::Int).ok_or_else(|| {
+                QuinceError::new("integer overflow", span).with_kind(ErrorKind::Overflow)
+            }),
             (UnaryOp::Neg, Value::Float(n)) => Ok(Value::Float(-n)),
             (UnaryOp::Neg, other) => Err(QuinceError::new(
                 format!("cannot negate {}", other.type_name(&self.heap)),
@@ -1263,38 +1533,42 @@ fn floor_div(a: i64, b: i64) -> Option<i64> {
 /// Integer arithmetic. Reports overflow rather than wrapping.
 fn int_op(op: BinaryOp, a: i64, b: i64, span: Span) -> Result<Value, QuinceError> {
     use BinaryOp::*;
-    let overflow = || QuinceError::new("integer overflow", span);
+    let overflow = || QuinceError::new("integer overflow", span).with_kind(ErrorKind::Overflow);
 
-    let value = match op {
-        Add => Value::Int(a.checked_add(b).ok_or_else(overflow)?),
-        Sub => Value::Int(a.checked_sub(b).ok_or_else(overflow)?),
-        Mul => Value::Int(a.checked_mul(b).ok_or_else(overflow)?),
-        // True division always leaves the integers behind, so `1 / 2` is `0.5`
-        // rather than `0`. `//` is there when an int is wanted.
-        Div => {
-            if b == 0 {
-                return Err(QuinceError::new("division by zero", span));
+    let value =
+        match op {
+            Add => Value::Int(a.checked_add(b).ok_or_else(overflow)?),
+            Sub => Value::Int(a.checked_sub(b).ok_or_else(overflow)?),
+            Mul => Value::Int(a.checked_mul(b).ok_or_else(overflow)?),
+            // True division always leaves the integers behind, so `1 / 2` is `0.5`
+            // rather than `0`. `//` is there when an int is wanted.
+            Div => {
+                if b == 0 {
+                    return Err(QuinceError::new("division by zero", span)
+                        .with_kind(ErrorKind::ZeroDivision));
+                }
+                Value::Float(a as f64 / b as f64)
             }
-            Value::Float(a as f64 / b as f64)
-        }
-        FloorDiv => {
-            if b == 0 {
-                return Err(QuinceError::new("division by zero", span));
+            FloorDiv => {
+                if b == 0 {
+                    return Err(QuinceError::new("division by zero", span)
+                        .with_kind(ErrorKind::ZeroDivision));
+                }
+                Value::Int(floor_div(a, b).ok_or_else(overflow)?)
             }
-            Value::Int(floor_div(a, b).ok_or_else(overflow)?)
-        }
-        Rem => {
-            if b == 0 {
-                return Err(QuinceError::new("division by zero", span));
+            Rem => {
+                if b == 0 {
+                    return Err(QuinceError::new("division by zero", span)
+                        .with_kind(ErrorKind::ZeroDivision));
+                }
+                Value::Int(a.checked_rem(b).ok_or_else(overflow)?)
             }
-            Value::Int(a.checked_rem(b).ok_or_else(overflow)?)
-        }
-        Lt => Value::Bool(a < b),
-        Le => Value::Bool(a <= b),
-        Gt => Value::Bool(a > b),
-        Ge => Value::Bool(a >= b),
-        Eq | Ne | In => unreachable!("handled before the numeric dispatch"),
-    };
+            Lt => Value::Bool(a < b),
+            Le => Value::Bool(a <= b),
+            Gt => Value::Bool(a > b),
+            Ge => Value::Bool(a >= b),
+            Eq | Ne | In => unreachable!("handled before the numeric dispatch"),
+        };
     Ok(value)
 }
 
@@ -1305,11 +1579,23 @@ fn float_op(op: BinaryOp, a: f64, b: f64, span: Span) -> Result<Value, QuinceErr
         Sub => Value::Float(a - b),
         Mul => Value::Float(a * b),
         // Kept an error rather than yielding infinity, to match integer division.
-        Div if b == 0.0 => return Err(QuinceError::new("division by zero", span)),
+        Div if b == 0.0 => {
+            return Err(
+                QuinceError::new("division by zero", span).with_kind(ErrorKind::ZeroDivision)
+            );
+        }
         Div => Value::Float(a / b),
-        FloorDiv if b == 0.0 => return Err(QuinceError::new("division by zero", span)),
+        FloorDiv if b == 0.0 => {
+            return Err(
+                QuinceError::new("division by zero", span).with_kind(ErrorKind::ZeroDivision)
+            );
+        }
         FloorDiv => Value::Float((a / b).floor()),
-        Rem if b == 0.0 => return Err(QuinceError::new("division by zero", span)),
+        Rem if b == 0.0 => {
+            return Err(
+                QuinceError::new("division by zero", span).with_kind(ErrorKind::ZeroDivision)
+            );
+        }
         Rem => Value::Float(a % b),
         Lt => Value::Bool(a < b),
         Le => Value::Bool(a <= b),
@@ -1331,6 +1617,7 @@ fn frozen(heap: &Heap, value: &Value, span: Span) -> QuinceError {
         format!("cannot modify `const` {}", value.type_name(heap)),
         span,
     )
+    .with_kind(ErrorKind::Frozen)
 }
 
 fn type_error(heap: &Heap, op: BinaryOp, lhs: &Value, rhs: &Value, span: Span) -> QuinceError {
@@ -1352,6 +1639,7 @@ fn type_error(heap: &Heap, op: BinaryOp, lhs: &Value, rhs: &Value, span: Span) -
         ),
         span,
     )
+    .with_kind(ErrorKind::Type)
 }
 
 /// Resolves a subscript against a length, accepting Python-style negatives.
@@ -1372,7 +1660,8 @@ fn resolve_index(
                 index.type_name(heap)
             ),
             span,
-        ));
+        )
+        .with_kind(ErrorKind::Type));
     };
 
     let offset = if *raw < 0 { *raw + len as i64 } else { *raw };
@@ -1380,7 +1669,8 @@ fn resolve_index(
         return Err(QuinceError::new(
             format!("index {raw} is out of range for a {what} of length {len}"),
             span,
-        ));
+        )
+        .with_kind(ErrorKind::Index));
     }
     Ok(offset as usize)
 }
@@ -1408,7 +1698,8 @@ fn slice_bounds(
             return Err(QuinceError::new(
                 format!("slice bounds must be ints, found {}", bound.type_name(heap)),
                 span,
-            ));
+            )
+            .with_kind(ErrorKind::Type));
         };
         Ok(if *raw < 0 { *raw + len } else { *raw })
     };
@@ -1426,7 +1717,8 @@ fn check_arity(name: &str, expected: usize, found: usize, span: Span) -> Result<
     Err(QuinceError::new(
         format!("`{name}` takes {expected} argument{plural}, but {found} were given"),
         span,
-    ))
+    )
+    .with_kind(ErrorKind::Type))
 }
 
 // -- builtins --------------------------------------------------------------
@@ -1461,7 +1753,8 @@ static LEN: Native = Native {
         other => Err(QuinceError::new(
             format!("`len` does not apply to {}", other.type_name(&interp.heap)),
             span,
-        )),
+        )
+        .with_kind(ErrorKind::Type)),
     },
 };
 
@@ -1487,7 +1780,8 @@ pub static PUSH: Native = Native {
                 other.type_name(&interp.heap)
             ),
             span,
-        )),
+        )
+        .with_kind(ErrorKind::Type)),
     },
 };
 
@@ -1505,7 +1799,8 @@ pub static KEYS: Native = Native {
                 other.type_name(&interp.heap)
             ),
             span,
-        )),
+        )
+        .with_kind(ErrorKind::Type)),
     },
 };
 
@@ -1523,7 +1818,8 @@ pub static VALUES: Native = Native {
                 other.type_name(&interp.heap)
             ),
             span,
-        )),
+        )
+        .with_kind(ErrorKind::Type)),
     },
 };
 
@@ -1546,6 +1842,7 @@ pub static REMOVE: Native = Native {
                         format!("key {} is not in the dict", args[1].repr(&interp.heap)),
                         span,
                     )
+                    .with_kind(ErrorKind::Key)
                 })
         }
         other => Err(QuinceError::new(
@@ -1554,7 +1851,8 @@ pub static REMOVE: Native = Native {
                 other.type_name(&interp.heap)
             ),
             span,
-        )),
+        )
+        .with_kind(ErrorKind::Type)),
     },
 };
 
@@ -1745,6 +2043,92 @@ mod tests {
             interp.heap.live() < 600,
             "heap grew to {} objects",
             interp.heap.live()
+        );
+    }
+
+    #[test]
+    fn a_loop_that_catches_does_not_grow_the_heap() {
+        // `catch` does not create the hazard here so much as stop hiding it.
+        // Every site that pushes a scope, a temp, or a frame restores it before
+        // propagating, but while an error was fatal a site that forgot would leak
+        // roots into a process about to exit, where nothing could observe it. A
+        // caught error resumes with those stacks still deep, so the same latent
+        // bug becomes unbounded growth — which is what this measures.
+        let interp = run("let i = 0\n\
+             while i < 2000 {\n\
+             \x20 try {\n\
+             \x20  throw Error(\"x\")\n\
+             \x20 } catch e {\n\
+             \x20  i = i + 1\n\
+             \x20 }\n\
+             }");
+
+        assert!(interp.heap.collections > 0, "the collector never ran");
+        assert!(
+            interp.heap.live() < 600,
+            "heap grew to {} objects",
+            interp.heap.live()
+        );
+        // All three stacks back to their depth at the `try`.
+        assert!(
+            interp.scopes.is_empty(),
+            "{} scopes left behind",
+            interp.scopes.len()
+        );
+        assert!(
+            interp.temps.is_empty(),
+            "{} temps left behind",
+            interp.temps.len()
+        );
+        assert_eq!(interp.depth, 0, "depth left at {}", interp.depth);
+    }
+
+    #[test]
+    fn a_thrown_payload_survives_the_unwind() {
+        // The instance travels inside `QuinceError` through frames that root
+        // nothing: no scope and no `temps` entry refers to it for the whole
+        // unwind. It survives only because collection happens between statements
+        // and unwinding executes none.
+        //
+        // Churning first puts the heap over its collection threshold, so a safe
+        // point crossed on the way out would actually free the payload rather
+        // than merely being allowed to. Reading `e.n` afterwards is what would
+        // fail. This is the invariant a `finally` would have broken, by running
+        // statements during the unwind — see DESIGN.md.
+        let interp = run("class Deep extends Error {\n\
+             \x20   fn init(message, n) {\n\
+             \x20       super.init(message)\n\
+             \x20       self.n = n\n\
+             \x20   }\n\
+             }\n\
+             fn churn(k) {\n\
+             \x20   let scratch = []\n\
+             \x20   let i = 0\n\
+             \x20   while i < k {\n\
+             \x20       scratch.push([i])\n\
+             \x20       i = i + 1\n\
+             \x20   }\n\
+             \x20   return len(scratch)\n\
+             }\n\
+             fn go(d) {\n\
+             \x20   if d <= 0 {\n\
+             \x20       throw Deep(\"bottom\", 42)\n\
+             \x20   }\n\
+             \x20   return go(d - 1)\n\
+             }\n\
+             churn(3000)\n\
+             let got = 0\n\
+             try {\n\
+             \x20   go(50)\n\
+             } catch e {\n\
+             \x20   got = e.n\n\
+             }");
+
+        assert!(interp.heap.collections > 0, "the collector never ran");
+        assert!(
+            matches!(global(&interp, "got"), Some(Value::Int(42))),
+            "the payload did not survive: got {:?}",
+            global(&interp, "got")
         );
     }
 

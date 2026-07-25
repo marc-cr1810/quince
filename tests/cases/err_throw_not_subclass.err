@@ -1,0 +1,1 @@
+`throw` needs an instance of `Error`, but `Plain` does not extend it

@@ -1,0 +1,150 @@
+# A runtime error becomes a value only when someone catches it.
+try {
+    let xs = [1, 2, 3]
+    print(xs[10])
+} catch e {
+    print(e.message)
+    print(e.kind)
+}
+
+# Every kind reifies into its own class, and all of them extend `Error`.
+try {
+    print(1 + nil)
+} catch e {
+    print(e.kind)
+}
+try {
+    print(1 // 0)
+} catch e {
+    print(e.kind)
+}
+try {
+    print(nope)
+} catch e {
+    print(e.kind)
+}
+
+# `throw` raises an instance, and the handler binds that same object.
+fn withdraw(balance, amount) {
+    if amount > balance {
+        throw Error("insufficient funds")
+    }
+    return balance - amount
+}
+print(withdraw(100, 40))
+try {
+    print(withdraw(100, 250))
+} catch e {
+    print(e.kind, e.message)
+}
+
+# A user class extends `Error` with no new machinery: `init` comes from the
+# parent through the same lookup any subclass uses, and `kind` follows the
+# receiver's class without `Error` knowing the subclass exists.
+class ParseError extends Error {
+    fn init(message, line) {
+        super.init(message)
+        self.line = line
+    }
+}
+try {
+    throw ParseError("unexpected `}`", 12)
+} catch e {
+    print(e.kind, e.line, e.message)
+}
+
+# A thrown instance arrives unwrapped, so its own fields survive the round trip.
+let raised = ParseError("held", 1)
+try {
+    throw raised
+} catch e {
+    print(e == raised)
+}
+
+# A subclass with no `init` of its own still takes a message.
+class Bare extends Error {}
+try {
+    throw Bare("inherited init")
+} catch e {
+    print(e.kind, e.message)
+}
+
+# The handler runs at the depth of its `try`, not at the depth the error fired,
+# so a runaway recursion leaves the whole stack available again.
+fn forever(n) {
+    return forever(n + 1)
+}
+fn probe(n) {
+    if n <= 0 {
+        return 0
+    }
+    return probe(n - 1) + 1
+}
+try {
+    forever(0)
+} catch e {
+    print(e.kind)
+    print(probe(200))
+}
+
+# A `return` inside a `try` is a value in the other channel, and a handler
+# cannot see it — so it passes straight through.
+fn from_try() {
+    try {
+        return "returned"
+    } catch e {
+        return "handled"
+    }
+}
+print(from_try())
+
+# The handler only runs when something fails, so a `try` that succeeds is
+# exactly its body.
+fn quiet() {
+    try {
+        return "no error"
+    } catch e {
+        return e.message
+    }
+}
+print(quiet())
+
+# Nesting: the inner handler rethrows, and the outer one catches what it raised.
+try {
+    try {
+        throw Error("inner")
+    } catch e {
+        throw Error(e.message + " then outer")
+    }
+} catch e {
+    print(e.message)
+}
+
+# An error raised inside a handler propagates like any other — the handler is
+# ordinary code and is not in the scope of its own `try`.
+fn handler_fails() {
+    try {
+        try {
+            throw Error("first")
+        } catch e {
+            print(e.missing_field)
+        }
+    } catch e {
+        return e.kind
+    }
+}
+print(handler_fails())
+
+# Catching in a loop, which is the shape that turns a leaked root into
+# unbounded growth rather than a leak nobody can observe.
+let caught = 0
+let i = 0
+while i < 50 {
+    try {
+        throw Error("iteration")
+    } catch e {
+        caught = caught + 1
+    }
+    i = i + 1
+}
+print(caught)

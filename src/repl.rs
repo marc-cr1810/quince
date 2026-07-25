@@ -18,7 +18,7 @@ use quince::value::Value;
 
 const KEYWORDS: &[&str] = &[
     "fn", "class", "extends", "self", "super", "let", "final", "const", "if", "else", "while",
-    "for", "in", "return", "true", "false", "nil",
+    "for", "in", "return", "try", "catch", "throw", "true", "false", "nil",
 ];
 
 const META_COMMANDS: &[&str] = &[
