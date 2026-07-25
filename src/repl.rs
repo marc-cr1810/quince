@@ -354,7 +354,7 @@ impl Highlighter for QuinceHelper {
             }
         };
 
-        for token in tokens {
+        for (i, token) in tokens.iter().enumerate() {
             if token.kind == TokenKind::Eof {
                 continue;
             }
@@ -377,10 +377,13 @@ impl Highlighter for QuinceHelper {
             }
 
             let text = &line[start..end];
+            let prev_kind = if i > 0 { Some(&tokens[i - 1].kind) } else { None };
+            let next_kind = if i + 1 < tokens.len() { Some(&tokens[i + 1].kind) } else { None };
+
             let styled = if text.len() == 1 && matched_brackets.contains(&start) {
                 Style::BOLD_YELLOW.paint(text, true)
             } else {
-                highlight_token(token.kind, text, self.use_color)
+                highlight_token(token.kind.clone(), text, self.use_color, prev_kind, next_kind)
             };
             output.push_str(&styled);
             last_end = end;
@@ -448,23 +451,25 @@ fn find_matching_brackets(line: &str, pos: usize) -> Vec<usize> {
         if check_pos >= bytes.len() {
             continue;
         }
-        let target = bytes[check_pos];
-        let (open, close, forward) = match target {
-            b'(' => (b'(', b')', true),
-            b'[' => (b'[', b']', true),
-            b'{' => (b'{', b'}', true),
-            b')' => (b'(', b')', false),
-            b']' => (b'[', b']', false),
-            b'}' => (b'{', b'}', false),
+
+        let ch = bytes[check_pos] as char;
+        let (matching_ch, search_forward) = match ch {
+            '(' => (')', true),
+            ')' => ('(', false),
+            '[' => (']', true),
+            ']' => ('[', false),
+            '{' => ('}', true),
+            '}' => ('{', false),
             _ => continue,
         };
 
-        let mut depth = 0;
-        if forward {
+        if search_forward {
+            let mut depth = 0;
             for i in check_pos..bytes.len() {
-                if bytes[i] == open {
+                let c = bytes[i] as char;
+                if c == ch {
                     depth += 1;
-                } else if bytes[i] == close {
+                } else if c == matching_ch {
                     depth -= 1;
                     if depth == 0 {
                         return vec![check_pos, i];
@@ -472,10 +477,12 @@ fn find_matching_brackets(line: &str, pos: usize) -> Vec<usize> {
                 }
             }
         } else {
+            let mut depth = 0;
             for i in (0..=check_pos).rev() {
-                if bytes[i] == close {
+                let c = bytes[i] as char;
+                if c == ch {
                     depth += 1;
-                } else if bytes[i] == open {
+                } else if c == matching_ch {
                     depth -= 1;
                     if depth == 0 {
                         return vec![check_pos, i];
@@ -540,12 +547,35 @@ fn push_plain_or_bracket(
     }
 }
 
-fn highlight_token(kind: TokenKind, text: &str, use_color: bool) -> String {
+fn highlight_token(
+    kind: TokenKind,
+    text: &str,
+    use_color: bool,
+    prev_kind: Option<&TokenKind>,
+    next_kind: Option<&TokenKind>,
+) -> String {
     match kind {
         TokenKind::SelfKw | TokenKind::Super => Style::BOLD_CYAN.paint(text, use_color),
 
         TokenKind::True | TokenKind::False => Style::YELLOW.paint(text, use_color),
         TokenKind::Nil => Style::DIM.paint(text, use_color),
+
+        TokenKind::Ident(_) => {
+            if matches!(prev_kind, Some(TokenKind::Fn)) {
+                Style::BOLD_CYAN.paint(text, use_color)
+            } else if matches!(prev_kind, Some(TokenKind::Class)) {
+                Style::BOLD_YELLOW.paint(text, use_color)
+            } else if matches!(next_kind, Some(TokenKind::LParen)) {
+                Style::BOLD_BLUE.paint(text, use_color)
+            } else if ["print", "type", "string", "list", "dict", "int", "float", "bool", "len"]
+                .contains(&text)
+            {
+                Style::BOLD_CYAN.paint(text, use_color)
+            } else {
+                text.to_string()
+            }
+        }
+
 
         _ if TokenKind::keyword(text).is_some() => Style::BOLD_MAGENTA.paint(text, use_color),
 
@@ -778,7 +808,8 @@ mod tests {
     fn all_keywords_are_highlighted() {
         for kw in KEYWORDS {
             if let Some(kind) = TokenKind::keyword(kw) {
-                let styled = highlight_token(kind.clone(), kw, true);
+                let styled = highlight_token(kind.clone(), kw, true, None, None);
+
                 if kw == &"self" || kw == &"super" {
                     assert!(styled.contains("\x1b[1;36m"), "{kw} should be bold cyan");
                 } else if kw == &"true" || kw == &"false" {
@@ -793,7 +824,48 @@ mod tests {
     }
 
     #[test]
+    fn context_aware_syntax_highlighting_differentiates_identifiers() {
+        let fn_decl = highlight_token(
+            TokenKind::Ident("calculate".to_string()),
+            "calculate",
+            true,
+            Some(&TokenKind::Fn),
+            None,
+        );
+        assert!(fn_decl.contains("\x1b[1;36m"), "fn name should be bold cyan");
+
+        let class_decl = highlight_token(
+            TokenKind::Ident("Point".to_string()),
+            "Point",
+            true,
+            Some(&TokenKind::Class),
+            None,
+        );
+        assert!(class_decl.contains("\x1b[1;33m"), "class name should be bold yellow");
+
+        let call = highlight_token(
+            TokenKind::Ident("foo".to_string()),
+            "foo",
+            true,
+            None,
+            Some(&TokenKind::LParen),
+        );
+        assert!(call.contains("\x1b[1;34m"), "function call should be bold blue");
+
+        let builtin = highlight_token(
+            TokenKind::Ident("print".to_string()),
+            "print",
+            true,
+            None,
+            None,
+        );
+        assert!(builtin.contains("\x1b[1;36m"), "builtin function should be bold cyan");
+    }
+
+
+    #[test]
     fn validator_detects_incomplete_expressions() {
+
         assert!(is_input_incomplete("1 +"));
         assert!(is_input_incomplete("fn foo() {"));
         assert!(is_input_incomplete("print([1, 2,"));

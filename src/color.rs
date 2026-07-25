@@ -58,7 +58,11 @@ impl Style {
         prefix: "\x1b[1;33m",
     };
     pub const BLUE: Style = Style { prefix: "\x1b[34m" };
+    pub const BOLD_BLUE: Style = Style {
+        prefix: "\x1b[1;34m",
+    };
     pub const MAGENTA: Style = Style { prefix: "\x1b[35m" };
+
     pub const BOLD_MAGENTA: Style = Style {
         prefix: "\x1b[1;35m",
     };
