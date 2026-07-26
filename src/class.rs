@@ -16,8 +16,8 @@ use std::collections::HashMap;
 use crate::dict::Dict;
 use crate::heap::{Heap, ObjId};
 use crate::interp::{
-    CHARS, ENDS_WITH, JOIN, KEYS, LOWER, PUSH, REMOVE, REPLACE, SPLIT, STARTS_WITH, TRIM, UPPER,
-    VALUES,
+    BOOL_INIT, CHARS, DICT_INIT, ENDS_WITH, FLOAT_INIT, INT_INIT, JOIN, KEYS, LIST_INIT, LOWER,
+    PUSH, REMOVE, REPLACE, SPLIT, STARTS_WITH, STR_INIT, TRIM, UPPER, VALUES,
 };
 use crate::value::{Native, Value};
 
@@ -101,6 +101,12 @@ pub struct BuiltinType {
     /// A slice rather than a map: these are single digits long, and a `static`
     /// needs no construction at startup.
     pub methods: &'static [(&'static str, &'static Native)],
+    /// What calling the type does — `int("42")` reaches this.
+    ///
+    /// `None` for a type that cannot be built from a value, which is the honest
+    /// answer for `function` and `class`: there is no argument from which one
+    /// could be made.
+    pub init: Option<&'static Native>,
 }
 
 /// A type, whether the language defined it or a program did.
@@ -131,12 +137,13 @@ pub struct Class {
     /// method is still reachable by name — `super.init(msg)` is how a subclass
     /// constructor delegates.
     pub init: Option<Value>,
-    /// `Some` if the language defined this type, which is what makes `int(5)` an
-    /// error instead of an instance of `int`.
+    /// `Some` if the language defined this type.
     ///
-    /// A builtin has no `op init` and no fields to put anything in, so
-    /// construction has nothing to do and the honest answer is to refuse. It is
-    /// also where a conversion — `int("5")` — would eventually hang.
+    /// What it decides is what construction *yields*. A class a program wrote
+    /// yields the instance it allocated; a builtin yields whatever its `init`
+    /// returned, allocating nothing, because an `int` is not an object with
+    /// fields. So `int("42")` is a conversion and `Point(1, 2)` is a
+    /// constructor, through one code path.
     pub builtin: Option<Builtin>,
 }
 
@@ -152,7 +159,10 @@ impl Class {
                 .map(|(name, native)| (name.to_string(), Value::Native(native)))
                 .collect(),
             parent: None,
-            init: None,
+            // Not also an entry in `methods`, unlike a user class's `op init`.
+            // A conversion takes no receiver, so as a method it would be wrong:
+            // `(5).init(7)` has no meaning to give.
+            init: seed.init.map(Value::Native),
             builtin: Some(builtin),
         }
     }
@@ -205,21 +215,28 @@ impl Instance {
     }
 }
 
+/// `nil` is a keyword, so this type is never bound as a global and nothing can
+/// name it to call it. The `init` would be unreachable rather than merely
+/// useless, which is why there is none.
 pub static NIL: BuiltinType = BuiltinType {
     name: "nil",
     methods: &[],
+    init: None,
 };
 pub static BOOL: BuiltinType = BuiltinType {
     name: "bool",
     methods: &[],
+    init: Some(&BOOL_INIT),
 };
 pub static INT: BuiltinType = BuiltinType {
     name: "int",
     methods: &[],
+    init: Some(&INT_INIT),
 };
 pub static FLOAT: BuiltinType = BuiltinType {
     name: "float",
     methods: &[],
+    init: Some(&FLOAT_INIT),
 };
 pub static STR: BuiltinType = BuiltinType {
     name: "string",
@@ -234,24 +251,34 @@ pub static STR: BuiltinType = BuiltinType {
         ("trim", &TRIM),
         ("upper", &UPPER),
     ],
+    init: Some(&STR_INIT),
 };
 pub static LIST: BuiltinType = BuiltinType {
     name: "list",
     methods: &[("push", &PUSH)],
+    init: Some(&LIST_INIT),
 };
 pub static DICT: BuiltinType = BuiltinType {
     name: "dict",
     methods: &[("keys", &KEYS), ("values", &VALUES), ("remove", &REMOVE)],
+    init: Some(&DICT_INIT),
 };
+/// No `init`: there is no value a function could be made *from*. `fn` is how one
+/// comes into being, and it is a declaration rather than a conversion.
 pub static FUNCTION: BuiltinType = BuiltinType {
     name: "function",
     methods: &[],
+    init: None,
 };
 /// The type of a class itself, which is what `type(Point)` reports. An
 /// *instance* of `Point` reports `Point`.
+///
+/// `class` is a keyword, so like `nil` this is unreachable by name; `class` is
+/// also the declaration that makes one, so there is nothing for an `init` to do.
 pub static CLASS: BuiltinType = BuiltinType {
     name: "class",
     methods: &[],
+    init: None,
 };
 
 #[cfg(test)]
@@ -314,6 +341,52 @@ mod tests {
                     builtin.name()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn a_seeded_init_reaches_the_class_and_is_named_for_its_type() {
+        // The name matters because it is what an arity error quotes: `int(1, 2)`
+        // should be told about `int`, not about `init`.
+        let heap = Heap::new();
+        for builtin in BUILTINS {
+            let class = heap.class(heap.builtin_class(*builtin));
+            match (builtin.seed().init, &class.init) {
+                (Some(native), Some(Value::Native(installed))) => {
+                    assert!(
+                        std::ptr::eq(native, *installed),
+                        "{}'s init is not the one it was seeded with",
+                        builtin.name()
+                    );
+                    assert_eq!(
+                        native.name,
+                        builtin.name(),
+                        "{}'s init is named for something else",
+                        builtin.name()
+                    );
+                }
+                (None, None) => {}
+                (seeded, installed) => panic!(
+                    "{} seeded {seeded:?} but carries {installed:?}",
+                    builtin.name()
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn a_builtin_init_is_not_also_a_method() {
+        // Deliberately unlike a user class, whose `op init` is reachable as
+        // `super.init`. A conversion takes no receiver, so `(5).init(7)` has no
+        // meaning to give and had better not find one.
+        let heap = Heap::new();
+        for builtin in BUILTINS {
+            let class = heap.class(heap.builtin_class(*builtin));
+            assert!(
+                class.method("init", &heap).is_none(),
+                "{}.init resolves as a method",
+                builtin.name()
+            );
         }
     }
 

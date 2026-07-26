@@ -1,0 +1,44 @@
+# Calling a type converts. A builtin's `op init` returns the value rather than
+# filling in an object, because an int has nowhere to keep a field — so the call
+# yields what the conversion produced and allocates nothing.
+print(int(5))
+print(int("42"))
+print(int("  42  "))
+print(float(3))
+print(float("1.5"))
+print(string(42))
+print(string([1, 2]))
+print(bool(0))
+print(bool("a"))
+
+# Toward zero, as in Python and Rust's `as` — unlike `//`, which floors.
+print(int(3.7))
+print(int(-3.7))
+print(-7 // 2)
+
+# `1` and `0`, as every language with this conversion has it. That a bool
+# converts does not make it a number: `1 + true` is still an error.
+print(int(true))
+print(int(false))
+print(float(true))
+
+# Nothing is ambiguous about an empty collection or a copy of one, so those are
+# the only two forms `list` and `dict` take.
+print(list())
+print(list([1, 2]))
+print(dict())
+print(dict({"a": 1}))
+
+# The copy is shallow, as in Python: the new list holds the same elements.
+final inner = [1]
+final copied = list([inner])
+inner.push(2)
+print(copied)
+
+# A ValueError is an error like any other, which is the reason it is a kind and
+# not just a message.
+try {
+    int("abc")
+} catch e {
+    print(type(e), e.message)
+}

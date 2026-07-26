@@ -1,0 +1,5 @@
+# `list("ab")` could mean the characters, and there is no reason to prefer that
+# reading over any other, so it is refused rather than guessed at. The help names
+# the method that means the likely thing.
+print(list([1, 2]))
+print(list("ab"))

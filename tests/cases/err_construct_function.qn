@@ -1,0 +1,4 @@
+# The one builtin type still bound as a global and still not constructible: there
+# is no value a function could be made from. `nil` and `class` are keywords, so
+# neither is bound and neither can be reached this way at all.
+function(print)

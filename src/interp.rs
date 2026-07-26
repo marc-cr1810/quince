@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use crate::ast::Slot;
 use crate::ast::{BinaryOp, Block, Expr, ExprKind, LogicalOp, Op, Stmt, StmtKind, UnaryOp, Var};
-use crate::class::{BUILTINS as BUILTIN_TYPES, Class, Instance};
+use crate::class::{BUILTINS as BUILTIN_TYPES, Builtin, Class, Instance};
 use crate::dict::{Dict, Key, NotAKey};
 use crate::env::{self, AssignError, Env, Globals};
 use crate::error::{ERROR_KINDS, ErrorKind, QuinceError};
@@ -1243,22 +1243,13 @@ impl Interp {
             // is why `init` returns nothing useful: the object already exists
             // by the time it runs.
             Value::Class(id) => {
-                // A builtin type is a class like any other, but nothing a
-                // program wrote put it there: it has no `op init` to run and an
-                // int has nowhere to keep a field, so `int(5)` would hand back
-                // an instance of `int` that no other int in the program
-                // resembles. Refused rather than allowed to mean nothing — and
-                // this is where a conversion would eventually go.
+                // Except for a builtin, where there is no object to build. An
+                // int has nowhere to keep a field, so its `init` returns the
+                // value instead of filling one in, and the call yields that. The
+                // difference is only in what construction *produces* — the class
+                // is a class like any other, and its `init` is found the same way.
                 if let Some(builtin) = self.heap.class(id).builtin {
-                    return Err(QuinceError::new(
-                        format!("cannot construct `{}`", builtin.name()),
-                        span,
-                    )
-                    .with_kind(ErrorKind::Type)
-                    .with_help(format!(
-                        "`{}` is a type built into the language, not a class declared in a program",
-                        builtin.name()
-                    )));
+                    return self.construct_builtin(id, builtin, args, span);
                 }
 
                 let instance = Value::Instance(self.heap.alloc(Object::Instance(Instance {
@@ -1314,6 +1305,34 @@ impl Interp {
             )
             .with_kind(ErrorKind::Type)),
         }
+    }
+
+    /// Calling a builtin type: `int("42")`, `list()`.
+    ///
+    /// No instance is allocated. A builtin's `init` is a conversion, so it takes
+    /// the call's arguments and nothing else, and the value it returns is the
+    /// result of the call. That is why this reaches `call` rather than
+    /// `call_method` — there is no receiver to insert.
+    fn construct_builtin(
+        &mut self,
+        id: ObjId,
+        builtin: Builtin,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, QuinceError> {
+        let Some(init) = self.heap.class(id).init.clone() else {
+            // Only `function` reaches this: `nil` and `class` are keywords, so
+            // neither is bound as a global and nothing can name them to call.
+            return Err(
+                QuinceError::new(format!("cannot make {}", an(builtin.name())), span)
+                    .with_kind(ErrorKind::Type)
+                    .with_help(format!(
+                        "there is no value a {} could be made from — `fn` is how one is written",
+                        builtin.name()
+                    )),
+            );
+        };
+        self.call(init, args, span)
     }
 
     /// Evaluates `receiver.name(args)`.
@@ -2118,6 +2137,178 @@ static TYPE: Native = Native {
     func: |interp, args, _span| Ok(Value::Str(Rc::from(args[0].type_name(&interp.heap)))),
 };
 
+// -- conversion ------------------------------------------------------------
+//
+// A builtin type's `op init`, reached by calling the type: `int("42")`. These
+// take no receiver, unlike every other native in this file, because there is
+// nothing to receive — the value they return *is* what the construction
+// produced. See `Class::init` and `construct_builtin`.
+//
+// Two error kinds, and the split is deliberate. `ErrorKind::Type` is for an
+// argument the conversion never accepts, where the fix is at the call:
+// `int([1])`. `ErrorKind::Value` is for one it does accept carrying data it
+// cannot use, where the call is right and the data is not: `int("abc")`.
+// Naming that difference is the whole reason `Value` was added as a kind.
+
+/// The argument named as a type, for a conversion that cannot accept it at all.
+fn not_convertible(heap: &Heap, to: &str, value: &Value, span: Span) -> QuinceError {
+    QuinceError::new(
+        format!("cannot make {} from {}", an(to), an(value.type_name(heap))),
+        span,
+    )
+    .with_kind(ErrorKind::Type)
+}
+
+/// A type name as it reads in a message, so one reads as English rather than as
+/// a template.
+///
+/// `nil` takes no article: it is the one type name that is also the name of its
+/// only value, so "from nil" names the value and "from a nil" names nothing.
+fn an(noun: &str) -> String {
+    if noun == crate::class::Builtin::Nil.name() {
+        return noun.to_string();
+    }
+    let article = match noun.starts_with(['a', 'e', 'i', 'o', 'u']) {
+        true => "an",
+        false => "a",
+    };
+    format!("{article} {noun}")
+}
+
+/// Rejects a float that no integer can represent, which `as` would otherwise
+/// answer with a saturated bound — silently, and almost never usefully.
+fn checked_trunc(f: f64, span: Span) -> Result<i64, QuinceError> {
+    if f.is_nan() {
+        return Err(
+            QuinceError::new("cannot make an int from NaN", span).with_kind(ErrorKind::Value)
+        );
+    }
+    // Compared before truncating: truncation of a value this large is a no-op,
+    // so doing it first would not bring anything into range.
+    //
+    // The two comparisons are deliberately not symmetric. `i64::MIN` is -2^63,
+    // which an `f64` holds exactly, so a float equal to it converts. `i64::MAX`
+    // is 2^63-1, which an `f64` cannot hold — `i64::MAX as f64` rounds *up* to
+    // 2^63 — so a float that equal is already out of range, and `>` rather than
+    // `>=` here would let it through to saturate silently.
+    if f < i64::MIN as f64 || f >= i64::MAX as f64 {
+        return Err(
+            QuinceError::new(format!("{f} is too large to be an int"), span)
+                .with_kind(ErrorKind::Overflow),
+        );
+    }
+    Ok(f.trunc() as i64)
+}
+
+/// Named for the type rather than for `init`, because this native's name is what
+/// an arity error quotes and `int(1, 2)` should be told about `int`.
+pub static INT_INIT: Native = Native {
+    name: "int",
+    arity: Some(1),
+    func: |interp, args, span| match &args[0] {
+        Value::Int(n) => Ok(Value::Int(*n)),
+        // Toward zero, unlike `//`, which floors. `int` follows the same rule as
+        // Python and Rust's `as`; `//` deliberately does not, so that `-7 // 2`
+        // stays the mathematical quotient.
+        Value::Float(f) => Ok(Value::Int(checked_trunc(*f, span)?)),
+        // Surrounding whitespace is dropped, since a number read from a file or
+        // a prompt arrives with it and stripping is what the caller would do.
+        Value::Str(text) => text.trim().parse::<i64>().map(Value::Int).map_err(|_| {
+            QuinceError::new(
+                format!("cannot make an int from {}", args[0].repr(&interp.heap)),
+                span,
+            )
+            .with_kind(ErrorKind::Value)
+        }),
+        // `1` and `0`, as every language with this conversion has it. This is not
+        // a crack in the rule that a bool is not a number: `1 + true` stays an
+        // error, because nobody asked for a conversion there.
+        Value::Bool(b) => Ok(Value::Int(*b as i64)),
+        other => Err(not_convertible(&interp.heap, "int", other, span)),
+    },
+};
+
+pub static FLOAT_INIT: Native = Native {
+    name: "float",
+    arity: Some(1),
+    func: |interp, args, span| match &args[0] {
+        Value::Float(f) => Ok(Value::Float(*f)),
+        Value::Int(n) => Ok(Value::Float(*n as f64)),
+        Value::Str(text) => text.trim().parse::<f64>().map(Value::Float).map_err(|_| {
+            QuinceError::new(
+                format!("cannot make a float from {}", args[0].repr(&interp.heap)),
+                span,
+            )
+            .with_kind(ErrorKind::Value)
+        }),
+        Value::Bool(b) => Ok(Value::Float(*b as i64 as f64)),
+        other => Err(not_convertible(&interp.heap, "float", other, span)),
+    },
+};
+
+/// Total, and the same text `print` writes — there is no value without a
+/// rendering, so this cannot fail and needs no error kind at all.
+pub static STR_INIT: Native = Native {
+    name: "string",
+    arity: Some(1),
+    func: |interp, args, _span| Ok(Value::Str(Rc::from(args[0].display(&interp.heap)))),
+};
+
+/// Exactly the test `if` applies, exposed as a value. Also total.
+pub static BOOL_INIT: Native = Native {
+    name: "bool",
+    arity: Some(1),
+    func: |interp, args, _span| Ok(Value::Bool(args[0].is_truthy(&interp.heap))),
+};
+
+/// `list()` is empty and `list(xs)` copies. Nothing else converts: `list("ab")`
+/// could mean characters, and `list({"a": 1})` could mean keys, entries, or
+/// values. Both are refused rather than guessed at, with the method that means
+/// the likely thing named in the help.
+pub static LIST_INIT: Native = Native {
+    name: "list",
+    arity: None,
+    func: |interp, args, span| match args {
+        [] => Ok(Value::List(interp.heap.alloc(Object::List(Vec::new())))),
+        // Shallow, as in Python: the new list holds the same elements rather
+        // than copies of them, so a nested list stays shared.
+        [Value::List(id)] => {
+            let items = interp.heap.list(*id).clone();
+            Ok(Value::List(interp.heap.alloc(Object::List(items))))
+        }
+        [Value::Str(_)] => Err(not_convertible(&interp.heap, "list", &args[0], span)
+            .with_help("`chars` splits a string into its characters")),
+        [Value::Dict(_)] => Err(not_convertible(&interp.heap, "list", &args[0], span)
+            .with_help("`keys` or `values` picks which half of a dict to take")),
+        [other] => Err(not_convertible(&interp.heap, "list", other, span)),
+        _ => Err(too_many("list", args.len(), span)),
+    },
+};
+
+pub static DICT_INIT: Native = Native {
+    name: "dict",
+    arity: None,
+    func: |interp, args, span| match args {
+        [] => Ok(Value::Dict(interp.heap.alloc(Object::Dict(Dict::new())))),
+        [Value::Dict(id)] => {
+            let entries = interp.heap.dict(*id).clone();
+            Ok(Value::Dict(interp.heap.alloc(Object::Dict(entries))))
+        }
+        [other] => Err(not_convertible(&interp.heap, "dict", other, span)),
+        _ => Err(too_many("dict", args.len(), span)),
+    },
+};
+
+/// `check_arity` states one exact count, which these two conversions do not
+/// have — they take nothing or one thing.
+fn too_many(name: &str, found: usize, span: Span) -> QuinceError {
+    QuinceError::new(
+        format!("`{name}` takes 0 or 1 arguments, but {found} were given"),
+        span,
+    )
+    .with_kind(ErrorKind::Type)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2173,6 +2364,73 @@ mod tests {
         let err = interp.run(&program).expect_err("should be refused");
 
         assert_eq!(err.message, "`MyStr` cannot extend `string`");
+    }
+
+    #[test]
+    fn truncation_rejects_what_no_int_can_hold() {
+        let span = Span::new(0, 1);
+
+        assert_eq!(checked_trunc(3.7, span), Ok(3));
+        assert_eq!(checked_trunc(-3.7, span), Ok(-3));
+        assert_eq!(checked_trunc(-0.5, span), Ok(0));
+
+        // `as` would answer these with a saturated bound, silently. The boundary
+        // is worth pinning in both directions because it is not symmetric, and
+        // the asymmetry is easy to get wrong: this test caught a `>` that should
+        // have been `>=` and was quietly saturating 2^63 to `i64::MAX`.
+        assert_eq!(
+            checked_trunc(i64::MAX as f64, span).unwrap_err().kind,
+            ErrorKind::Overflow,
+            "i64::MAX as f64 rounds up to 2^63, which is out of range"
+        );
+        assert_eq!(
+            checked_trunc(9223372036854774784.0, span),
+            Ok(9223372036854774784),
+            "the largest float below 2^63 is in range and must convert"
+        );
+        assert_eq!(
+            checked_trunc(i64::MIN as f64, span),
+            Ok(i64::MIN),
+            "-2^63 is exact as an f64, so the low bound converts"
+        );
+        assert_eq!(
+            checked_trunc(f64::INFINITY, span).unwrap_err().kind,
+            ErrorKind::Overflow
+        );
+        // A NaN is not out of range, it is not a number at all — which is a
+        // different mistake, and gets a different kind.
+        assert_eq!(
+            checked_trunc(f64::NAN, span).unwrap_err().kind,
+            ErrorKind::Value
+        );
+    }
+
+    #[test]
+    fn a_conversion_separates_the_wrong_type_from_the_wrong_value() {
+        // The whole reason `ErrorKind::Value` exists. Both of these are `int`
+        // refusing an argument, but one is fixed at the call and the other is
+        // fixed wherever the string came from.
+        let cases = [
+            ("int([1])", ErrorKind::Type),
+            ("int(nil)", ErrorKind::Type),
+            ("int(\"abc\")", ErrorKind::Value),
+            ("float(\"abc\")", ErrorKind::Value),
+        ];
+
+        for (source, expected) in cases {
+            let program = crate::compile(source).expect("should parse");
+            let mut interp = Interp::with_output(Box::new(Vec::new()));
+            let err = interp.run(&program).expect_err("should be refused");
+            assert_eq!(err.kind, expected, "{source}");
+        }
+    }
+
+    #[test]
+    fn a_conversion_is_reached_through_the_class_a_name_is_bound_to() {
+        // Not a special form in `eval`: `int` is an ordinary global holding an
+        // ordinary class, so it converts just as well through another name.
+        let interp = run("final make = int\nfinal n = make(\"42\")");
+        assert_eq!(global(&interp, "n"), Some(Value::Int(42)));
     }
 
     #[test]

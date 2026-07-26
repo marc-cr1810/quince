@@ -226,7 +226,7 @@ for key in counts {
 }
 
 let all = [1, 2] + [3]
-push(all, 4)
+all.push(4)
 if 4 in all { print("built", all) }
 ```
 
@@ -757,10 +757,10 @@ assignment — which is what lets it validate anything at all.
 
 Three decisions it forced, none of them recoverable from the diff:
 
-- **Calling a type is refused.** `int(5)` would otherwise build an `Object::Instance` whose
+- **Calling a type was refused.** `int(5)` would otherwise build an `Object::Instance` whose
   class is `int`: an object reporting a builtin type name that no arithmetic path accepts
-  and no other int resembles. `cannot construct \`int\`` instead — and that is where a
-  conversion would eventually hang, which is the likeliest thing someone writing it meant.
+  and no other int resembles. `cannot construct \`int\`` instead — a placeholder held open
+  for the conversion that has since replaced it, below.
 - **`nil` and `class` are not bound.** Both are keywords, so nothing could ever read a
   global under those names. The skip is taken from `TokenKind::keyword` rather than written
   out, so a type name that becomes a keyword later self-corrects. Their class objects exist
@@ -800,19 +800,22 @@ name the language happens to bind first — a function is a value a program may 
 want to replace, and a type is what `int(5)` and a future `extend int` have to be able to
 read without asking what is in scope.
 
-Two things ruled out rather than deferred. `type(x)` keeps returning a **string**: it is
+One thing ruled out rather than deferred: `type(x)` keeps returning a **string**. It is
 tempting to hand back the class once `int` is a value, but `Error`'s constructor does
 `self.kind = type(self)` and the corpus asserts a string, so the change would break
-working code for a nicety. And `extends` on a builtin is refused at class-definition time.
+working code for a nicety.
 
-That last one was written here as "semantically empty" before it was implemented, and it
-was worse than that. `class MyStr extends string {}` then `MyStr().upper()` reached
+`extends` on a builtin is refused at class-definition time, and that refusal *is* deferral
+rather than a decision — see the Roadmap for what lifting it costs. What it is not is
+optional. This case was written here as "semantically empty" before it was implemented, and
+it was worse than that: `class MyStr extends string {}` then `MyStr().upper()` reached
 `string`'s `upper` — a native that matches on `Value::Str` and treats anything else as
 `unreachable!` — and panicked the interpreter. Ordinary Quince code, a hard crash, and it
 only became expressible because the types became values: until then `extends string` was
 an undefined variable and the hole was closed by accident. The refusal is one check at
 class-definition time rather than a receiver guard in every native, which is the same
-trade as `op` being validated where it is written.
+trade as `op` being validated where it is written — and when subclassing lands, that one
+check becomes one rule in the payload lookup rather than a guard to unpick.
 
 ### `extend`, and the one thing it must not do
 
@@ -867,6 +870,86 @@ The honest cost, recorded so it is not rediscovered: until modules exist, `exten
 any file changes `int` for the whole program, with no scoping and no undo. That is the
 bargain Ruby and Objective-C made. The extension table keeps the door open; it does not
 close the gap today.
+
+## Calling a type converts
+
+`int(5)` works, and it needed no new vocabulary. The refusal above was a placeholder, and
+the thing it was holding a place for turned out to already exist:
+
+```quince
+print(int("42"))     # 42
+print(int(3.7))      # 3
+print(float(3))      # 3.0
+print(string([1, 2]))# [1, 2]
+print(bool(0))       # false
+print(list())        # []
+print(list([1, 2]))  # [1, 2]
+```
+
+`Class.init` is an `Option<Value>` and `Value::Native` is a `Value`, so a builtin's seed
+table names an init exactly the way it names `upper`. One rule changes: **construction
+yields what `init` produced.** A class a program wrote allocates an instance and returns
+that, because its init fills in `self` and returns nothing useful; a builtin allocates
+nothing and returns the value, because an int has nowhere to keep a field. `Class.builtin`
+decides which, and that is now the *only* thing it decides.
+
+A conversion takes no receiver — the value it returns is the whole result — so
+`construct_builtin` reaches `call` rather than `call_method`, which is the function that
+inserts one. For the same reason a builtin's init is *not* also an entry in `methods`,
+unlike a user class's `op init` that `super.init` finds by name: as a method it would be
+wrong, and `(5).init(7)` has no meaning to give. The natives are named for their type
+rather than for `init`, because that name is what an arity error quotes and `int(1, 2)`
+should be told about `int`.
+
+### Conversion is not uniform, and pretending otherwise would cost more
+
+`T(x)` looks like one feature and is not. Four types convert from anything sensible; two
+take nothing or a copy of themselves; three cannot be called at all.
+
+| | takes | why |
+|---|---|---|
+| `int`, `float` | int, float, string, bool | one numeric tower plus parsing |
+| `string` | anything | it is `display`; total |
+| `bool` | anything | it is `is_truthy`; total |
+| `list`, `dict` | nothing, or one of itself | see below |
+| `function` | — | there is no value one could be made from |
+| `nil`, `class` | — | keywords, so never bound as globals |
+
+`list("ab")` could mean the characters; `list({"a": 1})` could mean the keys, the values, or
+the entries. Guessing would bake a wrong answer in permanently, so both are refused with the
+method that means the likely thing named in the help. Restricting the argument to *nothing
+or a copy* is what makes the constructor unambiguous without answering the question — and
+it is the same answer subclassing will need, where `super.init()` on a `list` ancestor means
+"start empty".
+
+The copy is shallow, as in Python: `list([inner])` holds the same `inner`, not a copy of it.
+
+### `ValueError`, and why the kind is worth a variant
+
+`int([1])` and `int("abc")` are both `int` refusing an argument, and they are different
+mistakes. A list is something `int` never accepts, so the call is wrong: `TypeError`. A
+string is exactly what it accepts, and *that* string is not a number, so the call is right
+and the data is not: `ValueError`. The fix is at the call site for one and wherever the
+string came from for the other, which is worth saying in the label rather than only in the
+message.
+
+Two edges are pinned by tests rather than left to `as`. A NaN is a `ValueError` — not out
+of range, not a number at all — and a float too large is an `OverflowError`. The bound is
+asymmetric and the asymmetry is easy to get wrong: `i64::MIN` is -2^63, which an `f64` holds
+exactly, so a float equal to it converts; `i64::MAX` is 2^63-1, which an `f64` cannot hold,
+so `i64::MAX as f64` rounds *up* to 2^63 and a float that equal is already out of range. The
+first version of the guard used `>` there and silently saturated 2^63 to `i64::MAX` — the
+exact failure the guard exists to prevent, found by the test that pins the boundary.
+
+`float("nan")` and `float("inf")` both parse, which is how a NaN enters a program at all
+now that `0.0 / 0.0` is an error. Consistent with the dict-key rule already in place, which
+refuses a NaN key because it is not equal to itself.
+
+### What conversion settles about bools
+
+`int(true)` is `1`, as in Python, JavaScript and C#. That is not a crack in the rule that a
+bool is not a number: `1 + true` stays an error, because nobody asked for a conversion
+there. A conversion is a request, and arithmetic is not.
 
 ## `op` marks what the language calls
 
@@ -1414,8 +1497,39 @@ behaviour-neutral apart from the seven type globals it binds: `type(x)` still an
 a string, no slot moved, and `string.upper("hi")` works with nothing written for it, which
 is the cheapest available proof that the two kinds of type really are one thing now.
 
-What v0.5 still owes, in order: the slots themselves, then `extend`, then the diagnostics
-sweep.
+Conversion landed on top of it, and is the proof the collapse paid: `int("42")` needed no
+new keyword, no new dispatch, and no special form — a builtin's seed table names an `init`
+the way it names `upper`, and the one rule added is what construction yields. It also added
+`ErrorKind::Value`, the first new kind since the enum landed, because `int("abc")` is a
+different mistake from `int([1])` and both are catchable. Single-quoted string literals came
+with it, being a lexer change the same work wanted.
+
+What v0.5 still owes, in order: subclassing a builtin, then the slots, then `extend`, then
+the diagnostics sweep.
+
+Subclassing a builtin — `class Email extends string` — is refused today and should not
+stay that way. It needs a payload on `Object::Instance` that the parent's `init` writes
+through `super.init`, and the receiver unwrapped where a method is dispatched, which is one
+site: `call_method` inserts the receiver, so nothing in the natives has to change. What is
+left after that *is* the slot surface — `is_truthy`, `equals`, `display`, indexing, `len`,
+iteration — so it goes before the slots and not after, or the unwrapping gets written twice.
+
+Two rules it brings, both worth stating before they are implemented. `super.init` may only
+appear inside `op init`, which makes "this class never calls `super.init`" a check the
+resolver can run at the class declaration rather than an error waiting for someone to
+construct one; the ancestor chain has to be walked, not just the parent, since a subclass of
+a subclass of `string` still needs the payload. And a runtime backstop survives anyway,
+because `throw` is a legitimate exit from a constructor and requiring the call on every path
+would need dataflow analysis this interpreter does not have.
+
+Equality is the one open decision, and Python settles it by force. If an `Email` equals a
+plain string then it must hash alike, or a dict holds two keys that are equal and land in
+different buckets — so `equals` and `Key::from_value` are one decision, not two. And
+transitivity forces the rest: `Email` and `Slug` both equal `"a@b"`, so they equal each
+other, which means a subclass's extra fields are invisible to `==`. The alternative is a type
+that borrows `string`'s methods and is never equal to a string, which is not what "our own
+string types" means. `Key` needs no new variant either — an instance with a payload unwraps
+to `Key::Str`.
 
 `final` and `const` landed here first, out of order, because they were a rename with a
 feature hiding inside it — see Bindings above. Renaming a keyword only gets cheaper the

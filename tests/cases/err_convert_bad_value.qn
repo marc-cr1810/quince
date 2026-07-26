@@ -1,0 +1,5 @@
+# A ValueError, not a TypeError: a string is exactly what `int` accepts, and this
+# particular string is not a number. The call is right and the data is not, so
+# the fix is upstream of here.
+print(int("12"))
+print(int("abc"))

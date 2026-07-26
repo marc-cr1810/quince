@@ -26,6 +26,12 @@ pub enum ErrorKind {
     /// [`ErrorKind::Type`] because the receiver's type is usually right and the
     /// name usually is not, which is a different mistake to go looking for.
     Attr,
+    /// The right type carrying a value it cannot represent — `int("abc")`, where
+    /// a string is exactly what `int` accepts and that particular string is not
+    /// a number. Separate from [`ErrorKind::Type`] because the call is well
+    /// formed and only the data is wrong, so the fix is upstream in the data
+    /// rather than at the call.
+    Value,
     Index,
     Key,
     Frozen,
@@ -51,6 +57,7 @@ impl ErrorKind {
             ErrorKind::Type => "TypeError",
             ErrorKind::Name => "NameError",
             ErrorKind::Attr => "AttributeError",
+            ErrorKind::Value => "ValueError",
             ErrorKind::Index => "IndexError",
             ErrorKind::Key => "KeyError",
             ErrorKind::Frozen => "FrozenError",
@@ -72,6 +79,7 @@ pub static ERROR_KINDS: &[ErrorKind] = &[
     ErrorKind::Type,
     ErrorKind::Name,
     ErrorKind::Attr,
+    ErrorKind::Value,
     ErrorKind::Index,
     ErrorKind::Key,
     ErrorKind::Frozen,
