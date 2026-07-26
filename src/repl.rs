@@ -820,9 +820,20 @@ pub fn run_repl(use_color_stdout: bool, use_color_stderr: bool) -> Result<()> {
 
         match interp.run_repl(&program) {
             Ok(Some(Value::Nil)) | Ok(None) => {}
+            // Printing the echo is itself a call into the program once a class
+            // can define `op string`, so it can fail — and a failure there is a
+            // Quince error to report, not a reason to leave the REPL. `_` is
+            // bound either way: the expression evaluated, and only printing it
+            // did not.
             Ok(Some(value)) => {
-                println!("{}", value.display_pretty(&interp.heap, use_color_stdout));
+                let printed = interp.display_pretty(&value, use_color_stdout);
                 interp.set_global("_", value);
+                match printed {
+                    Ok(text) => println!("{text}"),
+                    Err(err) => {
+                        eprintln!("{}", err.report_styled(&source, "<repl>", use_color_stderr))
+                    }
+                }
             }
             Err(err) => eprintln!("{}", err.report_styled(&source, "<repl>", use_color_stderr)),
         }
@@ -1157,6 +1168,12 @@ fn handle_meta_command(
             } else {
                 for (name, val) in globals {
                     let name_str = Style::BOLD.paint(&name, use_color_stdout);
+                    // Structural on purpose, and the one place that is right: this
+                    // lists the environment rather than echoing a result, and it
+                    // is what you would reach for to debug a class whose
+                    // `op string` is what went wrong. Running it here would mean a
+                    // broken op could break the tool for finding it — the same
+                    // trade error messages make.
                     let val_str = val.display_pretty(&interp.heap, use_color_stdout);
                     let type_str = Style::DIM.paint(
                         format!("({})", val.type_name(&interp.heap)),
@@ -1288,7 +1305,18 @@ fn handle_meta_command(
             match interp.run_repl(&program) {
                 Ok(Some(val)) => {
                     let elapsed = start.elapsed();
-                    let val_str = val.display_pretty(&interp.heap, use_color_stdout);
+                    // Printed the way the prompt would print it, `op string` and
+                    // all: this echoes a result, so showing it differently from
+                    // the same expression typed bare would be a difference with
+                    // no reason behind it. Measured before rendering, so what the
+                    // timing reports is the expression and not its printing.
+                    let val_str = match interp.display_pretty(&val, use_color_stdout) {
+                        Ok(text) => text,
+                        Err(err) => {
+                            eprintln!("{}", err.report_styled(arg, "<repl>", use_color_stderr));
+                            return Ok(true);
+                        }
+                    };
                     let time_str = Style::DIM
                         .paint(format!("(evaluated in {:.2?})", elapsed), use_color_stdout);
                     println!("{val_str} {time_str}");

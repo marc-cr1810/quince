@@ -457,7 +457,8 @@ impl Interp {
                 then,
                 otherwise,
             } => {
-                if self.eval(cond, env)?.is_truthy(&self.heap) {
+                let cond = self.eval(cond, env)?;
+                if self.is_truthy(&cond)? {
                     self.exec_block(then, env)
                 } else if let Some(other) = otherwise {
                     self.exec(other, env)
@@ -467,7 +468,11 @@ impl Interp {
             }
 
             StmtKind::While { cond, body } => {
-                while self.eval(cond, env)?.is_truthy(&self.heap) {
+                loop {
+                    let cond = self.eval(cond, env)?;
+                    if !self.is_truthy(&cond)? {
+                        break;
+                    }
                     if let Flow::Return(value) = self.exec_block(body, env)? {
                         return Ok(Flow::Return(value));
                     }
@@ -606,7 +611,7 @@ impl Interp {
             .get(&Key::Str(Rc::from(MESSAGE)))
         {
             Some(Value::Str(message)) => message.to_string(),
-            Some(other) => other.display(&self.heap),
+            Some(other) => other.display_base(&self.heap),
             None => name.clone(),
         };
         QuinceError::thrown(id, name, message, span)
@@ -878,9 +883,10 @@ impl Interp {
 
             ExprKind::Logical { op, lhs, rhs } => {
                 let lhs = self.eval(lhs, env)?;
+                let truthy = self.is_truthy(&lhs)?;
                 let short_circuits = match op {
-                    LogicalOp::And => !lhs.is_truthy(&self.heap),
-                    LogicalOp::Or => lhs.is_truthy(&self.heap),
+                    LogicalOp::And => !truthy,
+                    LogicalOp::Or => truthy,
                 };
                 // Returns the operand itself rather than a bool, so `a || b`
                 // works as a default-value idiom.
@@ -1182,7 +1188,7 @@ impl Interp {
             Value::Dict(id) => {
                 let key = key_of(&self.heap, index, span)?;
                 self.heap.dict(*id).get(&key).cloned().ok_or_else(|| {
-                    let key_repr = index.repr(&self.heap);
+                    let key_repr = index.repr_base(&self.heap);
                     let mut err = QuinceError::new(
                         format!("key {key_repr} is not in the dict"),
                         span,
@@ -1785,12 +1791,53 @@ impl Interp {
         err
     }
 
+    // -- what the language asks a value ------------------------------------
+    //
+    // The questions the language asks without a program writing a call: is this
+    // true, are these equal, how does this print. A class answers them with
+    // `op bool`, `op eq` and `op string`, so each is a method here rather than on
+    // `Value` — the answer can require running Quince code, which needs the
+    // interpreter and can fail.
+    //
+    // Nothing consults a slot yet. These delegate to the `_base` family, which
+    // is what `Value` still offers and what error messages must keep using; see
+    // the note beside it in value.rs. The shape is what changes here, so that
+    // wiring the slots is a change to these four bodies and to nothing else.
+    //
+    // One consequence to carry into that step: each of these becomes a safe
+    // point once it can call a method, so a caller holding a `Value` across one
+    // will need it rooted in `temps` — the same hazard as an argument evaluated
+    // after its callee.
+
+    /// Whether a value counts as true, which a class may answer with `op bool`.
+    pub fn is_truthy(&mut self, value: &Value) -> Result<bool, QuinceError> {
+        Ok(value.is_truthy_base(&self.heap))
+    }
+
+    /// Whether two values are equal, which a class may answer with `op eq`.
+    pub fn equals(&mut self, lhs: &Value, rhs: &Value) -> Result<bool, QuinceError> {
+        Ok(lhs.equals_base(rhs, &self.heap))
+    }
+
+    /// How a value prints, which a class may answer with `op string`.
+    pub fn display(&mut self, value: &Value) -> Result<String, QuinceError> {
+        Ok(value.display_base(&self.heap))
+    }
+
+    /// How a value prints when the REPL echoes it, where a large or nested
+    /// collection is broken over lines. Reaches `op string` for the same reason
+    /// [`Interp::display`] does — it is the same question, asked with room.
+    pub fn display_pretty(&mut self, value: &Value, color: bool) -> Result<String, QuinceError> {
+        Ok(value.display_pretty(&self.heap, color))
+    }
+
     // -- operators ---------------------------------------------------------
 
-    fn unary(&self, op: UnaryOp, value: Value, span: Span) -> Result<Value, QuinceError> {
+    fn unary(&mut self, op: UnaryOp, value: Value, span: Span) -> Result<Value, QuinceError> {
         // `not` asks only for truthiness, which unwraps a payload for itself.
         if let UnaryOp::Not = op {
-            return Ok(Value::Bool(!value.is_truthy(&self.heap)));
+            let truthy = self.is_truthy(&value)?;
+            return Ok(Value::Bool(!truthy));
         }
         // Negation acts on the number, so a class extending `int` is unwrapped to
         // it and `-Count(5)` is `-5` rather than a `Count`. The error still names
@@ -1818,10 +1865,13 @@ impl Interp {
     ) -> Result<Value, QuinceError> {
         use BinaryOp::*;
 
-        // Equality is defined for every pair of types, so it never fails.
+        // Equality is defined for every pair of types, which is why there is no
+        // type error to raise here — unlike `-`, no pair of values is refused.
+        // The `?` is for the class that answers for itself: an `op eq` is
+        // ordinary Quince code and can raise like any other.
         match op {
-            Eq => return Ok(Value::Bool(lhs.equals(&rhs, &self.heap))),
-            Ne => return Ok(Value::Bool(!lhs.equals(&rhs, &self.heap))),
+            Eq => return Ok(Value::Bool(self.equals(&lhs, &rhs)?)),
+            Ne => return Ok(Value::Bool(!self.equals(&lhs, &rhs)?)),
             In => return self.contains(&rhs, &lhs, expr_span),
             _ => {}
         }
@@ -1870,20 +1920,41 @@ impl Interp {
     /// An unhashable needle is an error rather than a plain `false`, for the
     /// same reason `d[[]]` is: a value that could never have been inserted is a
     /// mistake in the program, and answering `false` would hide it.
-    fn contains(&self, haystack: &Value, needle: &Value, span: Span) -> Result<Value, QuinceError> {
+    fn contains(
+        &mut self,
+        haystack: &Value,
+        needle: &Value,
+        span: Span,
+    ) -> Result<Value, QuinceError> {
         // Both sides unwrap: a subclass of `list` can be searched, and a subclass
         // of `string` can be the part searched for. `equals` and `key_of` unwrap the
         // needle for themselves, so only the string arm needs it named.
-        let found = match haystack.base(&self.heap) {
+        //
+        // Cloned rather than borrowed, because comparing an item is a call into
+        // the interpreter and cannot hold a borrow of the heap across it.
+        let base = haystack.base(&self.heap).clone();
+        let found = match &base {
             Value::Dict(id) => self
                 .heap
                 .dict(*id)
                 .contains(&key_of(&self.heap, needle, span)?),
-            Value::List(id) => self
-                .heap
-                .list(*id)
-                .iter()
-                .any(|item| item.equals(needle, &self.heap)),
+            // By index rather than over an iterator, for the same reason: each
+            // comparison can run a program's `op eq`, which is free to mutate the
+            // very list being searched. `get` is what makes a list that shrank
+            // mid-search end the search rather than panic.
+            Value::List(id) => {
+                let id = *id;
+                let mut found = false;
+                let mut i = 0;
+                while let Some(item) = self.heap.list(id).get(i).cloned() {
+                    if self.equals(&item, needle)? {
+                        found = true;
+                        break;
+                    }
+                    i += 1;
+                }
+                found
+            }
             Value::Str(text) => match needle.base(&self.heap) {
                 Value::Str(part) => text.contains(part.as_ref()),
                 _ => {
@@ -2211,10 +2282,13 @@ static PRINT: Native = Native {
     name: "print",
     arity: None,
     func: |interp, args, _span| {
-        let parts: Vec<_> = args
-            .iter()
-            .map(|value| value.display(&interp.heap))
-            .collect();
+        // Every argument is rendered before anything is written, so a failure
+        // part-way through prints nothing rather than half a line. Printing is
+        // where a program's `op string` runs, and it can raise.
+        let mut parts = Vec::with_capacity(args.len());
+        for value in args {
+            parts.push(interp.display(value)?);
+        }
         writeln!(interp.out, "{}", parts.join(" ")).expect("failed to write output");
         Ok(Value::Nil)
     },
@@ -2322,7 +2396,7 @@ pub static REMOVE: Native = Native {
                 .map_err(|_| frozen(&interp.heap, &args[0], span))?
                 .ok_or_else(|| {
                     QuinceError::new(
-                        format!("key {} is not in the dict", args[1].repr(&interp.heap)),
+                        format!("key {} is not in the dict", args[1].repr_base(&interp.heap)),
                         span,
                     )
                     .with_kind(ErrorKind::Key)
@@ -2578,7 +2652,7 @@ pub static INT_INIT: Native = Native {
         // a prompt arrives with it and stripping is what the caller would do.
         Value::Str(text) => text.trim().parse::<i64>().map(Value::Int).map_err(|_| {
             QuinceError::new(
-                format!("cannot make an int from {}", args[0].repr(&interp.heap)),
+                format!("cannot make an int from {}", args[0].repr_base(&interp.heap)),
                 span,
             )
             .with_kind(ErrorKind::Value)
@@ -2599,7 +2673,7 @@ pub static FLOAT_INIT: Native = Native {
         Value::Int(n) => Ok(Value::Float(*n as f64)),
         Value::Str(text) => text.trim().parse::<f64>().map(Value::Float).map_err(|_| {
             QuinceError::new(
-                format!("cannot make a float from {}", args[0].repr(&interp.heap)),
+                format!("cannot make a float from {}", args[0].repr_base(&interp.heap)),
                 span,
             )
             .with_kind(ErrorKind::Value)
@@ -2614,14 +2688,17 @@ pub static FLOAT_INIT: Native = Native {
 pub static STR_INIT: Native = Native {
     name: "string",
     arity: Some(1),
-    func: |interp, args, _span| Ok(Value::Str(Rc::from(args[0].display(&interp.heap)))),
+    func: |interp, args, _span| {
+        let text = interp.display(&args[0])?;
+        Ok(Value::Str(Rc::from(text)))
+    },
 };
 
 /// Exactly the test `if` applies, exposed as a value. Also total.
 pub static BOOL_INIT: Native = Native {
     name: "bool",
     arity: Some(1),
-    func: |interp, args, _span| Ok(Value::Bool(args[0].is_truthy(&interp.heap))),
+    func: |interp, args, _span| Ok(Value::Bool(interp.is_truthy(&args[0])?)),
 };
 
 /// `list()` is empty and `list(xs)` copies. Nothing else converts: `list("ab")`

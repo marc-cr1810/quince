@@ -152,9 +152,26 @@ impl Value {
         }
     }
 
+    // -- the base family ---------------------------------------------------
+    //
+    // What a value *is*, decided by matching on it and reaching no further. The
+    // `_base` in the name is [`Value::base`]: a payload is unwrapped, and the
+    // class is never asked, so none of these can run Quince code, allocate, or
+    // fail.
+    //
+    // Which is why they are the ones error messages use. A message about a value
+    // must not consult the class it belongs to — an `op string` that itself
+    // raises would mean a second error while reporting the first, and when the
+    // broken op *is* the bug, a loop. See the note at the `frozen` helper in
+    // interp.rs: a worse message beats that trade every time.
+    //
+    // Everything else goes through the [`crate::interp::Interp`] methods of the
+    // same names, which do ask the class, and so take `&mut Interp` and return a
+    // `Result`.
+
     /// Python-style truthiness: `nil`, `false`, zero, and empty collections are
     /// falsy; everything else is truthy.
-    pub fn is_truthy(&self, heap: &Heap) -> bool {
+    pub fn is_truthy_base(&self, heap: &Heap) -> bool {
         match self.base(heap) {
             Value::Nil => false,
             Value::Bool(b) => *b,
@@ -177,7 +194,7 @@ impl Value {
     /// Numbers compare across `int` and `float`, since they are one numeric
     /// tower, but no other pair of types is ever equal — `1 == "1"` is `false`
     /// rather than a coercion.
-    pub fn equals(&self, other: &Value, heap: &Heap) -> bool {
+    pub fn equals_base(&self, other: &Value, heap: &Heap) -> bool {
         match (self.base(heap), other.base(heap)) {
             (Value::Nil, Value::Nil) => true,
             (Value::Bool(a), Value::Bool(b)) => a == b,
@@ -190,7 +207,7 @@ impl Value {
                     return true;
                 }
                 let (a, b) = (heap.list(*a), heap.list(*b));
-                a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.equals(y, heap))
+                a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.equals_base(y, heap))
             }
             // Order is not part of a dict's identity, only its contents:
             // `{"a": 1, "b": 2}` equals `{"b": 2, "a": 1}`.
@@ -201,7 +218,7 @@ impl Value {
                 let (a, b) = (heap.dict(*a), heap.dict(*b));
                 a.len() == b.len()
                     && a.iter().all(|(key, value)| {
-                        b.get(key).is_some_and(|other| value.equals(other, heap))
+                        b.get(key).is_some_and(|other| value.equals_base(other, heap))
                     })
             }
             // Functions compare by identity; there is no useful structural test.
@@ -236,7 +253,7 @@ impl Value {
     }
 
     /// How a value prints. `Nil` shows as `nil` so it is visible in output.
-    pub fn display(&self, heap: &Heap) -> String {
+    pub fn display_base(&self, heap: &Heap) -> String {
         self.display_styled(heap, false)
     }
 
@@ -346,7 +363,7 @@ impl Value {
                     let max_width = 80;
 
                     for (i, item) in items.iter().enumerate() {
-                        let item_unstyled = item.repr(heap);
+                        let item_unstyled = item.repr_base(heap);
                         let item_styled = item.repr_styled(heap, color);
                         let comma = if i + 1 < items.len() { "," } else { "" };
                         let sep_len = if i + 1 < items.len() { 2 } else { 0 };
@@ -444,7 +461,7 @@ impl Value {
     /// How a value prints when nested inside a collection, where strings need
     /// quoting to stay distinguishable from bare identifiers. Also what error
     /// messages use when they name a value rather than a type.
-    pub fn repr(&self, heap: &Heap) -> String {
+    pub fn repr_base(&self, heap: &Heap) -> String {
         self.repr_styled(heap, false)
     }
 
@@ -461,8 +478,8 @@ impl Value {
     }
 }
 
-/// Only used by tests and assertions; the evaluator compares through `equals`
-/// so it can reach the heap.
+/// Only used by tests and assertions; the evaluator compares through
+/// `Interp::equals` so it can reach the heap and the class.
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -552,35 +569,35 @@ mod tests {
         let empty = Value::List(heap.alloc(Object::List(vec![])));
         let full = Value::List(heap.alloc(Object::List(vec![Value::Int(1)])));
 
-        assert!(!Value::Nil.is_truthy(&heap));
-        assert!(!Value::Bool(false).is_truthy(&heap));
-        assert!(!Value::Int(0).is_truthy(&heap));
-        assert!(!Value::Float(0.0).is_truthy(&heap));
-        assert!(!Value::from("").is_truthy(&heap));
-        assert!(!empty.is_truthy(&heap));
+        assert!(!Value::Nil.is_truthy_base(&heap));
+        assert!(!Value::Bool(false).is_truthy_base(&heap));
+        assert!(!Value::Int(0).is_truthy_base(&heap));
+        assert!(!Value::Float(0.0).is_truthy_base(&heap));
+        assert!(!Value::from("").is_truthy_base(&heap));
+        assert!(!empty.is_truthy_base(&heap));
 
-        assert!(Value::Bool(true).is_truthy(&heap));
-        assert!(Value::Int(1).is_truthy(&heap));
-        assert!(Value::Int(-1).is_truthy(&heap));
-        assert!(Value::from("a").is_truthy(&heap));
-        assert!(full.is_truthy(&heap));
+        assert!(Value::Bool(true).is_truthy_base(&heap));
+        assert!(Value::Int(1).is_truthy_base(&heap));
+        assert!(Value::Int(-1).is_truthy_base(&heap));
+        assert!(Value::from("a").is_truthy_base(&heap));
+        assert!(full.is_truthy_base(&heap));
     }
 
     #[test]
     fn numbers_compare_across_int_and_float() {
         let heap = Heap::new();
-        assert!(Value::Int(1).equals(&Value::Float(1.0), &heap));
-        assert!(Value::Float(1.0).equals(&Value::Int(1), &heap));
-        assert!(!Value::Int(1).equals(&Value::Float(1.5), &heap));
+        assert!(Value::Int(1).equals_base(&Value::Float(1.0), &heap));
+        assert!(Value::Float(1.0).equals_base(&Value::Int(1), &heap));
+        assert!(!Value::Int(1).equals_base(&Value::Float(1.5), &heap));
     }
 
     #[test]
     fn unrelated_types_are_never_equal() {
         // Strong typing: no coercion sneaks in through `==`.
         let heap = Heap::new();
-        assert!(!Value::Int(1).equals(&Value::from("1"), &heap));
-        assert!(!Value::Int(1).equals(&Value::Bool(true), &heap));
-        assert!(!Value::Nil.equals(&Value::Bool(false), &heap));
+        assert!(!Value::Int(1).equals_base(&Value::from("1"), &heap));
+        assert!(!Value::Int(1).equals_base(&Value::Bool(true), &heap));
+        assert!(!Value::Nil.equals_base(&Value::Bool(false), &heap));
     }
 
     #[test]
@@ -589,8 +606,8 @@ mod tests {
         let a = Value::List(heap.alloc(Object::List(vec![Value::Int(1), Value::from("x")])));
         let b = Value::List(heap.alloc(Object::List(vec![Value::Int(1), Value::from("x")])));
         let c = Value::List(heap.alloc(Object::List(vec![Value::Int(2)])));
-        assert!(a.equals(&b, &heap));
-        assert!(!a.equals(&c, &heap));
+        assert!(a.equals_base(&b, &heap));
+        assert!(!a.equals_base(&c, &heap));
     }
 
     #[test]
@@ -601,23 +618,23 @@ mod tests {
         heap.list_mut(id)
             .expect("never frozen here")
             .push(Value::List(id));
-        assert!(Value::List(id).equals(&Value::List(id), &heap));
+        assert!(Value::List(id).equals_base(&Value::List(id), &heap));
     }
 
     #[test]
     fn floats_stay_distinguishable_from_ints_when_printed() {
         let heap = Heap::new();
-        assert_eq!(Value::Int(1).display(&heap), "1");
-        assert_eq!(Value::Float(1.0).display(&heap), "1.0");
-        assert_eq!(Value::Float(1.5).display(&heap), "1.5");
+        assert_eq!(Value::Int(1).display_base(&heap), "1");
+        assert_eq!(Value::Float(1.0).display_base(&heap), "1.0");
+        assert_eq!(Value::Float(1.5).display_base(&heap), "1.5");
     }
 
     #[test]
     fn strings_print_bare_but_quote_inside_lists() {
         let mut heap = Heap::new();
-        assert_eq!(Value::from("hi").display(&heap), "hi");
+        assert_eq!(Value::from("hi").display_base(&heap), "hi");
         let list = Value::List(heap.alloc(Object::List(vec![Value::from("hi"), Value::Int(2)])));
-        assert_eq!(list.display(&heap), r#"["hi", 2]"#);
+        assert_eq!(list.display_base(&heap), r#"["hi", 2]"#);
     }
 
     #[test]
