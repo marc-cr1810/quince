@@ -1,0 +1,12 @@
+# A binary operator asks the value on the left. `Money` declaring `op sub` does
+# not make `500 - Money(200)` work, because handing the op the two values the
+# other way round would compute `200 - 500` and be wrong by a sign, with nothing
+# left to catch it.
+class Money {
+    op init(cents) { self.cents = cents }
+    op sub(other) { return Money(self.cents - other.cents) }
+    op string() { return string(self.cents) }
+}
+
+print(Money(500) - Money(200))
+print(500 - Money(200))

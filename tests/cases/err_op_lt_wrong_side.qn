@@ -1,0 +1,10 @@
+# The same rule for `op lt`, which is why it needs the same explanation: an
+# `op cmp` on the right would have answered, with its sign turned around, and
+# `op lt` cannot be read backwards that way.
+class Rank {
+    op init(n) { self.n = n }
+    op lt(other) { return self.n < other.n }
+}
+
+print(Rank(1) < Rank(2))
+print(1 < Rank(2))

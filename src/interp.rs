@@ -2149,9 +2149,17 @@ impl Interp {
             let truthy = self.is_truthy(&value)?;
             return Ok(Value::Bool(!truthy));
         }
-        // Negation acts on the number, so a class extending `int` is unwrapped to
-        // it and `-Count(5)` is `-5` rather than a `Count`. The error still names
-        // the class, because that is the value the line was written about.
+        // `op neg` first, so a class that says what `-x` means to it is asked
+        // before the number it might be carrying. Whatever it answers is the
+        // answer: unlike `op bool`, there is no type `-x` has to be.
+        if let Some(method) = self.slot(&value, Op::Neg) {
+            return self.call_op(method, &value, Vec::new());
+        }
+
+        // Otherwise negation acts on the number, so a class extending `int` is
+        // unwrapped to it and `-Count(5)` is `-5` rather than a `Count`. The error
+        // still names the class, because that is the value the line was written
+        // about.
         match value.base(&self.heap) {
             Value::Int(n) => n.checked_neg().map(Value::Int).ok_or_else(|| {
                 QuinceError::new("integer overflow", span).with_kind(ErrorKind::Overflow)
@@ -2190,6 +2198,13 @@ impl Interp {
         // same reason: a class extending `int` that says how it orders has to beat
         // the int it carries.
         if let Some(answer) = self.compare(op, &lhs, &rhs, expr_span)? {
+            return Ok(answer);
+        }
+
+        // And the arithmetic, which has to be asked before the `+` on strings and
+        // lists below: a class extending `list` that says what `+` means to it is
+        // saying it instead of concatenation, not as well as.
+        if let Some(answer) = self.arith(op, &lhs, &rhs, expr_span)? {
             return Ok(answer);
         }
 
@@ -2270,7 +2285,15 @@ impl Interp {
         }
 
         let Some((method, receiver, other, reflected)) = self.binary_slot(Op::Cmp, lhs, rhs) else {
-            return self.partly_ordered(op, lhs, rhs, span).map(|()| None);
+            self.partly_ordered(op, lhs, rhs, span)?;
+            // `5 < Money(3)` where `Money` declares `op lt`: the same mistake as
+            // `2 - Money(3)`, and it gets the same explanation. An `op cmp` on the
+            // right *would* have answered, which is why this is only reached once
+            // that has been asked for and found missing.
+            if let Some(specific) = specific {
+                self.only_asks_the_left(specific, lhs, rhs, span)?;
+            }
+            return Ok(None);
         };
         let answer = self.call_op(method, &receiver, vec![other])?;
         let ordering = match answer.base(&self.heap) {
@@ -2342,6 +2365,75 @@ impl Interp {
             }
         }
         Ok(())
+    }
+
+    /// `+`, `-`, `*`, `/`, `//` and `%` when the left operand's class answers.
+    ///
+    /// The left operand's, and only the left's. `2 - Money(3)` reaching `Money`'s
+    /// `sub` would compute `3 - 2` and be wrong by a sign with nothing to catch
+    /// it, so [`Op::reflect`] says `Never` for all seven and `binary_slot` never
+    /// asks the right. Writing `2 - Money(3)` is a type error, which is the same
+    /// answer C++ gives a class with a member `operator-` and no free function.
+    ///
+    /// Whatever the op returns is the value of the expression — no type is
+    /// required, and none could be. A class extending `list` whose `+` appends
+    /// returns another of itself, which is the entire point of declaring it.
+    fn arith(
+        &mut self,
+        op: BinaryOp,
+        lhs: &Value,
+        rhs: &Value,
+        span: Span,
+    ) -> Result<Option<Value>, QuinceError> {
+        let slot = match op {
+            BinaryOp::Add => Op::Add,
+            BinaryOp::Sub => Op::Sub,
+            BinaryOp::Mul => Op::Mul,
+            BinaryOp::Div => Op::Div,
+            BinaryOp::FloorDiv => Op::FloorDiv,
+            BinaryOp::Rem => Op::Rem,
+            // The comparisons and `in`, which are answered above.
+            _ => return Ok(None),
+        };
+        let Some((method, receiver, other, _)) = self.binary_slot(slot, lhs, rhs) else {
+            return self.only_asks_the_left(slot, lhs, rhs, span).map(|()| None);
+        };
+        self.call_op(method, &receiver, vec![other]).map(Some)
+    }
+
+    /// Explains `2 - Money(3)`, where the class on the *right* is the one that
+    /// declared the op.
+    ///
+    /// [`Reflect`] says why the right is not asked, and this is the moment a
+    /// program finds out. Falling through to "cannot subtract int and Money" with
+    /// "change the types" would be advice to go and rewrite a class that is
+    /// already correct — the same failure the `<=` diagnostic exists to avoid.
+    fn only_asks_the_left(
+        &mut self,
+        slot: Op,
+        lhs: &Value,
+        rhs: &Value,
+        span: Span,
+    ) -> Result<(), QuinceError> {
+        // Only the right, since the left having it is how we would not be here.
+        if self.slot(rhs, slot).is_none() {
+            return Ok(());
+        }
+        Err(QuinceError::new(
+            format!(
+                "`op {}` is {}'s, and the value on the left is the one asked",
+                slot.name(),
+                rhs.type_name(&self.heap),
+            ),
+            span,
+        )
+        .with_kind(ErrorKind::Type)
+        .with_help(format!(
+            "reaching {} from the right would hand it the two values the other way round, so it \
+             is not asked — convert the {}, or swap the operands if that is what you meant",
+            rhs.type_name(&self.heap),
+            lhs.type_name(&self.heap),
+        )))
     }
 
     /// `needle in haystack`.

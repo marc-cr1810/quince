@@ -1,0 +1,66 @@
+# A class says what the arithmetic operators mean to it. Seven ops, one per
+# operator, with no coercion and no derivation between them: `op add` is `+` and
+# says nothing about `-`.
+class Vec {
+    op init(x, y) {
+        self.x = x
+        self.y = y
+    }
+    op add(o) { return Vec(self.x + o.x, self.y + o.y) }
+    op sub(o) { return Vec(self.x - o.x, self.y - o.y) }
+    op mul(k) { return Vec(self.x * k, self.y * k) }
+    op neg() { return Vec(-self.x, -self.y) }
+    op string() { return "(" + string(self.x) + ", " + string(self.y) + ")" }
+}
+
+final a = Vec(1, 2)
+final b = Vec(10, 20)
+print(a + b, a - b)
+print(a * 3, -a)
+
+# The right operand is never asked, so the other operand can be anything the op
+# knows how to read — here a plain int, which is why `a * 3` is written that way
+# round and `3 * a` is a type error.
+print(Vec(2, 3) * 2)
+
+# Each op stands alone. Nothing derives `/` from `*`, or `-` from `+` and `neg`.
+class Half {
+    op init(n) { self.n = n }
+    op div(k) { return Half(self.n / k) }
+    op string() { return string(self.n) }
+}
+print(Half(9) / 2)
+
+# The remaining three, and the two that keep an int an int.
+class Count {
+    op init(n) { self.n = n }
+    op floordiv(k) { return Count(self.n // k) }
+    op rem(k) { return Count(self.n % k) }
+    op mul(k) { return Count(self.n * k) }
+    op string() { return string(self.n) }
+}
+print(Count(7) // 2, Count(7) % 2, Count(7) * 2)
+
+# Inherited like any other method: `slots` are copied down when the class is
+# built, so a subclass that declares nothing still answers.
+class Vec3 extends Vec {}
+print(Vec3(1, 1) + Vec(2, 2))
+
+# A subclass of a builtin: the op beats the number the instance carries, the way
+# `op string` does. Without `op mul`, `Doubled(3) * 2` would be plain `6`.
+class Doubled extends int {
+    op mul(k) { return Doubled(int(self) * k * 2) }
+    op string() { return "doubled " + string(int(self)) }
+}
+print(Doubled(3) * 2)
+# And an operator it did not declare falls through to the int it carries.
+print(Doubled(3) + 1)
+
+# `self + x` inside `op add` would ask `op add` again — the class is asked before
+# the payload is unwrapped, so there is no implicit way down to the list. `list`
+# is the way down, and it is the same word a program would use anywhere else.
+class Growing extends list {
+    op add(item) { return Growing(list(self) + [item]) }
+}
+final grown = Growing([1, 2]) + 3
+print(grown, len(grown), type(grown))
