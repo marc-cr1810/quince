@@ -1,0 +1,34 @@
+# A class says how it prints, and is asked everywhere a value is printed.
+class Temperature {
+    op init(c) { self.c = c }
+    op string() { return string(self.c) + " degrees" }
+}
+
+let warm = Temperature(21)
+print(warm)
+print([warm, Temperature(0)])
+print({"today": warm})
+
+# `string(x)` and `print(x)` are one question with one answer.
+print(string(warm))
+print("it is " + string(warm))
+
+# A subclass of a builtin: the op beats the payload it carries, and beats it
+# inside a collection too, where a plain string would have been quoted.
+class Email extends string {
+    op string() { return "<" + self.upper() + ">" }
+}
+let e = Email("marc@gmail.com")
+print(e)
+print([e])
+
+# The payload is still what the operators act on.
+print(e + "!")
+print(len(e))
+print(e == "marc@gmail.com")
+
+# A class that declares nothing prints as it always did.
+class Plain {
+    op init() { }
+}
+print(Plain())

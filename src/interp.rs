@@ -10,6 +10,7 @@ use crate::env::{self, AssignError, Env, Globals};
 use crate::error::{ERROR_KINDS, ErrorKind, QuinceError};
 use crate::heap::{Heap, ObjId, Object};
 use crate::token::{Span, TokenKind};
+use crate::show::Ask;
 use crate::value::{BoundMethod, Function, Native, Value};
 
 /// Guards against a runaway recursion taking the process down with a native
@@ -44,13 +45,66 @@ pub fn with_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
     std::thread::scope(|scope| {
         std::thread::Builder::new()
             .stack_size(STACK_SIZE)
-            .spawn_scoped(scope, f)
+            .spawn_scoped(scope, || {
+                FLOOR.set(here());
+                f()
+            })
             .expect("should be able to spawn the interpreter thread")
             .join()
             // Propagates the original panic instead of wrapping it, so a
             // failure reads the same as it would have without the thread.
             .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
     })
+}
+
+/// How much of [`STACK_SIZE`] a program may spend before recursion is refused.
+///
+/// The rest is what the descent between two checks needs, plus unwinding and
+/// building the report. Only a call is checked, and one Quince call is a dozen
+/// native frames whose size nobody is tracking, so the margin is where the
+/// imprecision goes. Four mebibytes is roughly a hundred times the worst step
+/// measured.
+const STACK_RESERVE: usize = 4 * 1024 * 1024;
+
+thread_local! {
+    /// Where the stack the interpreter was given began, or 0 if it was not given
+    /// one.
+    ///
+    /// Set by [`with_stack`], which is the only place that knows how large the
+    /// stack is — and knowing that is the whole point. An interpreter driven
+    /// without it still has [`MAX_DEPTH`], which is what everything had before
+    /// this existed.
+    static FLOOR: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Roughly where the stack pointer is now.
+///
+/// The address of a local, which is within a frame or two of the real thing —
+/// and a frame or two does not matter against a reserve measured in mebibytes.
+#[inline(never)]
+fn here() -> usize {
+    let anchor = 0u8;
+    &anchor as *const u8 as usize
+}
+
+/// Whether recursing again would risk running out of stack.
+///
+/// The counterpart to [`MAX_DEPTH`], and needed because that is a count while
+/// this is the thing the count stands for. What a call costs in native stack
+/// depends on the shape of the expression it sits in: `f()` inside a `return` is
+/// a handful of frames, while a call inside a printed value is that plus the
+/// renderer, and the second reaches the end of the stack in far fewer calls. A
+/// counter tuned for the cheap shape cannot see that; an address can.
+///
+/// Downward growth is assumed, and `saturating_sub` is what makes the assumption
+/// harmless rather than wrong: a platform growing the other way reports no use at
+/// all and leaves `MAX_DEPTH` in charge.
+fn out_of_stack() -> bool {
+    let floor = FLOOR.get();
+    if floor == 0 {
+        return false;
+    }
+    floor.saturating_sub(here()) > STACK_SIZE - STACK_RESERVE
 }
 
 /// The base class every error extends, defined in Quince rather than in Rust.
@@ -1305,6 +1359,21 @@ impl Interp {
                     .with_kind(ErrorKind::Recursion));
                 }
 
+                // The same refusal for the same reason, arrived at differently:
+                // `MAX_DEPTH` counts calls, and this measures what a call was
+                // standing in for. Both are here because each catches what the
+                // other cannot — a count is the same everywhere and so is worth
+                // being the documented limit, and a measurement is the only thing
+                // that sees an expensive shape run out early.
+                if out_of_stack() {
+                    return Err(QuinceError::new("recursion is too deep to continue", span)
+                        .with_kind(ErrorKind::Recursion)
+                        .with_help(
+                            "this nests further than the interpreter can follow — the recursion \
+                             needs a base case that stops sooner",
+                        ));
+                }
+
                 // Parameters are the body scope's first slots, in order, so
                 // binding them needs no names at all.
                 let scope = self.heap.alloc(Object::Env(Env::new(
@@ -1799,19 +1868,98 @@ impl Interp {
     // `Value` — the answer can require running Quince code, which needs the
     // interpreter and can fail.
     //
-    // Nothing consults a slot yet. These delegate to the `_base` family, which
-    // is what `Value` still offers and what error messages must keep using; see
-    // the note beside it in value.rs. The shape is what changes here, so that
-    // wiring the slots is a change to these four bodies and to nothing else.
-    //
-    // One consequence to carry into that step: each of these becomes a safe
-    // point once it can call a method, so a caller holding a `Value` across one
-    // will need it rooted in `temps` — the same hazard as an argument evaluated
-    // after its callee.
+    // A class that declared nothing falls through to the `_base` family, which is
+    // what `Value` still offers and what error messages must keep using; see the
+    // note beside it in value.rs.
+
+    /// The method a value's class supplies for `op`, declared or inherited.
+    ///
+    /// One array read after finding the class, which is the whole point of the
+    /// shape: `if x` on a class that defines nothing costs a bounds check, not a
+    /// hashed name.
+    pub(crate) fn slot(&self, value: &Value, op: Op) -> Option<Value> {
+        let class = value.class(&self.heap);
+        self.heap.class(class).slot(op).cloned()
+    }
+
+    /// Calls what a slot holds, with the receiver and arguments rooted.
+    ///
+    /// No span comes in, because a slot call cannot be wrong at the point of the
+    /// call: the parser checked the parameter count against [`Op::arity`], and
+    /// only an `op` ever fills a slot, so there is no arity to report and nothing
+    /// uncallable. The span it does need is for the recursion limit, and the op's
+    /// own body is where that should point — an `op string` that prints itself is
+    /// a mistake in the op, not at the `print` that innocently asked.
+    ///
+    /// Rooting, because this is a safe point: the receiver and every argument sit
+    /// in Rust locals belonging to callers that were built to hold neither across
+    /// a call. Restored before returning either way, which is the discipline
+    /// `exec_try` depends on.
+    pub(crate) fn call_op(
+        &mut self,
+        method: Value,
+        receiver: &Value,
+        args: Vec<Value>,
+    ) -> Result<Value, QuinceError> {
+        let span = match &method {
+            Value::Function(id) => self.heap.function(*id).decl.body.span,
+            // A builtin's seeded `init` is the only native a slot ever holds, and
+            // construction reaches it without coming through here.
+            _ => Span::new(0, 0),
+        };
+
+        let mark = self.temps.len();
+        self.temps.push(receiver.clone());
+        self.temps.extend(args.iter().cloned());
+        let result = self.call_method(receiver.clone(), method, args, span);
+        self.temps.truncate(mark);
+        result
+    }
+
+    /// The error for an `op` that answered with the wrong kind of value.
+    ///
+    /// Reported against the op's body rather than the expression that triggered
+    /// it, for the same reason the recursion limit is: the line that wrote `if x`
+    /// is not the line that is wrong.
+    pub(crate) fn op_returned(
+        &self,
+        op: Op,
+        receiver: &Value,
+        expected: &str,
+        got: &Value,
+    ) -> QuinceError {
+        let span = self
+            .slot(receiver, op)
+            .and_then(|method| match method {
+                Value::Function(id) => Some(self.heap.function(id).decl.body.span),
+                _ => None,
+            })
+            .unwrap_or(Span::new(0, 0));
+        QuinceError::new(
+            format!(
+                "`op {}` must answer with {expected}, but {}'s returned {}",
+                op.name(),
+                receiver.type_name(&self.heap),
+                got.type_name(&self.heap)
+            ),
+            span,
+        )
+        .with_kind(ErrorKind::Type)
+    }
 
     /// Whether a value counts as true, which a class may answer with `op bool`.
     pub fn is_truthy(&mut self, value: &Value) -> Result<bool, QuinceError> {
-        Ok(value.is_truthy_base(&self.heap))
+        let Some(method) = self.slot(value, Op::Bool) else {
+            return Ok(value.is_truthy_base(&self.heap));
+        };
+        let answer = self.call_op(method, value, Vec::new())?;
+        // Nothing is coerced. `op bool` deciding `if x` by returning a list would
+        // mean the emptiness of that list quietly decided the branch, one
+        // indirection away from anything the reader can see.
+        match answer.base(&self.heap) {
+            Value::Bool(b) => Ok(*b),
+            other => Err(self.op_returned(Op::Bool, value, "a bool", other)),
+        }
     }
 
     /// Whether two values are equal, which a class may answer with `op eq`.
@@ -2275,7 +2423,7 @@ static PRINT: Native = Native {
         // where a program's `op string` runs, and it can raise.
         let mut parts = Vec::with_capacity(args.len());
         for value in args {
-            parts.push(interp.display(value)?);
+            parts.push(interp.display(value, Ask::Class)?);
         }
         writeln!(interp.out, "{}", parts.join(" ")).expect("failed to write output");
         Ok(Value::Nil)
@@ -2677,7 +2825,7 @@ pub static STR_INIT: Native = Native {
     name: "string",
     arity: Some(1),
     func: |interp, args, _span| {
-        let text = interp.display(&args[0])?;
+        let text = interp.display(&args[0], Ask::Class)?;
         Ok(Value::Str(Rc::from(text)))
     },
 };

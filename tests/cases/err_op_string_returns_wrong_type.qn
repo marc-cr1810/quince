@@ -1,0 +1,5 @@
+class Bad {
+    op init() { }
+    op string() { return 42 }
+}
+print(Bad())

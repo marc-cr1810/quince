@@ -1,0 +1,25 @@
+# A class decides its own truthiness, and every test reaches it.
+class Bag {
+    op init(items) { self.items = items }
+    op bool() { return len(self.items) > 0 }
+}
+
+let full = Bag([1, 2])
+let empty = Bag([])
+
+if full { print("full is true") }
+if empty { print("unreachable") } else { print("empty is false") }
+while empty { print("unreachable") }
+
+print(bool(full), bool(empty))
+print(!full, !empty)
+
+# `&&` and `||` return the operand, so the op decides which one comes back.
+print(empty || "fallback")
+print(full && "reached")
+
+# An instance with no op bool is truthy however empty it looks.
+class Plain {
+    op init() { }
+}
+print(bool(Plain()))

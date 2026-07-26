@@ -12,6 +12,7 @@ use std::time::Instant;
 use quince::class;
 use quince::color::Style;
 use quince::interp::Interp;
+use quince::show::Ask;
 use quince::lexer::Lexer;
 use quince::token::{KEYWORDS, TokenKind};
 use quince::value::Value;
@@ -826,7 +827,7 @@ pub fn run_repl(use_color_stdout: bool, use_color_stderr: bool) -> Result<()> {
             // bound either way: the expression evaluated, and only printing it
             // did not.
             Ok(Some(value)) => {
-                let printed = interp.display_pretty(&value, use_color_stdout);
+                let printed = interp.display_pretty(&value, use_color_stdout, Ask::Class);
                 interp.set_global("_", value);
                 match printed {
                     Ok(text) => println!("{text}"),
@@ -1179,7 +1180,7 @@ fn handle_meta_command(
                     // the renderer gains the argument that says "do not ask" in
                     // the step that gives it something to ask, and this is one of
                     // the two callers that has to pass it.
-                    let val_str = match interp.display_pretty(&val, use_color_stdout) {
+                    let val_str = match interp.display_pretty(&val, use_color_stdout, Ask::Nothing) {
                         Ok(text) => text,
                         Err(err) => {
                             eprintln!("{}", err.report_styled("", "<repl>", use_color_stderr));
@@ -1321,7 +1322,7 @@ fn handle_meta_command(
                     // the same expression typed bare would be a difference with
                     // no reason behind it. Measured before rendering, so what the
                     // timing reports is the expression and not its printing.
-                    let val_str = match interp.display_pretty(&val, use_color_stdout) {
+                    let val_str = match interp.display_pretty(&val, use_color_stdout, Ask::Class) {
                         Ok(text) => text,
                         Err(err) => {
                             eprintln!("{}", err.report_styled(arg, "<repl>", use_color_stderr));

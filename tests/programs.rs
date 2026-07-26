@@ -147,6 +147,39 @@ fn the_recursion_limit_fires_on_a_stack_too_small_to_reach_it() {
     );
 }
 
+/// A count of calls is not what the limit is really about.
+///
+/// `MAX_DEPTH` was calibrated against the cheapest recursion there is, a call in
+/// a `return`. A call inside a printed value carries the renderer on the stack as
+/// well, and 250 of those do not fit the stack that 250 of the cheap kind fit
+/// comfortably — the counter cannot see the difference, and this used to abort
+/// the process. If the measured guard regresses, this test does not fail politely
+/// either: it takes the test binary down with a stack overflow, which is the loud
+/// end of the trade and the reason to keep it here rather than in a unit test.
+#[test]
+fn a_class_that_prints_itself_is_refused_rather_than_crashing() {
+    let message = quince::interp::with_stack(|| {
+        let program = quince::compile(
+            "class Loud {\n\
+             op init() { }\n\
+             op string() { return \"I am \" + string(self) }\n\
+             }\n\
+             print(Loud())\n",
+        )
+        .expect("the program should compile");
+        let mut interp = Interp::with_output(Box::new(Vec::new()));
+        interp
+            .run(&program)
+            .expect_err("printing itself forever should fail")
+            .message
+    });
+
+    assert!(
+        message.contains("too deep"),
+        "expected the stack guard to stop it, got: {message}"
+    );
+}
+
 /// The corpus runs the interpreter in-process, which once let the binary ship
 /// without the resolver while every other test passed. This covers the wiring.
 #[test]

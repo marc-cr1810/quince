@@ -1,0 +1,5 @@
+class Bad {
+    op init() { }
+    op bool() { return [1, 2] }
+}
+if Bad() { print("x") }

@@ -15,6 +15,7 @@
 //! Recursion here needs `&mut self`, and a borrow of the heap taken to look at a
 //! value cannot be held across that.
 
+use crate::ast::Op;
 use crate::color::Style;
 use crate::error::QuinceError;
 use crate::interp::Interp;
@@ -26,14 +27,52 @@ const MAX_WIDTH: usize = 80;
 /// One indent level, as it appears in pretty output.
 const INDENT: &str = "    ";
 
+/// Whether a class may say how its own values print.
+///
+/// Two callers need `Nothing`, and for the same reason: they are the tools you
+/// reach for when an `op string` is what went wrong. `:vars` lists the
+/// environment, and an error message names a value — if either ran the op, a
+/// broken one would break the thing you were using to find it.
+///
+/// Passed explicitly rather than defaulted, so that every site states which it
+/// is asking for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ask {
+    /// Reach `op string`, which is how `print(x)` behaves.
+    Class,
+    /// Render structurally, asking nothing.
+    Nothing,
+}
+
 impl Interp {
     /// How a value prints, which a class may answer with `op string`.
-    pub fn display(&mut self, value: &Value) -> Result<String, QuinceError> {
-        self.display_styled(value, false)
+    pub fn display(&mut self, value: &Value, ask: Ask) -> Result<String, QuinceError> {
+        self.display_styled(value, false, ask)
     }
 
     /// How a value prints, with optional ANSI syntax highlighting.
-    pub fn display_styled(&mut self, value: &Value, color: bool) -> Result<String, QuinceError> {
+    pub fn display_styled(
+        &mut self,
+        value: &Value,
+        color: bool,
+        ask: Ask,
+    ) -> Result<String, QuinceError> {
+        // Asked before the payload is unwrapped, because the class is what holds
+        // the answer: an `op string` on a subclass of `string` has to beat the
+        // string it carries, or declaring it would do nothing.
+        if ask == Ask::Class
+            && let Some(method) = self.slot(value, Op::Str)
+        {
+            let answer = self.call_op(method, value, Vec::new())?;
+            return match answer.base(&self.heap) {
+                // Used verbatim, unpainted and unquoted, in every position — see
+                // `repr_styled`. The class said how it prints, and the language
+                // editing that text would be the language disagreeing.
+                Value::Str(text) => Ok(text.to_string()),
+                other => Err(self.op_returned(Op::Str, value, "a string", other)),
+            };
+        }
+
         let base = value.base(&self.heap).clone();
         let text = match &base {
             Value::Nil => Style::DIM.paint("nil", color),
@@ -50,7 +89,7 @@ impl Interp {
                 let mut items = Vec::new();
                 let mut i = 0;
                 while let Some(item) = self.heap.list(id).get(i).cloned() {
-                    items.push(self.repr_styled(&item, color)?);
+                    items.push(self.repr_styled(&item, color, ask)?);
                     i += 1;
                 }
                 format!(
@@ -65,8 +104,8 @@ impl Interp {
                 for (key, value) in self.entries(*id) {
                     entries.push(format!(
                         "{}: {}",
-                        self.repr_styled(&key, color)?,
-                        self.repr_styled(&value, color)?
+                        self.repr_styled(&key, color, ask)?,
+                        self.repr_styled(&value, color, ask)?
                     ));
                 }
                 format!(
@@ -106,27 +145,47 @@ impl Interp {
 
     /// How a value prints inside a collection, where a string needs quoting to
     /// stay distinguishable from a bare identifier.
-    pub fn repr_styled(&mut self, value: &Value, color: bool) -> Result<String, QuinceError> {
+    pub fn repr_styled(
+        &mut self,
+        value: &Value,
+        color: bool,
+        ask: Ask,
+    ) -> Result<String, QuinceError> {
+        // A class that says how it prints says so in every position, so the
+        // quoting below is reached only when nothing answered. Checked before the
+        // payload for the same reason `display_styled` checks first: a class
+        // extending `string` would otherwise have its `op string` beaten by the
+        // string it carries, and inside a list it would come back quoted — the
+        // one place the rule "the class's text is used verbatim" would break.
+        if ask == Ask::Class && self.slot(value, Op::Str).is_some() {
+            return self.display_styled(value, color, ask);
+        }
+
         // A payload-carrying instance reprs as its base type, so `[Username("marc")]`
         // shows `["marc"]`. Nothing in the output distinguishes it from a plain
         // string, which is the same trade Python makes: `repr` stays the literal you
         // would write, and `type(x)` is how you ask what class it is.
         match value.base(&self.heap) {
             Value::Str(s) => Ok(Style::GREEN.paint(format!("{s:?}"), color)),
-            _ => self.display_styled(value, color),
+            _ => self.display_styled(value, color, ask),
         }
     }
 
     /// How a value prints when the REPL echoes it, where a collection too wide
     /// for one line is broken over several.
-    pub fn display_pretty(&mut self, value: &Value, color: bool) -> Result<String, QuinceError> {
-        let unstyled = self.display_styled(value, false)?;
+    pub fn display_pretty(
+        &mut self,
+        value: &Value,
+        color: bool,
+        ask: Ask,
+    ) -> Result<String, QuinceError> {
+        let unstyled = self.display_styled(value, false, ask)?;
         if unstyled.len() <= MAX_WIDTH && !unstyled.contains('\n') {
-            return self.display_styled(value, color);
+            return self.display_styled(value, color, ask);
         }
         match value.base(&self.heap) {
-            Value::List(_) | Value::Dict(_) => self.format_pretty(value, color, 0),
-            _ => self.display_styled(value, color),
+            Value::List(_) | Value::Dict(_) => self.format_pretty(value, color, 0, ask),
+            _ => self.display_styled(value, color, ask),
         }
     }
 
@@ -135,6 +194,7 @@ impl Interp {
         value: &Value,
         color: bool,
         indent: usize,
+        ask: Ask,
     ) -> Result<String, QuinceError> {
         let pad = INDENT.repeat(indent);
         let inner_pad = INDENT.repeat(indent + 1);
@@ -166,7 +226,7 @@ impl Interp {
                         // Measured unstyled and printed styled: ANSI escapes take
                         // no width on screen, so counting them would wrap early.
                         let item_unstyled = self.repr_base(item);
-                        let item_styled = self.repr_styled(item, color)?;
+                        let item_styled = self.repr_styled(item, color, ask)?;
                         let comma = if i + 1 < items.len() { "," } else { "" };
                         let sep_len = if i + 1 < items.len() { 2 } else { 0 };
 
@@ -203,9 +263,9 @@ impl Interp {
                     for item in &items {
                         let formatted = match item.base(&self.heap) {
                             Value::List(_) | Value::Dict(_) => {
-                                self.format_pretty(item, color, indent + 1)?
+                                self.format_pretty(item, color, indent + 1, ask)?
                             }
-                            _ => format!("{inner_pad}{}", self.repr_styled(item, color)?),
+                            _ => format!("{inner_pad}{}", self.repr_styled(item, color, ask)?),
                         };
                         lines.push(formatted);
                     }
@@ -229,12 +289,12 @@ impl Interp {
                 }
                 let mut lines = Vec::new();
                 for (key, val) in &entries {
-                    let key_str = self.repr_styled(key, color)?;
+                    let key_str = self.repr_styled(key, color, ask)?;
                     let val_str = match val.base(&self.heap) {
                         Value::List(_) | Value::Dict(_) => {
-                            self.format_pretty(val, color, indent + 1)?
+                            self.format_pretty(val, color, indent + 1, ask)?
                         }
-                        _ => self.repr_styled(val, color)?,
+                        _ => self.repr_styled(val, color, ask)?,
                     };
                     lines.push(format!("{inner_pad}{key_str}: {val_str}"));
                 }
@@ -246,7 +306,7 @@ impl Interp {
                     Style::BOLD.paint("}", color)
                 ))
             }
-            _ => Ok(format!("{pad}{}", self.display_styled(value, color)?)),
+            _ => Ok(format!("{pad}{}", self.display_styled(value, color, ask)?)),
         }
     }
 
@@ -270,6 +330,7 @@ impl Interp {
 
 #[cfg(test)]
 mod tests {
+    use super::Ask;
     use crate::heap::Object;
     use crate::interp::Interp;
     use crate::value::Value;
@@ -317,12 +378,14 @@ mod tests {
         let mut interp = Interp::new();
         for value in every_shape(&mut interp) {
             let base = value.display_base(&interp.heap);
-            let real = interp.display(&value).expect("no class is involved");
+            let real = interp
+                .display(&value, Ask::Class)
+                .expect("no class is involved");
             assert_eq!(base, real, "display disagrees for {value:?}");
 
             let base = value.repr_base(&interp.heap);
             let real = interp
-                .repr_styled(&value, false)
+                .repr_styled(&value, false, Ask::Class)
                 .expect("no class is involved");
             assert_eq!(base, real, "repr disagrees for {value:?}");
         }
@@ -337,7 +400,9 @@ mod tests {
             .collect();
         let list = Value::List(interp.heap.alloc(Object::List(items)));
 
-        let printed = interp.display_pretty(&list, false).expect("no class");
+        let printed = interp
+            .display_pretty(&list, false, Ask::Class)
+            .expect("no class");
         assert_eq!(
             printed,
             r#"["m", "a", "r", "c", "@", "g", "m", "a", "i", "l", ".", "c", "o", "m"]"#
