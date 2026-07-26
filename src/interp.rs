@@ -1819,18 +1819,6 @@ impl Interp {
         Ok(lhs.equals_base(rhs, &self.heap))
     }
 
-    /// How a value prints, which a class may answer with `op string`.
-    pub fn display(&mut self, value: &Value) -> Result<String, QuinceError> {
-        Ok(value.display_base(&self.heap))
-    }
-
-    /// How a value prints when the REPL echoes it, where a large or nested
-    /// collection is broken over lines. Reaches `op string` for the same reason
-    /// [`Interp::display`] does — it is the same question, asked with room.
-    pub fn display_pretty(&mut self, value: &Value, color: bool) -> Result<String, QuinceError> {
-        Ok(value.display_pretty(&self.heap, color))
-    }
-
     // -- operators ---------------------------------------------------------
 
     fn unary(&mut self, op: UnaryOp, value: Value, span: Span) -> Result<Value, QuinceError> {

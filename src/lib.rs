@@ -9,6 +9,7 @@ pub mod interp;
 pub mod lexer;
 pub mod parser;
 pub mod resolver;
+pub mod show;
 pub mod token;
 pub mod value;
 

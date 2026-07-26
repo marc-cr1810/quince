@@ -3,7 +3,6 @@ use std::rc::Rc;
 
 use crate::ast::FnDecl;
 use crate::class::Builtin;
-use crate::color::Style;
 use crate::error::QuinceError;
 use crate::heap::{Heap, ObjId};
 use crate::interp::Interp;
@@ -252,35 +251,25 @@ impl Value {
         }
     }
 
-    /// How a value prints. `Nil` shows as `nil` so it is visible in output.
+    /// How a value prints, deciding it by matching and asking nothing.
+    ///
+    /// The renderer error messages use. Unstyled and single-line, because no
+    /// message needs colour or a collection broken over lines — and small for the
+    /// same reason, since the cost of a second implementation is two places that
+    /// decide how a float looks. `Interp::display` is the real one, and
+    /// `the_base_renderer_agrees_with_this_one` holds the two together.
     pub fn display_base(&self, heap: &Heap) -> String {
-        self.display_styled(heap, false)
-    }
-
-    /// How a value prints with optional ANSI syntax highlighting.
-    pub fn display_styled(&self, heap: &Heap, color: bool) -> String {
         match self.base(heap) {
-            Value::Nil => Style::DIM.paint("nil", color),
-            Value::Bool(b) => Style::YELLOW.paint(b, color),
-            Value::Int(n) => Style::CYAN.paint(n, color),
+            Value::Nil => "nil".to_string(),
+            Value::Bool(b) => b.to_string(),
+            Value::Int(n) => n.to_string(),
             // Keeps floats distinguishable from ints in output: `1.0`, not `1`.
-            Value::Float(n) if n.fract() == 0.0 && n.is_finite() => {
-                Style::CYAN.paint(format!("{n:.1}"), color)
-            }
-            Value::Float(n) => Style::CYAN.paint(n, color),
-            Value::Str(s) => Style::GREEN.paint(s, color),
+            Value::Float(n) if n.fract() == 0.0 && n.is_finite() => format!("{n:.1}"),
+            Value::Float(n) => n.to_string(),
+            Value::Str(s) => s.to_string(),
             Value::List(id) => {
-                let items: Vec<_> = heap
-                    .list(*id)
-                    .iter()
-                    .map(|v| v.repr_styled(heap, color))
-                    .collect();
-                format!(
-                    "{}{}{}",
-                    Style::BOLD.paint("[", color),
-                    items.join(", "),
-                    Style::BOLD.paint("]", color)
-                )
+                let items: Vec<_> = heap.list(*id).iter().map(|v| v.repr_base(heap)).collect();
+                format!("[{}]", items.join(", "))
             }
             Value::Dict(id) => {
                 let entries: Vec<_> = heap
@@ -289,162 +278,27 @@ impl Value {
                     .map(|(key, value)| {
                         format!(
                             "{}: {}",
-                            key.to_value().repr_styled(heap, color),
-                            value.repr_styled(heap, color)
+                            key.to_value().repr_base(heap),
+                            value.repr_base(heap)
                         )
                     })
                     .collect();
-                format!(
-                    "{}{}{}",
-                    Style::BOLD.paint("{", color),
-                    entries.join(", "),
-                    Style::BOLD.paint("}", color)
-                )
+                format!("{{{}}}", entries.join(", "))
             }
-            Value::Function(id) => {
-                Style::MAGENTA.paint(format!("<fn {}>", heap.function(*id).decl.name), color)
-            }
-            Value::Native(native) => {
-                Style::MAGENTA.paint(format!("<builtin {}>", native.name), color)
-            }
+            Value::Function(id) => format!("<fn {}>", heap.function(*id).decl.name),
+            Value::Native(native) => format!("<builtin {}>", native.name),
             Value::BoundMethod(id) => {
                 let bound = heap.bound_method(*id);
-                Style::MAGENTA.paint(
-                    format!(
-                        "<method {} of {}>",
-                        bound.method.callable_name(heap),
-                        bound.receiver.type_name(heap)
-                    ),
-                    color,
-                )
-            }
-            Value::Class(id) => {
-                Style::MAGENTA.paint(format!("<class {}>", heap.class(*id).name), color)
-            }
-            Value::Instance(_) => {
-                Style::MAGENTA.paint(format!("<{} instance>", self.type_name(heap)), color)
-            }
-        }
-    }
-
-    /// How a value prints with multiline formatting for large or nested collections.
-    pub fn display_pretty(&self, heap: &Heap, color: bool) -> String {
-        let unstyled = self.display_styled(heap, false);
-        if unstyled.len() <= 80 && !unstyled.contains('\n') {
-            return self.display_styled(heap, color);
-        }
-        match self.base(heap) {
-            Value::List(_) | Value::Dict(_) => self.format_pretty(heap, color, 0),
-            _ => self.display_styled(heap, color),
-        }
-    }
-
-    fn format_pretty(&self, heap: &Heap, color: bool, indent: usize) -> String {
-        let pad = "    ".repeat(indent);
-        let inner_pad = "    ".repeat(indent + 1);
-        match self.base(heap) {
-            Value::List(id) => {
-                let items = heap.list(*id);
-                if items.is_empty() {
-                    return format!(
-                        "{}{}",
-                        Style::BOLD.paint("[", color),
-                        Style::BOLD.paint("]", color)
-                    );
-                }
-                let is_flat = items.iter().all(|item| {
-                    !matches!(item.base(heap), Value::List(_) | Value::Dict(_))
-                });
-
-                if is_flat {
-                    let mut lines = Vec::new();
-                    let mut current_line = String::from(&inner_pad);
-                    let mut current_len = inner_pad.len();
-                    let max_width = 80;
-
-                    for (i, item) in items.iter().enumerate() {
-                        let item_unstyled = item.repr_base(heap);
-                        let item_styled = item.repr_styled(heap, color);
-                        let comma = if i + 1 < items.len() { "," } else { "" };
-                        let sep_len = if i + 1 < items.len() { 2 } else { 0 };
-
-                        if current_len > inner_pad.len()
-                            && current_len + item_unstyled.len() + comma.len() > max_width
-                        {
-                            lines.push(current_line);
-                            current_line = format!("{inner_pad}{item_styled}{comma}");
-                            current_len = inner_pad.len() + item_unstyled.len() + comma.len();
-                        } else {
-                            if current_len > inner_pad.len() {
-                                current_line.push(' ');
-                            }
-                            current_line.push_str(&item_styled);
-                            if !comma.is_empty() {
-                                current_line.push(',');
-                            }
-                            current_len += item_unstyled.len() + sep_len;
-                        }
-                    }
-                    if !current_line.is_empty() {
-                        lines.push(current_line);
-                    }
-
-                    format!(
-                        "{}\n{}\n{}{}",
-                        Style::BOLD.paint("[", color),
-                        lines.join("\n"),
-                        pad,
-                        Style::BOLD.paint("]", color)
-                    )
-                } else {
-                    let mut lines = Vec::new();
-                    for item in items {
-                        let formatted = match item.base(heap) {
-                            Value::List(_) | Value::Dict(_) => {
-                                item.format_pretty(heap, color, indent + 1)
-                            }
-                            _ => format!("{inner_pad}{}", item.repr_styled(heap, color)),
-                        };
-                        lines.push(formatted);
-                    }
-                    format!(
-                        "{}\n{}\n{}{}",
-                        Style::BOLD.paint("[", color),
-                        lines.join(",\n"),
-                        pad,
-                        Style::BOLD.paint("]", color)
-                    )
-                }
-            }
-            Value::Dict(id) => {
-                let dict = heap.dict(*id);
-                if dict.is_empty() {
-                    return format!(
-                        "{}{}",
-                        Style::BOLD.paint("{", color),
-                        Style::BOLD.paint("}", color)
-                    );
-                }
-                let mut lines = Vec::new();
-                for (key, val) in dict.iter() {
-                    let key_str = key.to_value().repr_styled(heap, color);
-                    let val_str = match val.base(heap) {
-                        Value::List(_) | Value::Dict(_) => {
-                            val.format_pretty(heap, color, indent + 1)
-                        }
-                        _ => val.repr_styled(heap, color),
-                    };
-                    lines.push(format!("{inner_pad}{key_str}: {val_str}"));
-                }
                 format!(
-                    "{}\n{}\n{}{}",
-                    Style::BOLD.paint("{", color),
-                    lines.join(",\n"),
-                    pad,
-                    Style::BOLD.paint("}", color)
+                    "<method {} of {}>",
+                    bound.method.callable_name(heap),
+                    bound.receiver.type_name(heap)
                 )
             }
-            _ => format!("{pad}{}", self.display_styled(heap, color)),
+            Value::Class(id) => format!("<class {}>", heap.class(*id).name),
+            // Not the base's type name but this value's: an instance carrying no
+            // payload is its own base, and what it should say is its class.
+            Value::Instance(_) => format!("<{} instance>", self.type_name(heap)),
         }
     }
 
@@ -458,22 +312,17 @@ impl Value {
         }
     }
 
-    /// How a value prints when nested inside a collection, where strings need
-    /// quoting to stay distinguishable from bare identifiers. Also what error
+    /// How a value prints when nested inside a collection, where a string needs
+    /// quoting to stay distinguishable from a bare identifier. What error
     /// messages use when they name a value rather than a type.
     pub fn repr_base(&self, heap: &Heap) -> String {
-        self.repr_styled(heap, false)
-    }
-
-    /// How a value prints inside collections with optional ANSI colors.
-    pub fn repr_styled(&self, heap: &Heap, color: bool) -> String {
         // A payload-carrying instance reprs as its base type, so `[Username("marc")]`
         // shows `["marc"]`. Nothing in the output distinguishes it from a plain
         // string, which is the same trade Python makes: `repr` stays the literal you
         // would write, and `type(x)` is how you ask what class it is.
         match self.base(heap) {
-            Value::Str(s) => Style::GREEN.paint(format!("{s:?}"), color),
-            other => other.display_styled(heap, color),
+            Value::Str(s) => format!("{s:?}"),
+            _ => self.display_base(heap),
         }
     }
 }
@@ -637,19 +486,4 @@ mod tests {
         assert_eq!(list.display_base(&heap), r#"["hi", 2]"#);
     }
 
-    #[test]
-    fn short_character_lists_print_on_single_line_in_display_pretty() {
-        let mut heap = Heap::new();
-        let items: Vec<Value> = "marc@gmail.com"
-            .chars()
-            .map(|c| Value::from(c.to_string().as_str()))
-            .collect();
-        let list = Value::List(heap.alloc(Object::List(items)));
-
-        let printed = list.display_pretty(&heap, false);
-        assert_eq!(
-            printed,
-            r#"["m", "a", "r", "c", "@", "g", "m", "a", "i", "l", ".", "c", "o", "m"]"#
-        );
-    }
 }

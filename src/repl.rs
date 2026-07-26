@@ -1174,7 +1174,18 @@ fn handle_meta_command(
                     // `op string` is what went wrong. Running it here would mean a
                     // broken op could break the tool for finding it — the same
                     // trade error messages make.
-                    let val_str = val.display_pretty(&interp.heap, use_color_stdout);
+                    //
+                    // Which is a promise this line cannot keep on its own yet:
+                    // the renderer gains the argument that says "do not ask" in
+                    // the step that gives it something to ask, and this is one of
+                    // the two callers that has to pass it.
+                    let val_str = match interp.display_pretty(&val, use_color_stdout) {
+                        Ok(text) => text,
+                        Err(err) => {
+                            eprintln!("{}", err.report_styled("", "<repl>", use_color_stderr));
+                            continue;
+                        }
+                    };
                     let type_str = Style::DIM.paint(
                         format!("({})", val.type_name(&interp.heap)),
                         use_color_stdout,
