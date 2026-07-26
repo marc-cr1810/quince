@@ -370,7 +370,7 @@ impl Interp {
                         // to be constructed on their own.
                         Value::Class(id)
                             if self.heap.class(id).builtin.is_some()
-                                && self.heap.class(id).init.is_none() =>
+                                && self.heap.class(id).slot(Op::Init).is_none() =>
                         {
                             let builtin = self.heap.class(id).name.clone();
                             return Err(QuinceError::new(
@@ -414,31 +414,40 @@ impl Interp {
                 // position would. Nothing here reaches a safe point, so the
                 // functions are safe unrooted until the class owning them exists.
                 let mut table = HashMap::with_capacity(methods.len());
-                let mut own_init = None;
+                let mut slots = Class::empty_slots();
                 for decl in methods {
                     let func = Value::Function(self.heap.alloc(Object::Function(Function {
                         decl: Rc::clone(decl),
                         env: enclosing,
                     })));
-                    if decl.op == Some(Op::Init) {
-                        own_init = Some(func.clone());
+                    // Every op lands in the table by name *and* in its slot. The
+                    // name is what `super.init(msg)` reaches; the slot is what
+                    // `Point(1, 2)` and `if p` reach, without hashing anything.
+                    if let Some(op) = decl.op {
+                        slots[op.index()] = Some(func.clone());
                     }
                     table.insert(decl.name.clone(), func);
                 }
 
-                // Inherited rather than searched for: a class that declares no
-                // `op init` of its own constructs with its parent's, which is
-                // what `class TypeError extends Error {}` relies on.
-                let init =
-                    own_init.or_else(|| parent.and_then(|id| self.heap.class(id).init.clone()));
-
-                let class = self.heap.alloc(Object::Class(Class {
+                let mut class = Class {
                     name: name.clone(),
                     methods: table,
                     parent,
-                    init,
+                    slots,
                     builtin: None,
-                }));
+                };
+
+                // Inherited rather than searched for: a class that declares no
+                // `op init` of its own constructs with its parent's, which is
+                // what `class TypeError extends Error {}` relies on — and the
+                // same copy is what lets a subclass inherit `op string` or
+                // `op eq` without restating it.
+                if let Some(id) = parent {
+                    let inherited = self.heap.class(id).slots.clone();
+                    class.inherit_slots(&inherited);
+                }
+
+                let class = self.heap.alloc(Object::Class(class));
                 self.bind(slot, name, Value::Class(class), false, env);
                 Ok(Flow::Normal)
             }
@@ -1298,7 +1307,7 @@ impl Interp {
                 // The `op init` the class resolved when it was built, not a
                 // lookup of the name `init` — a method merely *called* `init` is
                 // an ordinary method, and construction must not reach it.
-                match self.heap.class(id).init.clone() {
+                match self.heap.class(id).slot(Op::Init).cloned() {
                     // A native here is a conversion, inherited by a class that
                     // declares no `op init` of its own: nothing was written to run,
                     // so construction does what an `op init` forwarding to
@@ -1382,7 +1391,7 @@ impl Interp {
         args: Vec<Value>,
         span: Span,
     ) -> Result<Value, QuinceError> {
-        let Some(init) = self.heap.class(id).init.clone() else {
+        let Some(init) = self.heap.class(id).slot(Op::Init).cloned() else {
             // Only `function` reaches this: `nil` and `class` are keywords, so
             // neither is bound as a global and nothing can name them to call.
             return Err(
@@ -1418,8 +1427,8 @@ impl Interp {
         let init = self
             .heap
             .class(class)
-            .init
-            .clone()
+            .slot(Op::Init)
+            .cloned()
             .expect("a builtin reached as a superclass is one that converts");
         self.set_payload(*id, init, builtin, args, span)
     }
@@ -2611,6 +2620,83 @@ mod tests {
                 ),
             }
         }
+    }
+
+    /// Which class a global names, for reaching into its slots.
+    fn class_of(interp: &Interp, name: &str) -> ObjId {
+        match global(interp, name) {
+            Some(Value::Class(id)) => id,
+            other => panic!("`{name}` should be a class, found {other:?}"),
+        }
+    }
+
+    /// Declaring an `op` fills its slot as well as the method table.
+    ///
+    /// Nothing reads a slot yet, so this is the only way to see it — and it is
+    /// worth seeing on its own, because the alternative failure is silent: an op
+    /// that lands in `methods` and nowhere else simply never runs.
+    #[test]
+    fn declaring_an_op_fills_its_slot() {
+        let interp = run("class Money {\n\
+                          op init(c) { self.c = c }\n\
+                          op string() { return \"$\" }\n\
+                          fn plain() { return 1 }\n\
+                          }\n");
+        let class = interp.heap.class(class_of(&interp, "Money"));
+
+        for op in [Op::Init, Op::Str] {
+            assert!(
+                matches!(class.slot(op), Some(Value::Function(_))),
+                "`op {}` was declared but its slot is empty",
+                op.name()
+            );
+        }
+        // A slot is filled by `op`, never inferred from a name — the whole point
+        // of the keyword. `plain` is in the table and in no slot at all.
+        assert!(class.methods.contains_key("plain"));
+        for op in crate::ast::OPS {
+            if !matches!(op, Op::Init | Op::Str) {
+                assert!(
+                    class.slot(*op).is_none(),
+                    "`{}` was never declared but has a slot",
+                    op.name()
+                );
+            }
+        }
+    }
+
+    /// Every slot inherits, not just `init`.
+    ///
+    /// `init` copying down is what `class TypeError extends Error {}` already
+    /// relied on; this pins that the same loop carries the rest, and that a
+    /// subclass redeclaring one keeps its own.
+    #[test]
+    fn a_subclass_inherits_the_slots_it_does_not_declare() {
+        let interp = run("class Base {\n\
+                          op init() { }\n\
+                          op string() { return \"base\" }\n\
+                          op bool() { return false }\n\
+                          }\n\
+                          class Child extends Base {\n\
+                          op string() { return \"child\" }\n\
+                          }\n");
+        let base = interp.heap.class(class_of(&interp, "Base")).clone();
+        let child = interp.heap.class(class_of(&interp, "Child"));
+
+        assert_eq!(
+            child.slot(Op::Bool),
+            base.slot(Op::Bool),
+            "`op bool` should have been copied down"
+        );
+        assert_eq!(
+            child.slot(Op::Init),
+            base.slot(Op::Init),
+            "`op init` should have been copied down"
+        );
+        assert!(
+            child.slot(Op::Str) != base.slot(Op::Str),
+            "`Child`'s own `op string` should have won"
+        );
     }
 
     /// The payload is unobservable from Quince until the operators land, so the

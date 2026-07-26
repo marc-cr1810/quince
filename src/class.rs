@@ -13,6 +13,7 @@
 
 use std::collections::HashMap;
 
+use crate::ast::{OPS, Op};
 use crate::dict::Dict;
 use crate::heap::{Heap, ObjId};
 use crate::interp::{
@@ -109,6 +110,19 @@ pub struct BuiltinType {
     pub init: Option<&'static Native>,
 }
 
+/// A class's [`Op`] table, boxed.
+///
+/// Boxed because `Object` is an enum in an arena of `Option<Object>`, so its
+/// largest variant sizes *every* heap slot — a list, an env, an instance. Twenty-one
+/// inline slots took that from 104 bytes to 592, making every object in the heap
+/// five times its size to carry a table only classes have.
+///
+/// The array is boxed rather than the whole [`Class`], which would be the easier
+/// change: `name` and `methods` are read on every method call, and putting them
+/// behind the same indirection would charge dispatch for a table it never touches.
+/// This way only a slot read pays the pointer chase.
+pub type Slots = Box<[Option<Value>; Op::COUNT]>;
+
 /// A type, whether the language defined it or a program did.
 #[derive(Clone, Debug)]
 pub struct Class {
@@ -125,18 +139,29 @@ pub struct Class {
     /// scope holding `super`.
     pub methods: HashMap<String, Value>,
     pub parent: Option<ObjId>,
-    /// The `op init` construction runs, or the one inherited from an ancestor.
+    /// The methods the language calls on the program's behalf, one entry per
+    /// [`Op`], indexed by [`Op::index`].
+    ///
+    /// An array rather than a field each, so that adding an op is a variant and a
+    /// line in [`OPS`] with nothing here to touch. That is the whole reason this
+    /// shape was chosen — see DESIGN.md.
     ///
     /// Resolved once when the class is built rather than looked up by name on
-    /// every `Point(1, 2)`, and copied down from the parent so no chain is
-    /// walked at construction time. That copy is safe for the same reason
-    /// [`Class::method`]'s loop terminates: a parent is fully built before the
-    /// class naming it exists.
+    /// every `Point(1, 2)` or every `if x`. Hashing `"bool"` on the hottest path
+    /// in the language is exactly the trap DESIGN.md's Slots are cached fields
+    /// section names, and an array index is the way out of it.
     ///
-    /// Held beside `methods` rather than instead of an entry in it, because the
-    /// method is still reachable by name — `super.init(msg)` is how a subclass
+    /// Inheritance is a copy-down from the parent at creation, so no chain is
+    /// walked at use. Safe for the same reason [`Class::method`]'s loop
+    /// terminates: a parent is fully built before the class naming it exists.
+    ///
+    /// A `None` slot is not a hole to report — it means the language behaves as
+    /// it did before slots existed, which for most classes is all of them.
+    ///
+    /// Held beside `methods` rather than instead of entries in it, because an op
+    /// is still reachable by name — `super.init(msg)` is how a subclass
     /// constructor delegates.
-    pub init: Option<Value>,
+    pub slots: Slots,
     /// `Some` if the language defined this type.
     ///
     /// What it decides is what construction *yields*. A class a program wrote
@@ -151,6 +176,11 @@ impl Class {
     /// The class object for a builtin type, built from its seed table.
     pub fn builtin(builtin: Builtin) -> Class {
         let seed = builtin.seed();
+        let mut slots = Class::empty_slots();
+        // Not also an entry in `methods`, unlike a user class's `op init`. A
+        // conversion takes no receiver, so as a method it would be wrong:
+        // `(5).init(7)` has no meaning to give.
+        slots[Op::Init.index()] = seed.init.map(Value::Native);
         Class {
             name: seed.name.to_string(),
             methods: seed
@@ -159,11 +189,38 @@ impl Class {
                 .map(|(name, native)| (name.to_string(), Value::Native(native)))
                 .collect(),
             parent: None,
-            // Not also an entry in `methods`, unlike a user class's `op init`.
-            // A conversion takes no receiver, so as a method it would be wrong:
-            // `(5).init(7)` has no meaning to give.
-            init: seed.init.map(Value::Native),
+            slots,
             builtin: Some(builtin),
+        }
+    }
+
+    /// A slot table with nothing in it, which is every class before its own
+    /// declaration fills one and every builtin but for `init`.
+    pub fn empty_slots() -> Slots {
+        Box::new([const { None }; Op::COUNT])
+    }
+
+    /// The method this class uses for `op`, if it has one.
+    ///
+    /// An array read, and no chain walked: what an ancestor declared was copied
+    /// down when this class was built.
+    pub fn slot(&self, op: Op) -> Option<&Value> {
+        self.slots[op.index()].as_ref()
+    }
+
+    /// Copies every slot this class did not declare down from `parent`.
+    ///
+    /// One loop rather than a case per op, which is what makes adding one free.
+    /// `init` goes through here like the rest — if the op that existed first did
+    /// not fit the array, the array would be the wrong shape.
+    ///
+    /// Takes the parent's table rather than the parent, so the caller can clone
+    /// twenty-one slots instead of a whole class with its method map.
+    pub fn inherit_slots(&mut self, parent: &Slots) {
+        for op in OPS {
+            if self.slots[op.index()].is_none() {
+                self.slots[op.index()] = parent[op.index()].clone();
+            }
         }
     }
 
@@ -186,14 +243,37 @@ impl Class {
         }
     }
 
+    /// Returns a list of all method names defined on this class and its ancestors.
+    pub fn method_names(&self, heap: &Heap) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut class = self;
+        loop {
+            for key in class.methods.keys() {
+                if !names.contains(key) {
+                    names.push(key.clone());
+                }
+            }
+            if let Some(parent_id) = class.parent {
+                class = heap.class(parent_id);
+            } else {
+                break;
+            }
+        }
+        names
+    }
+
     pub fn trace(&self, worklist: &mut Vec<ObjId>) {
         worklist.extend(self.methods.values().filter_map(Value::handle));
         worklist.extend(self.parent);
-        // Always also an entry in `methods`, so no test can fail without this
-        // line. It stays for the reason `trace` traces a bound method's callee:
-        // the contract is every handle this object holds, not every handle
-        // something else happens to reach.
-        worklist.extend(self.init.as_ref().and_then(Value::handle));
+        // A slot a class declared is always also an entry in `methods`, so no
+        // test can fail without this line. It stays for the reason `trace`
+        // traces a bound method's callee: the contract is every handle this
+        // object holds, not every handle something else happens to reach.
+        //
+        // A slot *inherited* from a parent is a different matter — it is a
+        // handle to a function in the parent's table, and the parent is traced
+        // just above, so it survives either way.
+        worklist.extend(self.slots.iter().flatten().filter_map(Value::handle));
     }
 }
 
@@ -326,7 +406,7 @@ mod tests {
                 name: "C".to_string(),
                 methods: HashMap::new(),
                 parent: None,
-                init: None,
+                slots: Class::empty_slots(),
                 builtin: None,
             }))),
         ];
@@ -364,7 +444,7 @@ mod tests {
         let heap = Heap::new();
         for builtin in BUILTINS {
             let class = heap.class(heap.builtin_class(*builtin));
-            match (builtin.seed().init, &class.init) {
+            match (builtin.seed().init, class.slot(Op::Init)) {
                 (Some(native), Some(Value::Native(installed))) => {
                     assert!(
                         std::ptr::eq(native, *installed),
@@ -401,6 +481,26 @@ mod tests {
                 builtin.name()
             );
         }
+    }
+
+    #[test]
+    fn adding_an_op_cannot_grow_a_heap_object() {
+        // `Object`'s largest variant sizes every slot in the arena, so an inline
+        // slot table charges every list and every env for a table only a class
+        // has — 104 bytes to 592, when this was first written inline. Boxing is
+        // what fixes it, and this is that fix stated as a property: the table is
+        // one pointer wide however many ops there are.
+        // One pointer wide is the whole invariant: if the table is behind an
+        // indirection then no number of ops can move `Object` at all.
+        assert_eq!(size_of::<Slots>(), size_of::<usize>());
+        // A loose ceiling rather than the exact 104, so this fails on the mistake
+        // it is about — an inline table, which was 592 — and not on an unrelated
+        // field being added to some other variant.
+        assert!(
+            size_of::<Object>() < 256,
+            "Object is {} bytes; something is inline that should not be",
+            size_of::<Object>()
+        );
     }
 
     #[test]
