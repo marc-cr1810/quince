@@ -1,0 +1,40 @@
+# A class decides what equals it, and every place `==` is asked reaches the op.
+class Money {
+    op init(cents) { self.cents = cents }
+    op eq(other) { return self.cents == other.cents }
+}
+
+let a = Money(100)
+let b = Money(100)
+let c = Money(250)
+
+print(a == b, a == c, a != c)
+
+# Which side it is written on cannot matter, so the right operand answers too.
+class Half {
+    op init(n) { self.n = n }
+    op eq(other) { return self.n == other }
+}
+print(Half(5) == 5, 5 == Half(5))
+print(Half(5) != 5, 5 != Half(5))
+
+# Searching a list compares its items, so the op decides that as well.
+print(Money(100) in [c, b], Money(7) in [c, b])
+
+# Without the op, two instances are two objects.
+class Plain {
+    op init(n) { self.n = n }
+}
+print(Plain(1) == Plain(1))
+let same = Plain(1)
+print(same == same)
+
+# A class extending a builtin: the op beats the value it carries.
+class Ci extends string {
+    op eq(other) { return string(self).lower() == string(other).lower() }
+}
+print(Ci("Marc") == "marc", Ci("Marc") == "bob")
+
+# And without the op it stays equal to what it carries.
+class Name extends string {}
+print(Name("marc") == "marc")

@@ -1,0 +1,1 @@
+`op eq` must answer with a bool, but Sloppy's returned int

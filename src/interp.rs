@@ -3,7 +3,9 @@ use std::io::Write;
 use std::rc::Rc;
 
 use crate::ast::Slot;
-use crate::ast::{BinaryOp, Block, Expr, ExprKind, LogicalOp, Op, Stmt, StmtKind, UnaryOp, Var};
+use crate::ast::{
+    BinaryOp, Block, Expr, ExprKind, LogicalOp, Op, Reflect, Stmt, StmtKind, UnaryOp, Var,
+};
 use crate::class::{BUILTINS as BUILTIN_TYPES, Builtin, Class, Instance};
 use crate::dict::{Dict, Key, NotAKey};
 use crate::env::{self, AssignError, Env, Globals};
@@ -1987,6 +1989,30 @@ impl Interp {
         }
     }
 
+    /// Which operand's class answers for `op`, with the arguments already in the
+    /// order [`Interp::call_op`] wants them.
+    ///
+    /// The left operand is asked first, always. The right is asked only if
+    /// [`Op::reflect`] permits it, and the `bool` says whether that is what
+    /// happened — which the caller has to know for an op whose answer means the
+    /// opposite when the operands arrive swapped.
+    fn binary_slot(
+        &mut self,
+        op: Op,
+        lhs: &Value,
+        rhs: &Value,
+    ) -> Option<(Value, Value, Value, bool)> {
+        if let Some(method) = self.slot(lhs, op) {
+            return Some((method, lhs.clone(), rhs.clone(), false));
+        }
+        if op.reflect() != Reflect::Never
+            && let Some(method) = self.slot(rhs, op)
+        {
+            return Some((method, rhs.clone(), lhs.clone(), true));
+        }
+        None
+    }
+
     /// Whether two values are equal, which a class may answer with `op eq`.
     ///
     /// Numbers compare across `int` and `float`, since they are one numeric
@@ -2000,6 +2026,17 @@ impl Interp {
     /// rather than patched in the middle of this one. The fix is Python's: record
     /// the pair being compared and answer `true` on reaching it again.
     pub fn equals(&mut self, lhs: &Value, rhs: &Value) -> Result<bool, QuinceError> {
+        // Asked before the payload is unwrapped, so a subclass of `string` that
+        // declares `op eq` beats the string it carries. Either side may answer,
+        // because `==` cannot depend on which order it was written in.
+        if let Some((method, receiver, other, _)) = self.binary_slot(Op::Eq, lhs, rhs) {
+            let answer = self.call_op(method, &receiver, vec![other])?;
+            return match answer.base(&self.heap) {
+                Value::Bool(b) => Ok(*b),
+                got => Err(self.op_returned(Op::Eq, &receiver, "a bool", got)),
+            };
+        }
+
         // Cloned rather than borrowed: comparing what a container holds can run a
         // program's `op eq`, and a borrow of the heap cannot be held across that.
         let (a, b) = (lhs.base(&self.heap).clone(), rhs.base(&self.heap).clone());
@@ -2149,6 +2186,13 @@ impl Interp {
             _ => {}
         }
 
+        // The ordering operators, asked before the operands are unwrapped for the
+        // same reason: a class extending `int` that says how it orders has to beat
+        // the int it carries.
+        if let Some(answer) = self.compare(op, &lhs, &rhs, expr_span)? {
+            return Ok(answer);
+        }
+
         // Dispatch on what the operands *are*, so a class extending a builtin is
         // operated on as one — and the result is the base type, not the subclass.
         let (a, b) = (lhs.base(&self.heap).clone(), rhs.base(&self.heap).clone());
@@ -2186,6 +2230,118 @@ impl Interp {
 
             _ => Err(type_error(&self.heap, op, &lhs, &rhs, lhs_span, rhs_span, expr_span)),
         }
+    }
+
+    /// `<`, `<=`, `>` and `>=` when a class answers for one of the operands.
+    ///
+    /// `Ok(None)` means neither class does, and what the operands *are* decides —
+    /// which is every comparison in a program that declares no ops at all.
+    ///
+    /// The operator's own op is asked first, so `op lt` beats `op cmp` for `<`.
+    /// Only two of the four have one: `<=` and `>=` are `op cmp`'s alone. That is
+    /// what makes declaring `op lt` give you `<` and nothing else, and it is not
+    /// an omission — deriving `a <= b` from `not (a > b)` would assume the order
+    /// is total, and `op cmp` exists precisely so a class can decline to be. C++
+    /// draws the line in the same place: `operator<` alone leaves `a <= b` a
+    /// compile error.
+    fn compare(
+        &mut self,
+        op: BinaryOp,
+        lhs: &Value,
+        rhs: &Value,
+        span: Span,
+    ) -> Result<Option<Value>, QuinceError> {
+        let specific = match op {
+            BinaryOp::Lt => Some(Op::Lt),
+            BinaryOp::Gt => Some(Op::Gt),
+            BinaryOp::Le | BinaryOp::Ge => None,
+            // Not an ordering operator, so there is nothing here to ask about.
+            _ => return Ok(None),
+        };
+
+        if let Some(specific) = specific
+            && let Some((method, receiver, other, _)) = self.binary_slot(specific, lhs, rhs)
+        {
+            let answer = self.call_op(method, &receiver, vec![other])?;
+            return match answer.base(&self.heap) {
+                Value::Bool(b) => Ok(Some(Value::Bool(*b))),
+                got => Err(self.op_returned(specific, &receiver, "a bool", got)),
+            };
+        }
+
+        let Some((method, receiver, other, reflected)) = self.binary_slot(Op::Cmp, lhs, rhs) else {
+            return self.partly_ordered(op, lhs, rhs, span).map(|()| None);
+        };
+        let answer = self.call_op(method, &receiver, vec![other])?;
+        let ordering = match answer.base(&self.heap) {
+            // Any int, read for its sign: `-1`, `0` and `1` are the convention,
+            // and `self.cents - other.cents` is what people actually write.
+            Value::Int(n) => *n,
+            got => return Err(self.op_returned(Op::Cmp, &receiver, "an int", got)),
+        };
+        // Reflected means the class was handed the operands the other way round,
+        // so its answer is about the reverse question and the sign is backwards.
+        // Saturating, because negating `i64::MIN` is not an int — and a program
+        // is free to return one.
+        let ordering = if reflected {
+            ordering.saturating_neg()
+        } else {
+            ordering
+        };
+        let answer = match op {
+            BinaryOp::Lt => ordering < 0,
+            BinaryOp::Le => ordering <= 0,
+            BinaryOp::Gt => ordering > 0,
+            BinaryOp::Ge => ordering >= 0,
+            _ => unreachable!("every other operator returned above"),
+        };
+        Ok(Some(Value::Bool(answer)))
+    }
+
+    /// Explains `a <= b` on a class that declared `op lt` or `op gt` and no
+    /// `op cmp`.
+    ///
+    /// The plain "cannot compare" this would otherwise fall through to is true
+    /// and useless: the class plainly does order itself for `<`, so the reader's
+    /// conclusion is that their op was ignored. This is the one place the rule
+    /// needs stating, so it gets stated here rather than in the documentation
+    /// nobody is reading at the moment it happens.
+    fn partly_ordered(
+        &mut self,
+        op: BinaryOp,
+        lhs: &Value,
+        rhs: &Value,
+        span: Span,
+    ) -> Result<(), QuinceError> {
+        let symbol = match op {
+            BinaryOp::Le => "<=",
+            BinaryOp::Ge => ">=",
+            // `<` and `>` reaching here means no class answered for them either,
+            // which is an ordinary type error and not this.
+            _ => return Ok(()),
+        };
+        for side in [lhs, rhs] {
+            for declared in [Op::Lt, Op::Gt] {
+                if self.slot(side, declared).is_some() {
+                    return Err(QuinceError::new(
+                        format!(
+                            "`{symbol}` needs `op cmp`, which {} does not declare",
+                            side.type_name(&self.heap)
+                        ),
+                        span,
+                    )
+                    .with_kind(ErrorKind::Type)
+                    .with_help(format!(
+                        "`op {}` answers `{}` alone. `op cmp` answers all four \
+                         comparisons at once, returning a negative int, zero, or a \
+                         positive one",
+                        declared.name(),
+                        if declared == Op::Lt { "<" } else { ">" }
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// `needle in haystack`.
@@ -2272,6 +2428,25 @@ fn resolved(slot: &Option<Slot>) -> Slot {
 /// different buckets. So a subclass is hashable exactly when its base is, and a
 /// dict cannot tell the two apart — `keys()` hands back the base type.
 fn key_of(heap: &Heap, value: &Value, span: Span) -> Result<Key, QuinceError> {
+    // Asked before the unwrap, and it has to be: a subclass of `string` that
+    // decides `==` for itself is no longer equal to the string it carries, so
+    // filing it under that string would put it where `==` would never look.
+    //
+    // Python does exactly this, and not by convention — defining `__eq__` sets
+    // `__hash__` to `None`, and the class stops being usable as a key.
+    if heap.class(value.class(heap)).slot(Op::Eq).is_some() {
+        return Err(QuinceError::new(
+            format!(
+                "a {} cannot be a dict key, because its `op eq` decides what equals it",
+                value.type_name(heap)
+            ),
+            span,
+        )
+        .with_help(
+            "a dict finds a key by its contents alone and cannot run `op eq`, so two keys \
+             the class calls equal would be filed apart",
+        ));
+    }
     Key::from_value(value.base(heap)).map_err(|reason| {
         let message = match reason {
             NotAKey::Unhashable => format!(
@@ -3285,6 +3460,39 @@ mod tests {
             dict.get(&Key::Str(Rc::from("marc"))),
             Some(&Value::Int(2)),
             "the second write should have replaced the first"
+        );
+    }
+
+    /// `op eq` is what costs a class its use as a dict key, and this is the half a
+    /// corpus case cannot state: that the very same class *without* the op is a
+    /// perfectly good key. One `.err` file shows the refusal; only a pair shows
+    /// that the op is the cause rather than the shape.
+    #[test]
+    fn declaring_op_eq_is_what_costs_the_dict_key() {
+        let interp = run("class Plain extends string {}\n\
+                          final d = {}\n\
+                          d[Plain(\"marc\")] = 1\n");
+        let Some(Value::Dict(id)) = global(&interp, "d") else {
+            panic!("`d` should be a dict");
+        };
+        assert_eq!(interp.heap.dict(id).len(), 1, "the base is a fine key");
+
+        let program = crate::compile(
+            "class Decides extends string {\n\
+             op eq(other) { return true }\n\
+             }\n\
+             final d = {}\n\
+             d[Decides(\"marc\")] = 1\n",
+        )
+        .expect("the test program should parse");
+        let mut interp = Interp::with_output(Box::new(Vec::new()));
+        let err = interp
+            .run(&program)
+            .expect_err("a class that decides `==` cannot be a key");
+        assert!(
+            err.message.contains("cannot be a dict key"),
+            "expected the key refusal, got: {}",
+            err.message
         );
     }
 

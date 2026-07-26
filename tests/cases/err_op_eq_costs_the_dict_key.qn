@@ -1,0 +1,10 @@
+# A class that decides `==` cannot be a dict key: a dict finds a key by its
+# contents, which cannot run an op. Note this one's base would have been a
+# perfectly good key — `class Name extends string {}` works — so it is the op
+# that costs it, not the shape.
+class Ci extends string {
+    op eq(other) { return string(self).lower() == string(other).lower() }
+}
+
+let d = {}
+d[Ci("Marc")] = 1

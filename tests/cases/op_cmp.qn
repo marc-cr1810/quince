@@ -1,0 +1,41 @@
+# One op answers all four ordering operators, the way C++'s `<=>` does.
+class Money {
+    op init(cents) { self.cents = cents }
+    op cmp(other) { return self.cents - other.cents }
+}
+
+let a = Money(100)
+let b = Money(250)
+
+print(a < b, a <= b, a > b, a >= b)
+print(b < a, b <= a, b > a, b >= a)
+print(a < Money(100), a <= Money(100), a >= Money(100))
+
+# Written the other way round, the op still answers — with its sign inverted,
+# because it was handed the operands backwards.
+class Half {
+    op init(n) { self.n = n }
+    op cmp(other) { return self.n - other }
+}
+print(Half(3) < 5, 5 > Half(3))
+print(Half(9) < 5, 5 > Half(9))
+print(Half(5) <= 5, 5 >= Half(5))
+
+# `op cmp` says nothing about `==`, which stays the language's question.
+print(Money(100) == Money(100), Money(100) <= Money(100))
+
+# `op lt` and `op gt` beat it for the one operator each names.
+class Odd {
+    op init(n) { self.n = n }
+    op cmp(other) { return self.n - other.n }
+    op lt(other) { return true }
+    op gt(other) { return false }
+}
+print(Odd(9) < Odd(1), Odd(9) > Odd(1))
+print(Odd(9) <= Odd(1), Odd(9) >= Odd(1))
+
+# A class extending a builtin orders by its op, not by what it carries.
+class Backwards extends int {
+    op cmp(other) { return int(other) - int(self) }
+}
+print(Backwards(1) < Backwards(2), Backwards(2) < Backwards(1))

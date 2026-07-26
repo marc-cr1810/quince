@@ -1,0 +1,8 @@
+# `op cmp` answers with an int read for its sign. A float is refused rather than
+# rounded, for the same reason `op bool` refuses a list.
+class Weight {
+    op init(kg) { self.kg = kg }
+    op cmp(other) { return self.kg - other.kg }
+}
+
+print(Weight(1.5) < Weight(2.0))

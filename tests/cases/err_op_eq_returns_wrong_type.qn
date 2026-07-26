@@ -1,0 +1,8 @@
+# `op eq` answers with a bool. Nothing is coerced: a truthy answer of some other
+# type would mean the emptiness of a list quietly deciding an `==`.
+class Sloppy {
+    op init(n) { self.n = n }
+    op eq(other) { return self.n }
+}
+
+print(Sloppy(1) == Sloppy(1))

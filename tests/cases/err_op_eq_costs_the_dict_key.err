@@ -1,0 +1,1 @@
+a Ci cannot be a dict key, because its `op eq` decides what equals it

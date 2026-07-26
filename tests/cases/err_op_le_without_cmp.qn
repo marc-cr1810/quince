@@ -1,0 +1,9 @@
+# `op lt` answers `<` and nothing else. `<=` is `op cmp`'s alone, because
+# deriving it would assume the order is total.
+class Version {
+    op init(n) { self.n = n }
+    op lt(other) { return self.n < other.n }
+}
+
+print(Version(1) < Version(2))
+print(Version(1) <= Version(2))

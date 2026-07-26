@@ -1,0 +1,1 @@
+`op cmp` must answer with an int, but Weight's returned float

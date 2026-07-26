@@ -230,10 +230,23 @@ pub enum Op {
     /// Defining it costs the class its use as a dict key: see [`crate::dict::Key`],
     /// which cannot ask a class anything.
     Eq,
-    /// `<`, `<=`, `>` and `>=`, from one method returning a negative, zero, or
-    /// positive int. One op rather than four, because four could disagree with
-    /// each other and nothing would notice.
+    /// All four of `<`, `<=`, `>` and `>=`, from one method answering `-1`, `0`
+    /// or `1` — C++'s `<=>`, which is where the shape comes from.
+    ///
+    /// It is the only op that can answer `<=` and `>=`. A class declaring just
+    /// [`Op::Lt`] gets `<` and nothing else, exactly as writing `operator<` in
+    /// C++ leaves `a <= b` a compile error rather than deriving it. Deriving it
+    /// would mean assuming the order is total, which is the assumption `<=>`
+    /// exists to let a class refuse.
     Cmp,
+    /// `<`, which beats [`Op::Cmp`] for that one operator.
+    ///
+    /// Worth having beside `cmp` for the same reason C++ keeps `operator<`: a
+    /// class may know how to answer one comparison cheaply — a length, a tag —
+    /// without being able to place itself in a total order at all.
+    Lt,
+    /// `>`, which beats [`Op::Cmp`] for that one operator.
+    Gt,
 
     /// `a + b`.
     Add,
@@ -278,6 +291,8 @@ pub static OPS: &[Op] = &[
     Op::Dict,
     Op::Eq,
     Op::Cmp,
+    Op::Lt,
+    Op::Gt,
     Op::Add,
     Op::Sub,
     Op::Mul,
@@ -336,6 +351,8 @@ impl Op {
             Op::Dict => "dict",
             Op::Eq => "eq",
             Op::Cmp => "cmp",
+            Op::Lt => "lt",
+            Op::Gt => "gt",
             Op::Add => "add",
             Op::Sub => "sub",
             Op::Mul => "mul",
@@ -369,7 +386,14 @@ impl Op {
         match self {
             Op::Eq => Reflect::Same,
             Op::Cmp => Reflect::Negate,
-            Op::Init
+            // C++ does reach the right operand for `==` and for `<=>`, and does
+            // not for a plain `operator<`. The asymmetry is not an oversight
+            // there and is not one here: `<=>` answers a question about a pair
+            // and so can be read backwards, while `op lt` answers about `<`
+            // specifically and has no second reading.
+            Op::Lt
+            | Op::Gt
+            | Op::Init
             | Op::Bool
             | Op::Str
             | Op::Int
@@ -423,6 +447,8 @@ impl Op {
             // The other operand, the key, or the needle.
             Op::Eq
             | Op::Cmp
+            | Op::Lt
+            | Op::Gt
             | Op::Add
             | Op::Sub
             | Op::Mul
@@ -631,6 +657,10 @@ mod tests {
         // thing a later op gets wrong by copying its neighbour: reflecting `sub`
         // computes `b - a` and is wrong by a sign. Written as a full partition so
         // that adding an op forces a decision here as well as in `reflect`.
+        //
+        // `lt` and `gt` sit with `sub` rather than with `cmp`, which is the line
+        // C++ draws too — `operator<=>` has a reversed candidate and `operator<`
+        // does not.
         for op in OPS {
             let expected = match op {
                 Op::Eq => Reflect::Same,
@@ -655,6 +685,8 @@ mod tests {
                 Op::Set => Some(2),
                 Op::Eq
                 | Op::Cmp
+                | Op::Lt
+                | Op::Gt
                 | Op::Add
                 | Op::Sub
                 | Op::Mul
