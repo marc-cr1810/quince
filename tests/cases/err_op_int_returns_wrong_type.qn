@@ -1,0 +1,5 @@
+class Bad {
+    op init() { }
+    op int() { return "nope" }
+}
+print(int(Bad()))

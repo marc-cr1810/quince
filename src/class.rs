@@ -90,6 +90,27 @@ impl Builtin {
     pub fn index(self) -> usize {
         self as usize
     }
+
+    /// The op a class defines to say how its values convert to this type.
+    ///
+    /// `int(x)` asks *x*'s class for [`Op::Int`], which is what lets a class
+    /// choose what it becomes rather than being told by its payload. Exhaustive,
+    /// so a new builtin cannot be added without answering — and `None` is a real
+    /// answer twice over: there is no value a `function` or a `class` could be
+    /// made from, so there is nothing for a class to override.
+    pub fn conversion(self) -> Option<Op> {
+        match self {
+            Builtin::Bool => Some(Op::Bool),
+            Builtin::Str => Some(Op::Str),
+            Builtin::Int => Some(Op::Int),
+            Builtin::Float => Some(Op::Float),
+            Builtin::List => Some(Op::List),
+            Builtin::Dict => Some(Op::Dict),
+            // `nil` has no conversion to override: it is a keyword, not a global,
+            // so `nil(x)` does not parse in the first place.
+            Builtin::Nil | Builtin::Function | Builtin::Class => None,
+        }
+    }
 }
 
 /// Seed data for one builtin type: what it is called and what it can do.
@@ -385,6 +406,43 @@ mod tests {
         arity: None,
         func: |_interp, _args, _span| Ok(Value::Nil),
     };
+
+    #[test]
+    /// A type that can be made from a value is exactly a type a class can say it
+    /// converts to.
+    ///
+    /// Both halves are worth pinning. Comparing the *names* rather than the pair
+    /// catches a mismapping without listing the pairs again: `Float` answering
+    /// `Op::Int` would make `float(x)` run a class's `op int`, silently, and no
+    /// other test would notice. And a builtin with a conversion but no `init` —
+    /// or the reverse — is a type a class could override its way into but the
+    /// language cannot construct.
+    #[test]
+    fn a_builtin_converts_exactly_when_a_class_can_answer_for_it() {
+        for builtin in BUILTINS {
+            match builtin.conversion() {
+                Some(op) => {
+                    assert_eq!(
+                        op.name(),
+                        builtin.name(),
+                        "`{}` converts through `op {}`",
+                        builtin.name(),
+                        op.name()
+                    );
+                    assert!(
+                        builtin.seed().init.is_some(),
+                        "`{}` can be overridden but not constructed",
+                        builtin.name()
+                    );
+                }
+                None => assert!(
+                    builtin.seed().init.is_none(),
+                    "`{}` can be constructed but not overridden",
+                    builtin.name()
+                ),
+            }
+        }
+    }
 
     #[test]
     fn builtins_covers_every_type_a_value_can_have() {

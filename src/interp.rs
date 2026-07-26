@@ -1510,6 +1510,31 @@ impl Interp {
         args: Vec<Value>,
         span: Span,
     ) -> Result<Value, QuinceError> {
+        // One argument is a conversion of that argument, and its class is what
+        // gets to say what it converts to. Asked here rather than in each of the
+        // six natives, because it is one question — and asked before them, so an
+        // `op int` beats the payload underneath it, which is the whole point of
+        // declaring one.
+        //
+        // `string` and `bool` would have reached their op anyway, through
+        // `display` and `is_truthy`. This just gets there first, with the same
+        // answer.
+        if let [arg] = args.as_slice()
+            && let Some(op) = builtin.conversion()
+            && let Some(method) = self.slot(arg, op)
+        {
+            let arg = arg.clone();
+            let produced = self.call_op(method, &arg, Vec::new())?;
+            // An `op int` answering with a string would make `int(x)` return
+            // something that is not an int, which nothing downstream is written
+            // to survive.
+            if produced.base(&self.heap).class(&self.heap) != self.heap.builtin_class(builtin) {
+                let expected = an(builtin.name());
+                return Err(self.op_returned(op, &arg, &expected, &produced));
+            }
+            return Ok(produced);
+        }
+
         let Some(init) = self.heap.class(id).slot(Op::Init).cloned() else {
             // Only `function` reaches this: `nil` and `class` are keywords, so
             // neither is bound as a global and nothing can name them to call.
@@ -2778,7 +2803,9 @@ fn checked_trunc(f: f64, span: Span) -> Result<i64, QuinceError> {
 pub static INT_INIT: Native = Native {
     name: "int",
     arity: Some(1),
-    func: |interp, args, span| match &args[0] {
+    // Dispatching on the base, so a class extending `int` converts as the int it
+    // is, while the message still names the class the line was written with.
+    func: |interp, args, span| match &args[0].base(&interp.heap).clone() {
         Value::Int(n) => Ok(Value::Int(*n)),
         // Toward zero, unlike `//`, which floors. `int` follows the same rule as
         // Python and Rust's `as`; `//` deliberately does not, so that `-7 // 2`
@@ -2804,7 +2831,7 @@ pub static INT_INIT: Native = Native {
 pub static FLOAT_INIT: Native = Native {
     name: "float",
     arity: Some(1),
-    func: |interp, args, span| match &args[0] {
+    func: |interp, args, span| match &args[0].base(&interp.heap).clone() {
         Value::Float(f) => Ok(Value::Float(*f)),
         Value::Int(n) => Ok(Value::Float(*n as f64)),
         Value::Str(text) => text.trim().parse::<f64>().map(Value::Float).map_err(|_| {
@@ -2846,17 +2873,19 @@ pub static LIST_INIT: Native = Native {
     arity: None,
     func: |interp, args, span| match args {
         [] => Ok(Value::List(interp.heap.alloc(Object::List(Vec::new())))),
-        // Shallow, as in Python: the new list holds the same elements rather
-        // than copies of them, so a nested list stays shared.
-        [Value::List(id)] => {
-            let items = interp.heap.list(*id).clone();
-            Ok(Value::List(interp.heap.alloc(Object::List(items))))
-        }
-        [Value::Str(_)] => Err(not_convertible(&interp.heap, "list", &args[0], span)
-            .with_help("`chars` splits a string into its characters")),
-        [Value::Dict(_)] => Err(not_convertible(&interp.heap, "list", &args[0], span)
-            .with_help("`keys` or `values` picks which half of a dict to take")),
-        [other] => Err(not_convertible(&interp.heap, "list", other, span)),
+        [only] => match only.base(&interp.heap).clone() {
+            // Shallow, as in Python: the new list holds the same elements rather
+            // than copies of them, so a nested list stays shared.
+            Value::List(id) => {
+                let items = interp.heap.list(id).clone();
+                Ok(Value::List(interp.heap.alloc(Object::List(items))))
+            }
+            Value::Str(_) => Err(not_convertible(&interp.heap, "list", only, span)
+                .with_help("`chars` splits a string into its characters")),
+            Value::Dict(_) => Err(not_convertible(&interp.heap, "list", only, span)
+                .with_help("`keys` or `values` picks which half of a dict to take")),
+            _ => Err(not_convertible(&interp.heap, "list", only, span)),
+        },
         _ => Err(too_many("list", args.len(), span)),
     },
 };
@@ -2866,11 +2895,13 @@ pub static DICT_INIT: Native = Native {
     arity: None,
     func: |interp, args, span| match args {
         [] => Ok(Value::Dict(interp.heap.alloc(Object::Dict(Dict::new())))),
-        [Value::Dict(id)] => {
-            let entries = interp.heap.dict(*id).clone();
-            Ok(Value::Dict(interp.heap.alloc(Object::Dict(entries))))
-        }
-        [other] => Err(not_convertible(&interp.heap, "dict", other, span)),
+        [only] => match only.base(&interp.heap).clone() {
+            Value::Dict(id) => {
+                let entries = interp.heap.dict(id).clone();
+                Ok(Value::Dict(interp.heap.alloc(Object::Dict(entries))))
+            }
+            _ => Err(not_convertible(&interp.heap, "dict", only, span)),
+        },
         _ => Err(too_many("dict", args.len(), span)),
     },
 };

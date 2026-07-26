@@ -1,0 +1,38 @@
+# A class chooses what it becomes, rather than being told by its payload.
+class Money {
+    op init(cents) { self.cents = cents }
+    op int() { return self.cents }
+    op float() { return self.cents / 100 }
+    op string() { return "$" + string(self.cents / 100) }
+    op bool() { return self.cents != 0 }
+    op list() { return [self.cents] }
+}
+
+let m = Money(250)
+print(int(m))
+print(float(m))
+print(string(m))
+print(bool(m), bool(Money(0)))
+print(list(m))
+
+# A subclass of a builtin converts as the thing it is, with no op needed. This
+# was refused before the ops landed: `int` matched on the object rather than on
+# the value it carries.
+class Count extends int {}
+class Row extends list {}
+print(int(Count(3)), float(Count(3)))
+print(list(Row([1, 2, 3])))
+
+# An op beats the payload, and a payload answers where there is no op: `Pennies`
+# says how it prints but says nothing about `int`.
+class Pennies extends int {
+    op string() { return string(int(self)) + "p" }
+}
+print(Pennies(7))
+print(int(Pennies(7)))
+
+# A conversion nothing can answer is still refused.
+class Plain {
+    op init() { }
+}
+print(bool(Plain()))
