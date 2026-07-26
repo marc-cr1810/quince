@@ -167,6 +167,11 @@ impl Value {
     // Everything else goes through the [`crate::interp::Interp`] methods of the
     // same names, which do ask the class, and so take `&mut Interp` and return a
     // `Result`.
+    //
+    // Equality is deliberately not among them. It is the one question no message
+    // asks — a report names a value, it never compares two — so a base half would
+    // exist only to be a second implementation of `==`, and the two would drift.
+    // `Interp::equals` is the only one.
 
     /// Python-style truthiness: `nil`, `false`, zero, and empty collections are
     /// falsy; everything else is truthy.
@@ -185,69 +190,6 @@ impl Value {
             // One extending a builtin was unwrapped above, so `Username("")` is
             // falsy exactly as `""` is.
             Value::Class(_) | Value::Instance(_) => true,
-        }
-    }
-
-    /// Structural equality.
-    ///
-    /// Numbers compare across `int` and `float`, since they are one numeric
-    /// tower, but no other pair of types is ever equal — `1 == "1"` is `false`
-    /// rather than a coercion.
-    pub fn equals_base(&self, other: &Value, heap: &Heap) -> bool {
-        match (self.base(heap), other.base(heap)) {
-            (Value::Nil, Value::Nil) => true,
-            (Value::Bool(a), Value::Bool(b)) => a == b,
-            (Value::Int(a), Value::Int(b)) => a == b,
-            (Value::Float(a), Value::Float(b)) => a == b,
-            (Value::Int(a), Value::Float(b)) | (Value::Float(b), Value::Int(a)) => *a as f64 == *b,
-            (Value::Str(a), Value::Str(b)) => a == b,
-            (Value::List(a), Value::List(b)) => {
-                if a == b {
-                    return true;
-                }
-                let (a, b) = (heap.list(*a), heap.list(*b));
-                a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.equals_base(y, heap))
-            }
-            // Order is not part of a dict's identity, only its contents:
-            // `{"a": 1, "b": 2}` equals `{"b": 2, "a": 1}`.
-            (Value::Dict(a), Value::Dict(b)) => {
-                if a == b {
-                    return true;
-                }
-                let (a, b) = (heap.dict(*a), heap.dict(*b));
-                a.len() == b.len()
-                    && a.iter().all(|(key, value)| {
-                        b.get(key).is_some_and(|other| value.equals_base(other, heap))
-                    })
-            }
-            // Functions compare by identity; there is no useful structural test.
-            (Value::Function(a), Value::Function(b)) => a == b,
-            (Value::Native(a), Value::Native(b)) => std::ptr::eq(*a, *b),
-            // Two bindings of the same method to the same object are equal even
-            // though `x.push` allocates a fresh one each time — otherwise
-            // `x.push == x.push` would be false, which nothing could justify.
-            // The receiver compares by identity rather than structurally, so
-            // `[].push` and another empty list's `push` stay distinct.
-            (Value::BoundMethod(a), Value::BoundMethod(b)) => {
-                if a == b {
-                    return true;
-                }
-                let (a, b) = (heap.bound_method(*a), heap.bound_method(*b));
-                a.method == b.method && a.receiver == b.receiver
-            }
-            // Classes, and instances carrying no payload, compare by identity. Two
-            // separately built `Point(1, 1)`s are different objects, and saying
-            // otherwise would require deciding that fields are all that a class is
-            // — which is false the moment one of them is mutable.
-            //
-            // One extending a builtin was unwrapped above, so `Username("marc")`
-            // equals `"marc"`, and by transitivity a `Slug("marc")` too. Its extra
-            // fields are invisible to `==`, which is the price of being a string
-            // rather than a wrapper around one — and the same decision as hashing,
-            // since two equal values must land in the same bucket.
-            (Value::Class(a), Value::Class(b)) => a == b,
-            (Value::Instance(a), Value::Instance(b)) => a == b,
-            _ => false,
         }
     }
 
@@ -430,44 +372,6 @@ mod tests {
         assert!(Value::Int(-1).is_truthy_base(&heap));
         assert!(Value::from("a").is_truthy_base(&heap));
         assert!(full.is_truthy_base(&heap));
-    }
-
-    #[test]
-    fn numbers_compare_across_int_and_float() {
-        let heap = Heap::new();
-        assert!(Value::Int(1).equals_base(&Value::Float(1.0), &heap));
-        assert!(Value::Float(1.0).equals_base(&Value::Int(1), &heap));
-        assert!(!Value::Int(1).equals_base(&Value::Float(1.5), &heap));
-    }
-
-    #[test]
-    fn unrelated_types_are_never_equal() {
-        // Strong typing: no coercion sneaks in through `==`.
-        let heap = Heap::new();
-        assert!(!Value::Int(1).equals_base(&Value::from("1"), &heap));
-        assert!(!Value::Int(1).equals_base(&Value::Bool(true), &heap));
-        assert!(!Value::Nil.equals_base(&Value::Bool(false), &heap));
-    }
-
-    #[test]
-    fn lists_compare_structurally() {
-        let mut heap = Heap::new();
-        let a = Value::List(heap.alloc(Object::List(vec![Value::Int(1), Value::from("x")])));
-        let b = Value::List(heap.alloc(Object::List(vec![Value::Int(1), Value::from("x")])));
-        let c = Value::List(heap.alloc(Object::List(vec![Value::Int(2)])));
-        assert!(a.equals_base(&b, &heap));
-        assert!(!a.equals_base(&c, &heap));
-    }
-
-    #[test]
-    fn identical_handles_short_circuit_comparison() {
-        // Guards the self-referential case from running forever.
-        let mut heap = Heap::new();
-        let id = heap.alloc(Object::List(vec![]));
-        heap.list_mut(id)
-            .expect("never frozen here")
-            .push(Value::List(id));
-        assert!(Value::List(id).equals_base(&Value::List(id), &heap));
     }
 
     #[test]

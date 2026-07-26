@@ -1988,8 +1988,120 @@ impl Interp {
     }
 
     /// Whether two values are equal, which a class may answer with `op eq`.
+    ///
+    /// Numbers compare across `int` and `float`, since they are one numeric
+    /// tower, but no other pair of types is ever equal — `1 == "1"` is `false`
+    /// rather than a coercion.
+    ///
+    /// A container holding itself is only survivable here when both sides are the
+    /// same handle. Two *distinct* cycles recurse without bound and take the
+    /// process down with a native stack overflow — a crash that predates the
+    /// slots, shared with the renderer, and tracked as its own piece of work
+    /// rather than patched in the middle of this one. The fix is Python's: record
+    /// the pair being compared and answer `true` on reaching it again.
     pub fn equals(&mut self, lhs: &Value, rhs: &Value) -> Result<bool, QuinceError> {
-        Ok(lhs.equals_base(rhs, &self.heap))
+        // Cloned rather than borrowed: comparing what a container holds can run a
+        // program's `op eq`, and a borrow of the heap cannot be held across that.
+        let (a, b) = (lhs.base(&self.heap).clone(), rhs.base(&self.heap).clone());
+        let equal = match (&a, &b) {
+            (Value::Nil, Value::Nil) => true,
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::Float(a), Value::Float(b)) => a == b,
+            (Value::Int(a), Value::Float(b)) | (Value::Float(b), Value::Int(a)) => *a as f64 == *b,
+            (Value::Str(a), Value::Str(b)) => a == b,
+            // One handle is equal to itself without a walk, which is the only
+            // self-reference this can answer. See the note above.
+            (Value::List(a), Value::List(b)) if a == b => true,
+            (Value::List(a), Value::List(b)) => return self.lists_equal(*a, *b),
+            // Order is not part of a dict's identity, only its contents:
+            // `{"a": 1, "b": 2}` equals `{"b": 2, "a": 1}`.
+            (Value::Dict(a), Value::Dict(b)) if a == b => true,
+            (Value::Dict(a), Value::Dict(b)) => return self.dicts_equal(*a, *b),
+            // Functions compare by identity; there is no useful structural test.
+            (Value::Function(a), Value::Function(b)) => a == b,
+            (Value::Native(a), Value::Native(b)) => std::ptr::eq(*a, *b),
+            // Two bindings of the same method to the same object are equal even
+            // though `x.push` allocates a fresh one each time — otherwise
+            // `x.push == x.push` would be false, which nothing could justify.
+            // The receiver compares by identity rather than structurally, so
+            // `[].push` and another empty list's `push` stay distinct.
+            (Value::BoundMethod(a), Value::BoundMethod(b)) => {
+                if a == b {
+                    true
+                } else {
+                    let (a, b) = (self.heap.bound_method(*a), self.heap.bound_method(*b));
+                    a.method == b.method && a.receiver == b.receiver
+                }
+            }
+            // Classes, and instances carrying no payload, compare by identity. Two
+            // separately built `Point(1, 1)`s are different objects, and saying
+            // otherwise would require deciding that fields are all that a class is
+            // — which is false the moment one of them is mutable.
+            //
+            // One extending a builtin was unwrapped above, so `Username("marc")`
+            // equals `"marc"`, and by transitivity a `Slug("marc")` too. Its extra
+            // fields are invisible to `==`, which is the price of being a string
+            // rather than a wrapper around one — and the same decision as hashing,
+            // since two equal values must land in the same bucket.
+            (Value::Class(a), Value::Class(b)) => a == b,
+            (Value::Instance(a), Value::Instance(b)) => a == b,
+            _ => false,
+        };
+        Ok(equal)
+    }
+
+    /// Item by item, by index rather than over an iterator: each comparison can
+    /// run a program's `op eq`, which is free to mutate either list. `get` is
+    /// what makes a list that shrank mid-comparison end the comparison rather
+    /// than panic — and having shrunk, it is no longer the same length.
+    fn lists_equal(&mut self, a: ObjId, b: ObjId) -> Result<bool, QuinceError> {
+        if self.heap.list(a).len() != self.heap.list(b).len() {
+            return Ok(false);
+        }
+        let mut i = 0;
+        loop {
+            let (Some(x), Some(y)) = (
+                self.heap.list(a).get(i).cloned(),
+                self.heap.list(b).get(i).cloned(),
+            ) else {
+                return Ok(self.heap.list(a).len() == self.heap.list(b).len());
+            };
+            if !self.equals(&x, &y)? {
+                return Ok(false);
+            }
+            i += 1;
+        }
+    }
+
+    /// By key, which cannot ask a class anything — a [`Key`] holds no handle, so
+    /// two keys are equal exactly when `key_of` maps them to the same one. Only
+    /// the values are compared through `equals`.
+    fn dicts_equal(&mut self, a: ObjId, b: ObjId) -> Result<bool, QuinceError> {
+        if self.heap.dict(a).len() != self.heap.dict(b).len() {
+            return Ok(false);
+        }
+        // Collected up front for the same reason the list walk uses `get`: a
+        // comparison can run Quince code, and iterating either dict across that
+        // is not allowed. A key that has gone missing since is not equal.
+        let keys: Vec<Key> = self
+            .heap
+            .dict(a)
+            .iter()
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in keys {
+            let (Some(x), Some(y)) = (
+                self.heap.dict(a).get(&key).cloned(),
+                self.heap.dict(b).get(&key).cloned(),
+            ) else {
+                return Ok(false);
+            };
+            if !self.equals(&x, &y)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     // -- operators ---------------------------------------------------------
@@ -2929,6 +3041,58 @@ mod tests {
         let mut interp = Interp::with_output(Box::new(Vec::new()));
         interp.run(&program).expect("the test program should run");
         interp
+    }
+
+    /// Builds a list on the heap and hands back both halves, since a test that
+    /// makes a cycle needs the handle as well as the value.
+    fn list(interp: &mut Interp, items: Vec<Value>) -> (ObjId, Value) {
+        let id = interp.heap.alloc(Object::List(items));
+        (id, Value::List(id))
+    }
+
+    fn push(interp: &mut Interp, id: ObjId, value: Value) {
+        interp
+            .heap
+            .list_mut(id)
+            .expect("never frozen here")
+            .push(value);
+    }
+
+    #[test]
+    fn numbers_compare_across_int_and_float() {
+        let mut interp = Interp::with_output(Box::new(Vec::new()));
+        assert!(interp.equals(&Value::Int(1), &Value::Float(1.0)).unwrap());
+        assert!(interp.equals(&Value::Float(1.0), &Value::Int(1)).unwrap());
+        assert!(!interp.equals(&Value::Int(1), &Value::Float(1.5)).unwrap());
+    }
+
+    #[test]
+    fn unrelated_types_are_never_equal() {
+        // Strong typing: no coercion sneaks in through `==`.
+        let mut interp = Interp::with_output(Box::new(Vec::new()));
+        assert!(!interp.equals(&Value::Int(1), &Value::from("1")).unwrap());
+        assert!(!interp.equals(&Value::Int(1), &Value::Bool(true)).unwrap());
+        assert!(!interp.equals(&Value::Nil, &Value::Bool(false)).unwrap());
+    }
+
+    #[test]
+    fn lists_compare_structurally() {
+        let mut interp = Interp::with_output(Box::new(Vec::new()));
+        let (_, a) = list(&mut interp, vec![Value::Int(1), Value::from("x")]);
+        let (_, b) = list(&mut interp, vec![Value::Int(1), Value::from("x")]);
+        let (_, c) = list(&mut interp, vec![Value::Int(2)]);
+        assert!(interp.equals(&a, &b).unwrap());
+        assert!(!interp.equals(&a, &c).unwrap());
+    }
+
+    /// Guards the self-referential case from running forever — for the one shape
+    /// it can. Two distinct cycles still overflow the stack; see `equals`.
+    #[test]
+    fn identical_handles_short_circuit_comparison() {
+        let mut interp = Interp::with_output(Box::new(Vec::new()));
+        let (id, value) = list(&mut interp, vec![]);
+        push(&mut interp, id, value.clone());
+        assert!(interp.equals(&value, &value).unwrap());
     }
 
     #[test]
