@@ -161,7 +161,7 @@ impl Parser {
             None
         };
 
-        self.expect(TokenKind::LParen, "after the function name")?;
+        let lparen = self.expect(TokenKind::LParen, "after the function name")?;
 
         let mut params = Vec::new();
         if method {
@@ -182,7 +182,35 @@ impl Parser {
                 break;
             }
         }
-        self.expect(TokenKind::RParen, "after the parameter list")?;
+        let rparen = self.expect(TokenKind::RParen, "after the parameter list")?;
+
+        // An op takes the parameters the language will pass it, and nothing about
+        // the declaration is free to differ. Refused here, where the parameter
+        // list is what the message can point at — by the time `if x` calls a
+        // three-parameter `op bool`, the source that got it wrong is elsewhere.
+        if let Some(op) = op
+            && let Some(arity) = op.arity()
+        {
+            // `self` is in `params` already, and is not the program's to count.
+            let found = params.len() - usize::from(method);
+            if found != arity {
+                let plural = if arity == 1 { "" } else { "s" };
+                return Err(QuinceError::new(
+                    format!(
+                        "`op {}` takes {arity} parameter{plural}, but {found} were declared",
+                        op.name()
+                    ),
+                    lparen.span.to(rparen.span),
+                )
+                .with_help(match arity {
+                    0 => format!("`op {}` answers about `self` alone", op.name()),
+                    _ => format!(
+                        "`op {}` is passed {arity} value{plural} by the language",
+                        op.name()
+                    ),
+                }));
+            }
+        }
 
         let body = self.block()?;
         Ok(FnDecl {
@@ -1111,6 +1139,71 @@ mod tests {
         // Pointing at the name, not at the `op`.
         assert_eq!(&"class C { op innit(x) { self.x = x } }"[13..18], "innit");
         assert_eq!(err.span.start, 13);
+    }
+
+    #[test]
+    fn an_op_declaring_the_wrong_number_of_parameters_is_rejected() {
+        let src = "class C { op bool(a, b) { return true } }";
+        let err = parse_err(src);
+        assert!(
+            err.message.contains("`op bool` takes 0 parameters, but 2"),
+            "{}",
+            err.message
+        );
+        // Pointing at the parameter list, which is the part to change.
+        assert_eq!(&src[17..23], "(a, b)");
+        assert_eq!(err.span.start, 17);
+        assert_eq!(err.span.end, 23);
+
+        // The count excludes `self`, so the one-parameter ops want exactly one
+        // besides it — and the message says "parameter", not "parameters".
+        let err = parse_err("class C { op add() { return 1 } }");
+        assert!(
+            err.message.contains("`op add` takes 1 parameter, but 0"),
+            "{}",
+            err.message
+        );
+    }
+
+    /// `init` is the exception, and the only one.
+    ///
+    /// A constructor's parameters belong to the class. Checking them here would
+    /// mean deciding how many arguments `Point(1, 2)` may pass, which is not the
+    /// parser's to decide.
+    #[test]
+    fn an_op_init_may_declare_any_parameters() {
+        for src in [
+            "class C { op init() { } }",
+            "class C { op init(a) { } }",
+            "class C { op init(a, b, c) { } }",
+        ] {
+            let methods = methods_of(src);
+            assert_eq!(methods[0].op, Some(Op::Init), "{src}");
+        }
+    }
+
+    /// Every op is declarable at the arity the table gives it.
+    ///
+    /// Deliberately tautological about the *number* — it reads `arity()` to build
+    /// the source, so it cannot tell a wrong number from a right one. What it
+    /// catches is an op the check refuses at its own arity, and `self` being
+    /// miscounted. `arity_is_what_the_language_passes` pins the numbers, and
+    /// nothing can confirm them for real until each op is wired.
+    #[test]
+    fn every_op_can_be_declared_at_its_own_arity() {
+        for op in crate::ast::OPS {
+            let Some(arity) = op.arity() else { continue };
+            let params: Vec<String> = (0..arity).map(|i| format!("p{i}")).collect();
+            let src = format!(
+                "class C {{ op {}({}) {{ }} }}",
+                op.name(),
+                params.join(", ")
+            );
+            let methods = methods_of(&src);
+            assert_eq!(methods[0].op, Some(*op), "{src}");
+            // `self` plus what the language passes.
+            assert_eq!(methods[0].params.len(), arity + 1, "{src}");
+        }
     }
 
     #[test]

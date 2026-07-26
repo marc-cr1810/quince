@@ -391,6 +391,52 @@ impl Op {
         }
     }
 
+    /// How many parameters the op takes, not counting `self`, or `None` for one
+    /// that takes what its class chooses.
+    ///
+    /// Checked where the declaration is parsed, which is the only place it can be
+    /// checked *well*: the parameter list is in hand, so the error points at the
+    /// parameters rather than at some later `if x` that tried to call them. It is
+    /// also what lets the calls the language makes on a program's behalf be
+    /// arity-free — nothing has to carry a span to report a mismatch that cannot
+    /// happen.
+    ///
+    /// `init` is the one exception, and has to be: a constructor's parameters are
+    /// the class's own business, and `Point(1, 2)` already reports a mismatch
+    /// against the source that spelled the call.
+    pub fn arity(self) -> Option<usize> {
+        match self {
+            Op::Init => None,
+
+            // A conversion answers a question about the receiver, so there is
+            // nothing else to pass.
+            Op::Bool
+            | Op::Str
+            | Op::Int
+            | Op::Float
+            | Op::List
+            | Op::Dict
+            | Op::Neg
+            | Op::Len
+            | Op::Iter => Some(0),
+
+            // The other operand, the key, or the needle.
+            Op::Eq
+            | Op::Cmp
+            | Op::Add
+            | Op::Sub
+            | Op::Mul
+            | Op::Div
+            | Op::FloorDiv
+            | Op::Rem
+            | Op::Get
+            | Op::Contains => Some(1),
+
+            // `x[i] = v` is the only one with two.
+            Op::Set => Some(2),
+        }
+    }
+
     pub fn from_name(name: &str) -> Option<Op> {
         OPS.iter().copied().find(|op| op.name() == name)
     }
@@ -592,6 +638,42 @@ mod tests {
                 _ => Reflect::Never,
             };
             assert_eq!(op.reflect(), expected, "`{}` reflects wrongly", op.name());
+        }
+    }
+
+    #[test]
+    fn arity_is_what_the_language_passes() {
+        // Spelled out rather than derived, because this is the one property of an
+        // op that nothing else can check: the parser refuses a declaration that
+        // disagrees with `arity`, so `arity` and the call the language makes are
+        // the only two statements of the truth, and they are steps apart. A
+        // number wrong here is a class that cannot declare a working op at all.
+        for op in OPS {
+            let expected = match op {
+                // A constructor's parameters are the class's own.
+                Op::Init => None,
+                Op::Set => Some(2),
+                Op::Eq
+                | Op::Cmp
+                | Op::Add
+                | Op::Sub
+                | Op::Mul
+                | Op::Div
+                | Op::FloorDiv
+                | Op::Rem
+                | Op::Get
+                | Op::Contains => Some(1),
+                Op::Bool
+                | Op::Str
+                | Op::Int
+                | Op::Float
+                | Op::List
+                | Op::Dict
+                | Op::Neg
+                | Op::Len
+                | Op::Iter => Some(0),
+            };
+            assert_eq!(op.arity(), expected, "`{}` takes the wrong count", op.name());
         }
     }
 }
