@@ -687,6 +687,11 @@ its fields, which stops being true the moment one of them is mutable. `is_truthy
 instance arm each; letting a class override them is the protocol-slot work, and it
 arrives whole or not at all.
 
+All of that still holds for a class extending nothing, which is what `Value::base` returning
+`self` for a payload-less instance preserves. A class extending a builtin is the exception, and
+not by overriding anything: the operator reaches the value the object *is*, so it is `string`'s
+`==` and `string`'s truthiness doing the work — see The slots below.
+
 `init` cannot return anything useful, because the instance already exists by the time it
 runs. A builtin's `init` is the exception and not really one: it is a conversion, there is no
 instance, and what it returns is the whole result — see Calling a type converts. It also
@@ -1080,27 +1085,153 @@ error[TypeError]: `X` was never given a string
 rather than panicking inside `text()`. The name walk is wrong in one direction only, by
 construction — it can miss a class that owes a `super.init`, never accuse one that does not.
 
-### What this deliberately leaves for the slots
-
-The operator surface. Until it lands an `Email` behaves as any instance does:
+### Declaring no `op init` is what asks for the implicit one
 
 ```quince
-print(e)                        # <Email instance>, not marc@example.com
-print(e == 'marc@example.com')  # false
-print(len(e))                   # TypeError: `len` does not apply to Email
-print(e + '!')                  # TypeError: cannot add Email and string
+class Username extends string {}
+final u = Username('marc')       # payload "marc"
 ```
 
-Splitting it here is what kept this reviewable: methods go through one choke point, while
-operators go through nine consuming sites plus `is_truthy`, `equals` and `display` — and
-equality drags hashing with it, since if `e == 'marc@example.com'` then the two must hash
-alike or a dict holds equal keys in different buckets.
+The boilerplate this removes — `op init(str) { super.init(str) }` — said nothing, and the
+machinery for it was already in place: a class declaring no `op init` inherits its parent's,
+so `Username.init` was *already* `string`'s conversion. Construction was simply misreading it
+as a method and inserting a receiver, which is why the arity came out one short. Recognising a
+native there and running it as the conversion it is makes construction and `super.init` the
+same operation, reached two ways.
 
-It also means the payload has no observable value in Quince yet — only its methods are
-reachable, and `int`, `float` and `bool` have no methods at all. So what `super.init` stored
-is asserted in Rust, and the collector test uses a `dict` ancestor: a string payload is an
-`Rc` rather than a handle, so a string subclass cannot prove `Instance::trace` names the
-payload at all. Written with a string first, it passed with the trace line deleted.
+Arity comes from the conversion for free, and so does everything else:
+
+```quince
+Username()                       # `string` takes 1 argument, but 0 were given
+class Stack extends list {}
+Stack()                          # payload [] — list()'s 0-argument reading
+Stack([1, 2])                     # payload [1, 2] — the copy reading
+```
+
+The error names `string` where the call site said `Username`, which is true rather than ideal:
+the arity really does come from the conversion. The help line adds the class, rather than the
+message being rewritten to hide where the number came from.
+
+**Declaring an `op init` is what takes construction over**, and then `super.init` is owed
+again. Not laziness about the check: `op init(a, b)` gives no answer to which argument an
+implicit conversion would take, so "declare nothing and you are built as your base" and
+"declare `op init` and you say" are the only two coherent positions.
+
+This also deleted the rule that a class extending a builtin must have an `op init` somewhere
+in its chain — the case it existed for is now the ordinary one — and with it the resolver's
+`inits` set. It closes most of the aliasing hole by accident, too: `final S = string` then
+`class X extends S {}` works, because the inheritance is by value and never consulted a name.
+
+## Where an operator finds a payload
+
+**Not the protocol slots.** Nothing here lets a class *decide* an operator's behaviour — `Op`
+still has one member, and `class Point { op add(other) { … } }` is not a thing that can be
+written. What this does is let a class extending a builtin reach *its base's* operators:
+`Username('marc') == 'marc'` works because `string`'s `==` does the comparing, and
+`Box(1) + Box(1)` is still refused with no way to change that. The slots are still owed; see
+the Roadmap.
+
+Methods had one choke point. Operators have none: nothing routes through a single place the
+way `args.insert(0, receiver)` does. So there is one helper, applied deliberately:
+
+```rust
+/// The value an operator should act on: an instance's payload, if it has one.
+pub fn base<'a>(&'a self, heap: &'a Heap) -> &'a Value
+```
+
+Thirteen call sites — `is_truthy`, `equals`, `display_styled`, `repr_styled` and
+`format_pretty` in `value.rs`; `binary`, `unary`, `index_get`, `list_index`, `slice`,
+`contains`, the `for` snapshot and `LEN` in `interp.rs`; plus `key_of`. An instance with no
+payload gets itself back, which is what leaves every class extending nothing behaving exactly
+as it did: compared by identity, always truthy, printed as `<Box instance>`.
+
+```quince
+class Username extends string {
+    fn email_address() { return self + '@gmail.com' }
+}
+final u = Username('marc')
+print(u)                   # marc
+print(u.email_address())   # marc@gmail.com
+print(len(u))              # 4
+print(u[0])                # m
+print(u[1:3])              # ar
+print(type(u))             # Username
+print(type(u + '!'))       # string
+```
+
+`self + '@gmail.com'`, not `self.raw`. There is no `raw` and there should not be: a field is
+assignable, so `u.raw = 5` would leave a `Username` that is not a string. A class extending
+`string` *is* one, so `self` is how you use it as one.
+
+### Dispatch on the base, report on the class
+
+These are different questions and the code asks them separately:
+
+```quince
+print(u - 1)               # cannot subtract Username and int
+```
+
+The dispatch needed the base type to decide that subtraction does not apply; the message needs
+the name the line was written with to say which value. `type_name` is never unwrapped for the
+same reason — `type(u)` is `Username`, which is the whole point of having declared it.
+
+### `==` and hashing are one decision
+
+```quince
+print(u == 'marc')             # true
+print(u == Username('marc'))   # true  — false before this, by identity
+print(u == Slug('marc'))       # true  — transitivity leaves no choice
+
+final d = {}
+d[Username('marc')] = 1
+d['marc'] = 2
+print(len(d))                  # 1
+print(d.keys())                # ["marc"]
+```
+
+If `u == 'marc'` then the two must hash alike, or a dict holds equal keys in different
+buckets. So `equals` and `key_of` cannot be decided separately, and the unwrap goes in
+`key_of` rather than `Key::from_value` — which has no heap to reach a payload through, and
+whose only non-test caller is `key_of`. `Key` needed no new variant.
+
+Two consequences, both accepted rather than worked around: a subclass's extra fields are
+**invisible to `==`**, and a subclass used as a dict key **comes back as its base type**. The
+alternative is a type that borrows `string`'s methods and is never equal to a string, which is
+a wrapper, not a string. Python has both properties for `str` subclasses.
+
+`repr` follows the same rule, so `[u]` prints `["marc"]` and nothing in the output
+distinguishes it from a plain string. `repr` stays the literal you could paste back, and
+`type(x)` is how you ask what class something is.
+
+### Two behaviour changes worth naming
+
+Truthiness now follows the payload, where every instance used to be unconditionally true:
+
+```quince
+print(bool(Username('')))      # false
+if Username('') { }            # does not run
+```
+
+That is Python's answer and it follows from being a string, but code using an instance as an
+existence check changes meaning.
+
+And a string is **not** iterable in Quince — `chars` is how its characters are reached — so
+neither is a class extending one. `for c in u` is refused exactly as `for c in 'marc'` is.
+That is consistency rather than a gap; a `list` or `dict` ancestor iterates normally.
+
+### What the tests had to be written around
+
+The payload has no observable value except through what reaches it, so two invariants are
+asserted in Rust rather than by printing:
+
+- what `super.init` stored, and what the implicit init stored, since `int`, `float` and `bool`
+  have no methods at all.
+- that an equal key lands in the *same bucket*. Printing cannot tell one entry from two that
+  happen to look alike, so the test reads `dict.len()`.
+
+The collector test uses a `dict` ancestor deliberately: a string payload is an `Rc` rather
+than a handle, so a string subclass proves nothing about `Instance::trace`. Written with a
+string first, it passed with the trace line deleted.
 
 ## `op` marks what the language calls
 
@@ -1666,27 +1797,43 @@ a `super.init` is written, because catching it before the class is stored is wor
 precision; the evaluator checks that only one runs, because it is holding the payload anyway
 and a branch makes the syntactic count a lie. Neither check is a weaker version of the other.
 
-What v0.5 still owes, in order: the slots, then `extend`, then the diagnostics sweep. The
-slots are next and are the larger piece: `e == 'marc@example.com'`, `len(e)`, `e + '!'`,
-`print(e)`, `e[0]`, iteration and `in`, across nine consuming sites plus `is_truthy`,
-`equals` and `display`. Equality is the decision to make first, because hashing follows from
-it: if `e == 'marc@example.com'` then the two must hash alike, so `Key::from_value` unwraps a
-payload to `Key::Str` and needs no new variant. Python is the reference — it makes
-`Email('a@b') == Slug('a@b')` true, and transitivity leaves no other option.
+The payload unwrap landed next, together with the implicit `op init` — see Where an operator
+finds a payload above. Bundling them was the right call and not only for convenience: an
+implicit init is what makes `class Username extends string {}` worth writing, and without the
+operators there was nothing you could then *do* with one, since `int`, `float` and `bool` have
+no methods. Half the feature would have shipped unusable.
 
-Subclassing a builtin went before the slots and not after, because what is left once the
-payload exists *is* the slot surface — `is_truthy`, `equals`, `display`, indexing, `len`,
-iteration. Doing it the other way round would have written the unwrapping twice. It has since
-landed; Extending a builtin above is the record.
+This work was called "the slots" in its commit message and in the first draft of this section,
+and that was wrong in a way worth recording rather than quietly correcting. Letting a subclass
+reach `string`'s `==` and letting a class define its own `==` are different features that
+happen to touch the same functions. `Op` still has exactly one member. The mistake was
+possible because both get described as "making operators work on instances", and the tell that
+it was a mistake is that nothing was added to `OPS` — the prediction made when `op` landed,
+that every operation after the first would be a line added to a list that already checks
+itself, is still unredeemed.
 
-Equality is the one open decision, and Python settles it by force. If an `Email` equals a
-plain string then it must hash alike, or a dict holds two keys that are equal and land in
-different buckets — so `equals` and `Key::from_value` are one decision, not two. And
-transitivity forces the rest: `Email` and `Slug` both equal `"a@b"`, so they equal each
-other, which means a subclass's extra fields are invisible to `==`. The alternative is a type
-that borrows `string`'s methods and is never equal to a string, which is not what "our own
-string types" means. `Key` needs no new variant either — an instance with a payload unwraps
-to `Key::Str`.
+The thirteen unwrap sites are also the thirteen sites the slots will need, so whichever of the
+two went first, the second revisits them. An earlier draft claimed the ordering avoided
+writing the unwrapping twice; it does not, and that claim was never tested.
+
+What was genuinely unexpected is how much the implicit init *removed* — the "extends a builtin
+but has no `op init`" rule and the resolver's `inits` set both went, because the case they
+guarded became the ordinary one.
+
+What v0.5 still owes, in order: the protocol slots, then `extend`, then the diagnostics sweep.
+The slots are the piece this is all still building toward — a class deciding its own
+truthiness, printing, equality, indexing and iteration, each as an `op` beside `init`. They
+arrive whole or not at all, and each of the thirteen sites gains the same shape: ask the class,
+then fall back to the payload, then refuse.
+
+Subclassing a builtin went before the slots because it is what a user asked for, not because
+the ordering saved anything. The two touch the same functions — `is_truthy`, `equals`,
+`display`, indexing, `len`, iteration — so either order visits them twice. It has since landed;
+Extending a builtin and Where an operator finds a payload above are the record.
+
+Equality was the one open decision, and Python settled it by force rather than by preference:
+if an `Email` equals a plain string then it must hash alike, or a dict holds two keys that are
+equal and land in different buckets. `equals` and hashing were one decision, not two.
 
 `final` and `const` landed here first, out of order, because they were a rename with a
 feature hiding inside it — see Bindings above. Renaming a keyword only gets cheaper the

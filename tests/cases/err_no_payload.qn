@@ -1,7 +1,10 @@
 # The static check works on names in one pass, so binding a type to another name
 # gets past it: `S` is not a class name and nothing records that it is `string`.
-# This is what that costs — a report at the first use rather than a refusal at the
-# class, and the reason the check cannot be the only guard.
+# An `op init` is needed too — without one the class inherits the conversion and
+# is built correctly. This is what the name walk costs, and the reason it cannot
+# be the only guard.
 final S = string
-class X extends S {}
-X().upper()
+class X extends S {
+  op init(str) { self.raw = str }
+}
+X('marc').upper()

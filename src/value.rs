@@ -125,14 +125,37 @@ impl Value {
     }
 
     /// The name used in type errors and by `type(x)`.
+    ///
+    /// Never unwrapped to a payload: `type(Username("marc"))` is `Username`, which
+    /// is the whole reason someone declared the class.
     pub fn type_name<'h>(&self, heap: &'h Heap) -> &'h str {
         &heap.class(self.class(heap)).name
+    }
+
+    /// The value an operator should act on: an instance's payload, if it has one.
+    ///
+    /// A class extending a builtin *is* that builtin, so `+`, `==`, `len`,
+    /// indexing, iteration and printing have to see the string or the list rather
+    /// than the object carrying it. Methods do not come through here — they are
+    /// substituted at `call_method`, which is the one place a receiver is inserted.
+    ///
+    /// One level and no more: a conversion only ever produces a base value, so a
+    /// payload is never itself an instance.
+    ///
+    /// An instance with no payload gets itself back. That is what leaves every
+    /// class extending nothing behaving exactly as it did — compared by identity,
+    /// always truthy, printed as `<Box instance>`.
+    pub fn base<'a>(&'a self, heap: &'a Heap) -> &'a Value {
+        match self {
+            Value::Instance(id) => heap.instance(*id).payload.as_ref().unwrap_or(self),
+            _ => self,
+        }
     }
 
     /// Python-style truthiness: `nil`, `false`, zero, and empty collections are
     /// falsy; everything else is truthy.
     pub fn is_truthy(&self, heap: &Heap) -> bool {
-        match self {
+        match self.base(heap) {
             Value::Nil => false,
             Value::Bool(b) => *b,
             Value::Int(n) => *n != 0,
@@ -141,9 +164,10 @@ impl Value {
             Value::List(id) => !heap.list(*id).is_empty(),
             Value::Dict(id) => !heap.dict(*id).is_empty(),
             Value::Function(_) | Value::Native(_) | Value::BoundMethod(_) => true,
-            // An instance is truthy regardless of its fields. Letting a class
-            // decide otherwise is a protocol slot, which arrives with the rest
-            // of them or not at all.
+            // An instance carrying no payload is truthy regardless of its fields:
+            // there is nothing to ask, since a class cannot yet answer for itself.
+            // One extending a builtin was unwrapped above, so `Username("")` is
+            // falsy exactly as `""` is.
             Value::Class(_) | Value::Instance(_) => true,
         }
     }
@@ -154,7 +178,7 @@ impl Value {
     /// tower, but no other pair of types is ever equal — `1 == "1"` is `false`
     /// rather than a coercion.
     pub fn equals(&self, other: &Value, heap: &Heap) -> bool {
-        match (self, other) {
+        match (self.base(heap), other.base(heap)) {
             (Value::Nil, Value::Nil) => true,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Int(a), Value::Int(b)) => a == b,
@@ -195,10 +219,16 @@ impl Value {
                 let (a, b) = (heap.bound_method(*a), heap.bound_method(*b));
                 a.method == b.method && a.receiver == b.receiver
             }
-            // Classes and instances compare by identity. Two separately built
-            // `Point(1, 1)`s are different objects, and saying otherwise would
-            // require deciding that fields are all that a class is — which is
-            // false the moment one of them is mutable.
+            // Classes, and instances carrying no payload, compare by identity. Two
+            // separately built `Point(1, 1)`s are different objects, and saying
+            // otherwise would require deciding that fields are all that a class is
+            // — which is false the moment one of them is mutable.
+            //
+            // One extending a builtin was unwrapped above, so `Username("marc")`
+            // equals `"marc"`, and by transitivity a `Slug("marc")` too. Its extra
+            // fields are invisible to `==`, which is the price of being a string
+            // rather than a wrapper around one — and the same decision as hashing,
+            // since two equal values must land in the same bucket.
             (Value::Class(a), Value::Class(b)) => a == b,
             (Value::Instance(a), Value::Instance(b)) => a == b,
             _ => false,
@@ -212,7 +242,7 @@ impl Value {
 
     /// How a value prints with optional ANSI syntax highlighting.
     pub fn display_styled(&self, heap: &Heap, color: bool) -> String {
-        match self {
+        match self.base(heap) {
             Value::Nil => Style::DIM.paint("nil", color),
             Value::Bool(b) => Style::YELLOW.paint(b, color),
             Value::Int(n) => Style::CYAN.paint(n, color),
@@ -286,7 +316,7 @@ impl Value {
         if single.len() <= 60 {
             return single;
         }
-        match self {
+        match self.base(heap) {
             Value::List(_) | Value::Dict(_) => self.format_pretty(heap, color, 0),
             _ => single,
         }
@@ -295,7 +325,7 @@ impl Value {
     fn format_pretty(&self, heap: &Heap, color: bool, indent: usize) -> String {
         let pad = "    ".repeat(indent);
         let inner_pad = "    ".repeat(indent + 1);
-        match self {
+        match self.base(heap) {
             Value::List(id) => {
                 let items = heap.list(*id);
                 if items.is_empty() {
@@ -374,7 +404,11 @@ impl Value {
 
     /// How a value prints inside collections with optional ANSI colors.
     pub fn repr_styled(&self, heap: &Heap, color: bool) -> String {
-        match self {
+        // A payload-carrying instance reprs as its base type, so `[Username("marc")]`
+        // shows `["marc"]`. Nothing in the output distinguishes it from a plain
+        // string, which is the same trade Python makes: `repr` stays the literal you
+        // would write, and `type(x)` is how you ask what class it is.
+        match self.base(heap) {
             Value::Str(s) => Style::GREEN.paint(format!("{s:?}"), color),
             other => other.display_styled(heap, color),
         }

@@ -1,0 +1,41 @@
+marc
+marc@gmail.com
+4
+m
+ar
+marc!
+Username
+string
+true
+true
+["marc"]
+true
+true
+true
+1
+["marc"]
+2
+false
+true
+[1, 2]
+2
+[1, 2, 3]
+true
+[9, 2]
+9
+2
+{"a": 1, "c": 3}
+1
+a
+c
+-5
+6
+int
+false
+<Box instance>
+true
+TypeError: `len` does not apply to Box
+TypeError: cannot add Box and string
+cannot subtract Username and int
+cannot iterate over Username
+["m", "a", "r", "c"]

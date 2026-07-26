@@ -50,20 +50,6 @@ fn is_builtin_type(name: &str) -> bool {
     builtin_named(name).is_some()
 }
 
-fn declares_init(methods: &[std::rc::Rc<FnDecl>]) -> bool {
-    methods.iter().any(|decl| decl.op == Some(Op::Init))
-}
-
-/// What a class inherits from the chain above it, when a builtin sits at the top.
-struct Base {
-    /// The builtin's name — the type a class extending this chain *is*.
-    builtin: &'static str,
-    /// Whether some class between here and the builtin declares an `op init`, and
-    /// so has already been checked for its `super.init`. A subclass declaring none
-    /// of its own inherits that one and owes nothing further.
-    constructed: bool,
-}
-
 #[derive(Debug)]
 struct Local {
     index: u16,
@@ -98,10 +84,6 @@ struct Resolver {
     /// `super.init`. Names rather than classes, because nothing has been
     /// evaluated yet.
     parents: HashMap<String, String>,
-    /// Which classes declare an `op init`, so a subclass that declares none can be
-    /// told whether it inherits one. Every entry has already had its own
-    /// `super.init` checked, which is what makes inheriting one sufficient.
-    inits: HashSet<String>,
     /// Whether the body being resolved is an `op init`. Cleared for a `fn` nested
     /// inside one, which could run at any time and so is not construction.
     in_init: bool,
@@ -145,22 +127,13 @@ impl Resolver {
         // below would only catch the half of the mistake that happens to come
         // second in the file.
         for stmt in stmts.iter() {
-            if let StmtKind::Class {
-                name,
-                parent,
-                methods,
-                ..
-            } = &stmt.kind
-            {
+            if let StmtKind::Class { name, parent, .. } = &stmt.kind {
                 self.declare_type(name, stmt.span)?;
                 // Recorded in the same pass, so a class can extend one declared
                 // further down the file — which the evaluator refuses, but as an
                 // undefined variable rather than as a chain this failed to see.
                 if let Some(parent) = parent {
                     self.parents.insert(name.clone(), parent.name.clone());
-                }
-                if declares_init(methods) {
-                    self.inits.insert(name.clone());
                 }
             }
         }
@@ -329,30 +302,17 @@ impl Resolver {
                 let Some(parent) = parent else {
                     return self.methods(methods, name, None, span);
                 };
+                // Declaring no `op init` is fine and needs no check: the class
+                // inherits its base's conversion and construction runs it, so
+                // `class Username extends string {}` builds a string. Declaring one
+                // is what takes construction over, and `methods` is where that
+                // obligation is checked.
                 let base = self.builtin_base(&parent.name);
-
-                // A class extending a builtin with no `op init` anywhere in its
-                // chain can never be given its value: there is no constructor for
-                // `super.init` to sit in. Every method it inherited would fail on
-                // the first call, so the class is refused instead.
-                if let Some(base) = &base
-                    && !base.constructed
-                    && !declares_init(methods)
-                {
-                    return Err(QuinceError::new(
-                        format!("`{name}` extends `{}` but has no `op init`", base.builtin),
-                        span,
-                    )
-                    .with_help(format!(
-                        "`super.init` is what gives it its {}, and `op init` is where that goes",
-                        base.builtin
-                    )));
-                }
 
                 self.scopes.push(Scope::default());
                 let result = self
                     .declare(ast::SUPER, false, span)
-                    .and_then(|()| self.methods(methods, name, base.as_ref(), span));
+                    .and_then(|()| self.methods(methods, name, base, span));
                 self.scopes.pop();
                 result
             }
@@ -431,7 +391,7 @@ impl Resolver {
         &mut self,
         methods: &mut [std::rc::Rc<FnDecl>],
         class: &str,
-        base: Option<&Base>,
+        base: Option<&'static str>,
         span: Span,
     ) -> Result<(), QuinceError> {
         for decl in methods {
@@ -462,8 +422,7 @@ impl Resolver {
                     span,
                 )
                 .with_help(format!(
-                    "`{class}` extends `{0}`, so `super.init` is what gives it its {0}",
-                    base.builtin
+                    "`{class}` extends `{base}`, so `super.init` is what gives it its {base}"
                 )));
             }
         }
@@ -477,18 +436,13 @@ impl Resolver {
     /// has been evaluated and `S` is not a class name. So the check above can miss
     /// a class that owes a `super.init` — never accuse one that does not — and the
     /// evaluator carries the guard for what gets through.
-    fn builtin_base(&self, parent: &str) -> Option<Base> {
+    fn builtin_base(&self, parent: &str) -> Option<&'static str> {
         let mut seen = HashSet::new();
-        let mut constructed = false;
         let mut name = parent;
         loop {
             if let Some(builtin) = builtin_named(name) {
-                return Some(Base {
-                    builtin,
-                    constructed,
-                });
+                return Some(builtin);
             }
-            constructed |= self.inits.contains(name);
             // `class A extends B` with `class B extends A` is a cycle in what was
             // written. The evaluator refuses it — a parent is read before the
             // subclass's name is bound — but this walk runs first and has to
@@ -1089,19 +1043,15 @@ mod tests {
     }
 
     #[test]
-    fn extending_a_builtin_requires_an_op_init_to_exist() {
-        // Nothing to check for a `super.init` and nowhere to put one: every method
-        // this inherits would fail on the first call.
-        assert_eq!(
-            resolve_err("class Stack extends list {}"),
-            "`Stack` extends `list` but has no `op init`"
-        );
-        // Two links up and still nothing constructs it.
-        assert_eq!(
-            resolve_err("class Chars extends string {}\nclass Word extends Chars {}"),
-            "`Chars` extends `string` but has no `op init`"
-        );
-        // An ancestor's `op init` is enough, because it has already been checked.
+    fn declaring_no_op_init_is_what_asks_for_the_implicit_one() {
+        // Nothing owed: the class inherits its base's conversion and construction
+        // runs it. Writing `op init(s) { super.init(s) }` would say no more.
+        resolved("class Username extends string {}");
+        resolved("class Stack extends list {}");
+        // Through a chain of classes that each declare nothing.
+        resolved("class Chars extends string {}\nclass Word extends Chars {}");
+        // An ancestor's `op init` is inherited whole, and was checked where it was
+        // written.
         resolved(
             "class Email extends string {\n op init(s) { super.init(s) }\n}\n\
              class Work extends Email {}\nclass Home extends Work {}",

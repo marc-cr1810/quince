@@ -611,16 +611,20 @@ impl Interp {
         env: ObjId,
     ) -> Result<Flow, QuinceError> {
         let iterable = self.eval(iter, env)?;
-        let items = match iterable {
+        // A class extending `list` or `dict` iterates as one. A string is not
+        // iterable to begin with — `chars` is how its characters are reached — so
+        // neither is a class extending it, which is the consistent answer rather
+        // than a gap.
+        let items = match iterable.base(&self.heap) {
             // Snapshotted, so mutating the collection inside the loop cannot
             // invalidate the iteration.
-            Value::List(id) => self.heap.list(id).clone(),
+            Value::List(id) => self.heap.list(*id).clone(),
             // A dict iterates over its keys, as in Python. Its values are the
             // half you can already reach, through `d[k]`.
-            Value::Dict(id) => self.heap.dict(id).keys().collect(),
-            other => {
+            Value::Dict(id) => self.heap.dict(*id).keys().collect(),
+            _ => {
                 return Err(QuinceError::new(
-                    format!("cannot iterate over {}", other.type_name(&self.heap)),
+                    format!("cannot iterate over {}", iterable.type_name(&self.heap)),
                     iter.span,
                 )
                 .with_kind(ErrorKind::Type));
@@ -1071,7 +1075,11 @@ impl Interp {
                 self.temps.truncate(mark);
                 let (collection, index) = evaluated?;
 
-                match &collection {
+                // Written through to the payload for a class extending `dict` or
+                // `list`, so `bag['a'] = 1` reaches the dict the object *is*. The
+                // `const` check still names `collection`, since freezing applies to
+                // the object a program holds.
+                match collection.base(&self.heap).clone() {
                     // Assigning to a missing key inserts it, where assigning
                     // past the end of a list stays an error: a list's indices
                     // are positions, and there is no meaningful gap to fill.
@@ -1082,7 +1090,7 @@ impl Interp {
                         let key = key_of(&self.heap, &index, target.span)?;
                         let written = self
                             .heap
-                            .dict_mut(*id)
+                            .dict_mut(id)
                             .map(|entries| entries.insert(key, value.clone()));
                         written.map_err(|_| frozen(&self.heap, &collection, target.span))?;
                     }
@@ -1136,8 +1144,11 @@ impl Interp {
     }
 
     /// Reads `target[index]`, dispatching on what is being subscripted.
+    ///
+    /// A class extending a builtin is subscripted as one, and yields the base
+    /// type: `Username("marc")[0]` is the string `"m"`.
     fn index_get(&self, target: &Value, index: &Value, span: Span) -> Result<Value, QuinceError> {
-        match target {
+        match target.base(&self.heap) {
             Value::Dict(id) => {
                 let key = key_of(&self.heap, index, span)?;
                 self.heap.dict(*id).get(&key).cloned().ok_or_else(|| {
@@ -1172,7 +1183,9 @@ impl Interp {
         end: Option<&Value>,
         span: Span,
     ) -> Result<Value, QuinceError> {
-        match target {
+        // Cloned rather than matched in place: the list arm allocates, so the
+        // immutable borrow `base` takes of the heap has to be over by then.
+        match target.base(&self.heap).clone() {
             Value::Str(text) => {
                 let chars: Vec<char> = text.chars().collect();
                 let (from, to) = slice_bounds(&self.heap, start, end, chars.len(), span)?;
@@ -1182,12 +1195,12 @@ impl Interp {
             }
             Value::List(id) => {
                 let (from, to) =
-                    slice_bounds(&self.heap, start, end, self.heap.list(*id).len(), span)?;
-                let items = self.heap.list(*id)[from..to].to_vec();
+                    slice_bounds(&self.heap, start, end, self.heap.list(id).len(), span)?;
+                let items = self.heap.list(id)[from..to].to_vec();
                 Ok(Value::List(self.heap.alloc(Object::List(items))))
             }
-            other => Err(QuinceError::new(
-                format!("cannot slice {}", other.type_name(&self.heap)),
+            _ => Err(QuinceError::new(
+                format!("cannot slice {}", target.type_name(&self.heap)),
                 span,
             )),
         }
@@ -1200,7 +1213,7 @@ impl Interp {
         index: &Value,
         span: Span,
     ) -> Result<(ObjId, usize), QuinceError> {
-        let Value::List(id) = target else {
+        let Value::List(id) = target.base(&self.heap) else {
             return Err(QuinceError::new(
                 format!("cannot index {}", target.type_name(&self.heap)),
                 span,
@@ -1272,19 +1285,44 @@ impl Interp {
                     return self.construct_builtin(id, builtin, args, span);
                 }
 
-                let instance = Value::Instance(self.heap.alloc(Object::Instance(Instance {
+                let instance_id = self.heap.alloc(Object::Instance(Instance {
                     class: id,
                     fields: Dict::new(),
-                    // Filled by `super.init` if a builtin is in the chain, which
-                    // is why it cannot be filled here: only the constructor knows
-                    // what value to convert, and it has not run yet.
+                    // Filled below, either by an `op init` calling `super.init` or
+                    // by the conversion this class inherited. Not here, because
+                    // only the constructor knows what value to convert.
                     payload: None,
-                })));
+                }));
+                let instance = Value::Instance(instance_id);
 
                 // The `op init` the class resolved when it was built, not a
                 // lookup of the name `init` — a method merely *called* `init` is
                 // an ordinary method, and construction must not reach it.
                 match self.heap.class(id).init.clone() {
+                    // A native here is a conversion, inherited by a class that
+                    // declares no `op init` of its own: nothing was written to run,
+                    // so construction does what an `op init` forwarding to
+                    // `super.init` would have done. `Username("marc")` needs no
+                    // constructor to be a string, and writing the one that only
+                    // forwards is boilerplate the language can supply.
+                    Some(init @ Value::Native(_)) => {
+                        let builtin = self
+                            .builtin_base(id)
+                            .expect("only a builtin's seed puts a native in `init`");
+                        self.set_payload(instance_id, init, builtin, args, span)
+                            .map_err(|err| {
+                                // The arity comes from the conversion, so it says
+                                // `string` where the call site said `Username`.
+                                // True, and worth saying rather than rewriting:
+                                // this class is built from what its base is.
+                                let name = self.heap.class(id).name.clone();
+                                err.with_help(format!(
+                                    "`{name}` extends `{}`, so it is built from whatever a {} is",
+                                    builtin.name(),
+                                    builtin.name()
+                                ))
+                            })?;
+                    }
                     // `init` runs Quince code, so it reaches safe points, and
                     // the instance needs no root here: it sits in slot 0 of the
                     // constructor's scope, which `exec_scoped` roots for the
@@ -1377,13 +1415,37 @@ impl Interp {
         let Value::Instance(id) = receiver else {
             unreachable!("`super` binds the enclosing method's receiver, always an instance");
         };
-        // Checked before the conversion runs, so a second call is refused on the
+        let init = self
+            .heap
+            .class(class)
+            .init
+            .clone()
+            .expect("a builtin reached as a superclass is one that converts");
+        self.set_payload(*id, init, builtin, args, span)
+    }
+
+    /// Runs a conversion and keeps what it produced as `id`'s payload.
+    ///
+    /// Both ways a payload comes to exist end here: an explicit `super.init(…)`,
+    /// and the implicit construction a class declaring no `op init` gets. They are
+    /// the same operation on purpose — an implicit `op init` is not a second rule,
+    /// only the observation that a class inheriting a conversion as its
+    /// constructor should run it as one.
+    fn set_payload(
+        &mut self,
+        id: ObjId,
+        init: Value,
+        builtin: Builtin,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, QuinceError> {
+        // Checked before the conversion runs, so a second write is refused on the
         // strength of the first rather than after quietly replacing it. The
         // resolver requires that *a* `super.init` is written but cannot say how
         // many run — a call in each arm of an `if` is one call — so this is where
         // "once" is actually enforced.
-        if self.heap.instance(*id).payload.is_some() {
-            let name = self.heap.class(self.heap.instance(*id).class).name.clone();
+        if self.heap.instance(id).payload.is_some() {
+            let name = self.heap.class(self.heap.instance(id).class).name.clone();
             return Err(QuinceError::new(
                 format!("`super.init` was already called for this {name}"),
                 span,
@@ -1398,8 +1460,8 @@ impl Interp {
 
         // A conversion is a native and natives reach no safe point, so the
         // instance behind `id` cannot move or be collected across this call.
-        let value = self.construct_builtin(class, builtin, args, span)?;
-        match self.heap.instance_mut(*id) {
+        let value = self.call(init, args, span)?;
+        match self.heap.instance_mut(id) {
             Ok(instance) => {
                 instance.payload = Some(value);
                 Ok(Value::Nil)
@@ -1407,7 +1469,7 @@ impl Interp {
             // Freezing happens to a value a constructor already returned, so
             // reaching this means `init` was called a second time by hand, on an
             // object that never got a payload the first time.
-            Err(_) => Err(frozen(&self.heap, receiver, span)),
+            Err(_) => Err(frozen(&self.heap, &Value::Instance(id), span)),
         }
     }
 
@@ -1625,14 +1687,20 @@ impl Interp {
     // -- operators ---------------------------------------------------------
 
     fn unary(&self, op: UnaryOp, value: Value, span: Span) -> Result<Value, QuinceError> {
-        match (op, value) {
-            (UnaryOp::Not, value) => Ok(Value::Bool(!value.is_truthy(&self.heap))),
-            (UnaryOp::Neg, Value::Int(n)) => n.checked_neg().map(Value::Int).ok_or_else(|| {
+        // `not` asks only for truthiness, which unwraps a payload for itself.
+        if let UnaryOp::Not = op {
+            return Ok(Value::Bool(!value.is_truthy(&self.heap)));
+        }
+        // Negation acts on the number, so a class extending `int` is unwrapped to
+        // it and `-Count(5)` is `-5` rather than a `Count`. The error still names
+        // the class, because that is the value the line was written about.
+        match value.base(&self.heap) {
+            Value::Int(n) => n.checked_neg().map(Value::Int).ok_or_else(|| {
                 QuinceError::new("integer overflow", span).with_kind(ErrorKind::Overflow)
             }),
-            (UnaryOp::Neg, Value::Float(n)) => Ok(Value::Float(-n)),
-            (UnaryOp::Neg, other) => Err(QuinceError::new(
-                format!("cannot negate {}", other.type_name(&self.heap)),
+            Value::Float(n) => Ok(Value::Float(-n)),
+            _ => Err(QuinceError::new(
+                format!("cannot negate {}", value.type_name(&self.heap)),
                 span,
             )),
         }
@@ -1655,40 +1723,49 @@ impl Interp {
             _ => {}
         }
 
+        // Dispatch on what the operands *are*, so a class extending a builtin is
+        // operated on as one — and the result is the base type, not the subclass.
+        // `Username("marc") + "!"` is a string: preserving the class would mean
+        // re-running its `op init`, so a validating constructor would run on every
+        // concatenation.
+        //
+        // Reporting still uses `lhs` and `rhs`. The dispatch wants the base type
+        // and the message wants the name the line was written with, and they are
+        // different questions: `Username("a") - 1` is refused because a string
+        // cannot be subtracted, but naming `Username` is what says which value.
+        let (a, b) = (lhs.base(&self.heap).clone(), rhs.base(&self.heap).clone());
+
         // `+` is the one operator shared between numbers and the collections.
-        if let (Add, Value::Str(a), Value::Str(b)) = (op, &lhs, &rhs) {
+        if let (Add, Value::Str(a), Value::Str(b)) = (op, &a, &b) {
             return Ok(Value::Str(Rc::from(format!("{a}{b}"))));
         }
 
         // Concatenation builds a new list rather than extending the left one,
         // matching `+` on strings. `push` is there for growing in place.
-        if let (Add, Value::List(a), Value::List(b)) = (op, &lhs, &rhs) {
+        if let (Add, Value::List(a), Value::List(b)) = (op, &a, &b) {
             let mut items = self.heap.list(*a).clone();
             items.extend_from_slice(self.heap.list(*b));
             return Ok(Value::List(self.heap.alloc(Object::List(items))));
         }
 
-        if let (Value::Str(a), Value::Str(b)) = (&lhs, &rhs) {
+        if let (Value::Str(x), Value::Str(y)) = (&a, &b) {
             return match op {
-                Lt => Ok(Value::Bool(a < b)),
-                Le => Ok(Value::Bool(a <= b)),
-                Gt => Ok(Value::Bool(a > b)),
-                Ge => Ok(Value::Bool(a >= b)),
+                Lt => Ok(Value::Bool(x < y)),
+                Le => Ok(Value::Bool(x <= y)),
+                Gt => Ok(Value::Bool(x > y)),
+                Ge => Ok(Value::Bool(x >= y)),
                 _ => Err(type_error(&self.heap, op, &lhs, &rhs, span)),
             };
         }
 
-        match (&lhs, &rhs) {
+        match (&a, &b) {
             // Both ints: stay an int, and refuse to wrap on overflow.
-            (Value::Int(a), Value::Int(b)) => int_op(op, *a, *b, span),
+            (Value::Int(x), Value::Int(y)) => int_op(op, *x, *y, span),
 
             // Any float involved promotes the whole operation.
             (Value::Float(_), Value::Int(_))
             | (Value::Int(_), Value::Float(_))
-            | (Value::Float(_), Value::Float(_)) => {
-                let (a, b) = (as_float(&lhs), as_float(&rhs));
-                float_op(op, a, b, span)
-            }
+            | (Value::Float(_), Value::Float(_)) => float_op(op, as_float(&a), as_float(&b), span),
 
             _ => Err(type_error(&self.heap, op, &lhs, &rhs, span)),
         }
@@ -1700,7 +1777,10 @@ impl Interp {
     /// same reason `d[[]]` is: a value that could never have been inserted is a
     /// mistake in the program, and answering `false` would hide it.
     fn contains(&self, haystack: &Value, needle: &Value, span: Span) -> Result<Value, QuinceError> {
-        let found = match haystack {
+        // Both sides unwrap: a subclass of `list` can be searched, and a subclass
+        // of `string` can be the part searched for. `equals` and `key_of` unwrap the
+        // needle for themselves, so only the string arm needs it named.
+        let found = match haystack.base(&self.heap) {
             Value::Dict(id) => self
                 .heap
                 .dict(*id)
@@ -1710,21 +1790,21 @@ impl Interp {
                 .list(*id)
                 .iter()
                 .any(|item| item.equals(needle, &self.heap)),
-            Value::Str(text) => match needle {
+            Value::Str(text) => match needle.base(&self.heap) {
                 Value::Str(part) => text.contains(part.as_ref()),
-                other => {
+                _ => {
                     return Err(QuinceError::new(
                         format!(
                             "cannot look for {} in a string",
-                            other.type_name(&self.heap)
+                            needle.type_name(&self.heap)
                         ),
                         span,
                     ));
                 }
             },
-            other => {
+            _ => {
                 return Err(QuinceError::new(
-                    format!("cannot use `in` on {}", other.type_name(&self.heap)),
+                    format!("cannot use `in` on {}", haystack.type_name(&self.heap)),
                     span,
                 ));
             }
@@ -1746,8 +1826,15 @@ fn resolved(slot: &Option<Slot>) -> Slot {
 }
 
 /// Converts a value to a dict key, explaining why if it cannot be one.
+///
+/// The payload unwrap belongs here rather than in `Key::from_value`, which has no
+/// heap to reach a payload through — and this is the only caller that is not a
+/// test. It is also not a separate decision from `equals`: if `Username("marc")`
+/// equals `"marc"` then the two must hash alike, or a dict holds two equal keys in
+/// different buckets. So a subclass is hashable exactly when its base is, and a
+/// dict cannot tell the two apart — `keys()` hands back the base type.
 fn key_of(heap: &Heap, value: &Value, span: Span) -> Result<Key, QuinceError> {
-    Key::from_value(value).map_err(|reason| {
+    Key::from_value(value.base(heap)).map_err(|reason| {
         let message = match reason {
             NotAKey::Unhashable => format!(
                 "a {} cannot be a dict key, because it is compared by identity",
@@ -1997,12 +2084,18 @@ static PRINT: Native = Native {
 static LEN: Native = Native {
     name: "len",
     arity: Some(1),
-    func: |interp, args, span| match &args[0] {
+    // Not a method, so it does not come through `call_method`'s substitution and
+    // has to unwrap for itself. The error names the class rather than its base:
+    // `len` failing on a `Box` should say `Box`.
+    func: |interp, args, span| match args[0].base(&interp.heap) {
         Value::Str(s) => Ok(Value::Int(s.chars().count() as i64)),
         Value::List(id) => Ok(Value::Int(interp.heap.list(*id).len() as i64)),
         Value::Dict(id) => Ok(Value::Int(interp.heap.dict(*id).len() as i64)),
-        other => Err(QuinceError::new(
-            format!("`len` does not apply to {}", other.type_name(&interp.heap)),
+        _ => Err(QuinceError::new(
+            format!(
+                "`len` does not apply to {}",
+                args[0].type_name(&interp.heap)
+            ),
             span,
         )
         .with_kind(ErrorKind::Type)),
@@ -2534,6 +2627,41 @@ mod tests {
             panic!("`n` should be an instance");
         };
         assert_eq!(interp.heap.instance(id).payload, Some(Value::Int(42)));
+    }
+
+    /// An implicit `op init` is the inherited conversion run as one, so the payload
+    /// it stores has to be the converted value rather than the argument — the same
+    /// assertion as for an explicit `super.init`, reached without writing one.
+    #[test]
+    fn declaring_no_op_init_still_converts() {
+        let interp = run("class Count extends int {}\nfinal n = Count(\"42\")\n");
+
+        let Some(Value::Instance(id)) = global(&interp, "n") else {
+            panic!("`n` should be an instance");
+        };
+        assert_eq!(interp.heap.instance(id).payload, Some(Value::Int(42)));
+    }
+
+    /// Equality and hashing are one decision, and this is the half a corpus case
+    /// cannot state: two keys that compare equal must reach the same bucket, so the
+    /// dict has to end up with one entry rather than two that happen to print alike.
+    #[test]
+    fn a_payload_hashes_as_the_value_it_equals() {
+        let interp = run("class Username extends string {}\n\
+                          final d = {}\n\
+                          d[Username(\"marc\")] = 1\n\
+                          d[\"marc\"] = 2\n");
+
+        let Some(Value::Dict(id)) = global(&interp, "d") else {
+            panic!("`d` should be a dict");
+        };
+        let dict = interp.heap.dict(id);
+        assert_eq!(dict.len(), 1, "an equal key must not make a second entry");
+        assert_eq!(
+            dict.get(&Key::Str(Rc::from("marc"))),
+            Some(&Value::Int(2)),
+            "the second write should have replaced the first"
+        );
     }
 
     /// A subclass gets its payload from the ancestor that has one, however far up

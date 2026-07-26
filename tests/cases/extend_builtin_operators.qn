@@ -1,0 +1,81 @@
+# A class extending a builtin *is* that builtin, so the operators reach the value
+# it carries and hand back the base type — preserving the subclass would mean
+# re-running `op init`, so a validating constructor would run on every `+`.
+class Username extends string {
+    fn email_address() {
+        return self + '@gmail.com'
+    }
+}
+
+# No `op init`: the class inherits its base's conversion and construction runs it.
+let user = Username('marc')
+print(user)
+print(user.email_address())
+print(len(user))
+print(user[0])
+print(user[1:3])
+print(user + '!')
+print(type(user))
+print(type(user + '!'))
+print(user < 'nick')
+print('a' in user)
+print([user])
+
+# Equality reaches the value, and hashing is the same decision — two things that
+# compare equal have to land in the same bucket.
+class Slug extends string {}
+print(user == 'marc')
+print(user == Username('marc'))
+print(user == Slug('marc'))
+final d = {}
+d[Username('marc')] = 1
+d['marc'] = 2
+print(len(d))
+print(d.keys())
+print(d[user])
+
+# Truthiness follows the payload, so an empty one is falsy exactly as `''` is.
+print(bool(Username('')))
+print(bool(user))
+
+# A list ancestor: iteration, indexing, growth in place, and index assignment.
+class Stack extends list {}
+final s = Stack()
+s.push(1)
+s.push(2)
+print(s)
+print(len(s))
+print(s + [3])
+print(2 in s)
+s[0] = 9
+print(s)
+for i in s { print(i) }
+
+class Bag extends dict {}
+final b = Bag({'a': 1})
+b['c'] = 3
+print(b)
+print(b['a'])
+for k in b { print(k) }
+
+# A numeric ancestor. `-Count(5)` is an int, not a Count.
+class Count extends int {}
+print(-Count(5))
+print(Count('5') + 1)
+print(type(Count(5) + 1))
+
+# A class extending nothing is untouched: identity equality, always truthy, and
+# no operator applies to it.
+class Box { op init(x) { self.x = x } }
+print(Box(1) == Box(1))
+print(Box(1))
+print(bool(Box(1)))
+try { len(Box(1)) } catch e { print(e.kind + ': ' + e.message) }
+try { Box(1) + 'x' } catch e { print(e.kind + ': ' + e.message) }
+
+# The class is named in the error even though the dispatch used its base.
+try { user - 1 } catch e { print(e.message) }
+# A string is not iterable, so neither is a class extending one — `chars` is how
+# characters are reached, for both.
+try { for c in user { } } catch e { print(e.message) }
+print(user.chars())
