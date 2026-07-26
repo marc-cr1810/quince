@@ -239,6 +239,26 @@ if 4 in all { print("built", all) }
   shebang line a comment for free
 - Expression-oriented where practical
 
+### String literals
+
+Either quote delimits a string, and the two styles differ in nothing else:
+
+```
+print('hello' == "hello")   # true
+print("it's")               # the other quote is ordinary text inside a literal
+print('say "hi"')
+print('it\'s')              # both quotes escape in both styles
+```
+
+There is no character type, so `'a'` is a one-character string rather than
+something else — which is the whole reason both styles can be the same token.
+`TokenKind::Str` records no delimiter, so nothing downstream can tell them apart,
+and `repr` normalises to double quotes when printing a string inside a collection.
+
+Accepting `\'` inside a double-quoted literal is redundant, but the alternative
+is an escape that is an error in one style and not the other, which is a rule
+nobody would remember. Moving a literal between styles never breaks it.
+
 ### Statement termination
 
 Statements end at a newline; a `;` is accepted but never required. Rather than emit

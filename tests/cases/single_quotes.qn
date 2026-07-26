@@ -1,0 +1,18 @@
+# One string type with two delimiters, so nothing downstream can tell which
+# quote a literal was written with.
+print('hello')
+print('hello' == "hello")
+
+# Whichever quote did not open the literal is ordinary text inside it.
+print("it's")
+print('say "hi"')
+
+# Both quotes escape in both styles, so a literal can move between them.
+print('it\'s')
+print("q\"q")
+
+# `repr` normalises to double quotes, which is why a list of both prints alike.
+print(['a', "a"])
+
+const at = '@'
+print('marc@example.com'.split(at))

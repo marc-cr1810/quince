@@ -66,7 +66,7 @@ impl<'a> Lexer<'a> {
                     ));
                 }
 
-                '"' => self.string(start)?,
+                '"' | '\'' => self.string(start, c)?,
                 c if c.is_ascii_digit() => self.number(start)?,
                 c if is_ident_start(c) => self.ident(start),
 
@@ -177,7 +177,13 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn string(&mut self, start: usize) -> Result<TokenKind, QuinceError> {
+    /// Scans a string literal, ending at whichever quote opened it.
+    ///
+    /// The two styles differ in nothing but their delimiter — there is one
+    /// string type and no character type, so `'a'` and `"a"` produce the same
+    /// token. Only the terminator varies, which is why it is a parameter rather
+    /// than two near-copies of this loop.
+    fn string(&mut self, start: usize, quote: char) -> Result<TokenKind, QuinceError> {
         let mut value = String::new();
 
         loop {
@@ -189,7 +195,7 @@ impl<'a> Lexer<'a> {
             };
 
             match c {
-                '"' => return Ok(TokenKind::Str(value)),
+                c if c == quote => return Ok(TokenKind::Str(value)),
                 '\\' => {
                     let escape_start = self.pos - 1;
                     let Some(esc) = self.advance() else {
@@ -204,7 +210,12 @@ impl<'a> Lexer<'a> {
                         'r' => '\r',
                         '0' => '\0',
                         '\\' => '\\',
+                        // Both quotes escape in both styles. An escape that is
+                        // an error in one style and not the other is a rule
+                        // nobody would remember, and `"it\'s"` is what someone
+                        // moving a literal between styles writes.
                         '"' => '"',
+                        '\'' => '\'',
                         _ => {
                             return Err(QuinceError::new(
                                 format!("unknown escape '\\{esc}'"),
@@ -312,8 +323,42 @@ mod tests {
     }
 
     #[test]
+    fn either_quote_delimits_the_same_string() {
+        // Not two string types: the token carries no trace of which quote was
+        // used, so nothing downstream can tell them apart.
+        assert_eq!(kinds("'hi'"), kinds(r#""hi""#));
+        assert_eq!(kinds("'a\\nb'"), kinds(r#""a\nb""#));
+    }
+
+    #[test]
+    fn a_quote_is_ordinary_inside_the_other_style() {
+        assert_eq!(kinds(r#""it's""#), vec![TokenKind::Str("it's".into())]);
+        assert_eq!(
+            kinds(r#"'say "hi"'"#),
+            vec![TokenKind::Str(r#"say "hi""#.into())]
+        );
+    }
+
+    #[test]
+    fn both_quotes_escape_in_both_styles() {
+        assert_eq!(kinds(r#"'it\'s'"#), vec![TokenKind::Str("it's".into())]);
+        assert_eq!(kinds(r#""it\'s""#), vec![TokenKind::Str("it's".into())]);
+        assert_eq!(kinds(r#"'q\"q'"#), vec![TokenKind::Str("q\"q".into())]);
+    }
+
+    #[test]
     fn unterminated_string_is_an_error() {
         let err = error(r#""oops"#);
+        assert!(err.message.contains("unterminated"), "{}", err.message);
+        // The other style reports the same way rather than running to the end of
+        // the file looking for a double quote.
+        let err = error("'oops");
+        assert!(err.message.contains("unterminated"), "{}", err.message);
+    }
+
+    #[test]
+    fn one_style_does_not_terminate_the_other() {
+        let err = error("'oops\"");
         assert!(err.message.contains("unterminated"), "{}", err.message);
     }
 

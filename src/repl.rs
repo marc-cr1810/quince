@@ -264,10 +264,7 @@ impl Hinter for QuinceHelper {
     }
 }
 
-
-
 impl Validator for QuinceHelper {}
-
 
 #[cfg(test)]
 pub fn is_input_incomplete(input: &str) -> bool {
@@ -331,7 +328,6 @@ pub fn is_input_incomplete(input: &str) -> bool {
     }
 }
 
-
 impl Highlighter for QuinceHelper {
     fn highlight<'l>(&self, line: &'l str, pos: usize) -> Cow<'l, str> {
         if !self.use_color {
@@ -377,13 +373,27 @@ impl Highlighter for QuinceHelper {
             }
 
             let text = &line[start..end];
-            let prev_kind = if i > 0 { Some(&tokens[i - 1].kind) } else { None };
-            let next_kind = if i + 1 < tokens.len() { Some(&tokens[i + 1].kind) } else { None };
+            let prev_kind = if i > 0 {
+                Some(&tokens[i - 1].kind)
+            } else {
+                None
+            };
+            let next_kind = if i + 1 < tokens.len() {
+                Some(&tokens[i + 1].kind)
+            } else {
+                None
+            };
 
             let styled = if text.len() == 1 && matched_brackets.contains(&start) {
                 Style::BOLD_YELLOW.paint(text, true)
             } else {
-                highlight_token(token.kind.clone(), text, self.use_color, prev_kind, next_kind)
+                highlight_token(
+                    token.kind.clone(),
+                    text,
+                    self.use_color,
+                    prev_kind,
+                    next_kind,
+                )
             };
             output.push_str(&styled);
             last_end = end;
@@ -567,15 +577,16 @@ fn highlight_token(
                 Style::BOLD_YELLOW.paint(text, use_color)
             } else if matches!(next_kind, Some(TokenKind::LParen)) {
                 Style::BOLD_BLUE.paint(text, use_color)
-            } else if ["print", "type", "string", "list", "dict", "int", "float", "bool", "len"]
-                .contains(&text)
+            } else if [
+                "print", "type", "string", "list", "dict", "int", "float", "bool", "len",
+            ]
+            .contains(&text)
             {
                 Style::BOLD_CYAN.paint(text, use_color)
             } else {
                 text.to_string()
             }
         }
-
 
         _ if TokenKind::keyword(text).is_some() => Style::BOLD_MAGENTA.paint(text, use_color),
 
@@ -693,8 +704,6 @@ pub fn run_repl(use_color_stdout: bool, use_color_stderr: bool) -> Result<()> {
             }
         }
 
-
-
         let open_braces = count_open_braces(&buffer);
         let mut line = match if buffer.is_empty() {
             rl.readline(">>> ")
@@ -774,7 +783,6 @@ pub fn run_repl(use_color_stdout: bool, use_color_stderr: bool) -> Result<()> {
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -832,7 +840,10 @@ mod tests {
             Some(&TokenKind::Fn),
             None,
         );
-        assert!(fn_decl.contains("\x1b[1;36m"), "fn name should be bold cyan");
+        assert!(
+            fn_decl.contains("\x1b[1;36m"),
+            "fn name should be bold cyan"
+        );
 
         let class_decl = highlight_token(
             TokenKind::Ident("Point".to_string()),
@@ -841,7 +852,10 @@ mod tests {
             Some(&TokenKind::Class),
             None,
         );
-        assert!(class_decl.contains("\x1b[1;33m"), "class name should be bold yellow");
+        assert!(
+            class_decl.contains("\x1b[1;33m"),
+            "class name should be bold yellow"
+        );
 
         let call = highlight_token(
             TokenKind::Ident("foo".to_string()),
@@ -850,7 +864,10 @@ mod tests {
             None,
             Some(&TokenKind::LParen),
         );
-        assert!(call.contains("\x1b[1;34m"), "function call should be bold blue");
+        assert!(
+            call.contains("\x1b[1;34m"),
+            "function call should be bold blue"
+        );
 
         let builtin = highlight_token(
             TokenKind::Ident("print".to_string()),
@@ -859,13 +876,14 @@ mod tests {
             None,
             None,
         );
-        assert!(builtin.contains("\x1b[1;36m"), "builtin function should be bold cyan");
+        assert!(
+            builtin.contains("\x1b[1;36m"),
+            "builtin function should be bold cyan"
+        );
     }
-
 
     #[test]
     fn validator_detects_incomplete_expressions() {
-
         assert!(is_input_incomplete("1 +"));
         assert!(is_input_incomplete("fn foo() {"));
         assert!(is_input_incomplete("print([1, 2,"));
@@ -892,9 +910,11 @@ mod tests {
         assert!(!list_methods.contains(&"upper".to_string()));
 
         let point_methods = method_names_for_type("Point", &custom_map);
-        assert_eq!(point_methods, vec!["distance".to_string(), "move".to_string()]);
+        assert_eq!(
+            point_methods,
+            vec!["distance".to_string(), "move".to_string()]
+        );
     }
-
 
     #[test]
     fn repl_binds_last_value_to_underscore() {
@@ -908,7 +928,6 @@ mod tests {
         assert_eq!(res, Some(Value::Int(60)));
     }
 }
-
 
 fn handle_meta_command(
     input: &str,
