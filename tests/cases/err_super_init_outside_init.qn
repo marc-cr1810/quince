@@ -1,0 +1,9 @@
+# `super.init` is construction, and `op init` is the method that constructs. The
+# rule holds whatever the parent is — this one is an ordinary class.
+class Animal {
+  op init(n) { self.n = n }
+}
+class Dog extends Animal {
+  op init(n) { super.init(n) }
+  fn reset(n) { super.init(n) }
+}

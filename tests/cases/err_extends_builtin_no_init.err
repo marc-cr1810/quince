@@ -1,0 +1,1 @@
+`Stack` extends `list` but has no `op init`

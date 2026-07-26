@@ -1,0 +1,9 @@
+# The resolver requires that a `super.init` is written but cannot say how many
+# run, so "once" is enforced where the payload is actually written.
+class Twice extends string {
+  op init(a, b) {
+    super.init(a)
+    super.init(b)
+  }
+}
+Twice('a', 'b')

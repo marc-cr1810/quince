@@ -1,0 +1,5 @@
+# Caught before anything runs, so the class is never stored — nobody has to write
+# `Bad('x')` and reach a string method to find out.
+class Bad extends string {
+  op init(str) { self.raw = str }
+}

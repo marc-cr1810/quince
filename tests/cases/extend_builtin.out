@@ -1,0 +1,19 @@
+marc
+example.com
+MARC@EXAMPLE.COM
+["marc", "example.com"]
+Email
+string
+Error: Invalid email address
+work.com
+MARC@WORK.COM
+Work
+["a", "b"]
+[1, 2]
+1
+["b"]
+marc
+Stack
+HI!
+Count
+ValueError: cannot make an int from "abc"

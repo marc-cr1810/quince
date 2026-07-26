@@ -688,7 +688,9 @@ instance arm each; letting a class override them is the protocol-slot work, and 
 arrives whole or not at all.
 
 `init` cannot return anything useful, because the instance already exists by the time it
-runs. It also needs no root: the instance sits in slot 0 of the constructor's scope, which
+runs. A builtin's `init` is the exception and not really one: it is a conversion, there is no
+instance, and what it returns is the whole result — see Calling a type converts. It also
+needs no root: the instance sits in slot 0 of the constructor's scope, which
 `exec_scoped` roots for the whole body, and slot 0 keeps naming it because `self` cannot
 be reassigned.
 
@@ -805,17 +807,16 @@ tempting to hand back the class once `int` is a value, but `Error`'s constructor
 `self.kind = type(self)` and the corpus asserts a string, so the change would break
 working code for a nicety.
 
-`extends` on a builtin is refused at class-definition time, and that refusal *is* deferral
-rather than a decision — see the Roadmap for what lifting it costs. What it is not is
-optional. This case was written here as "semantically empty" before it was implemented, and
-it was worse than that: `class MyStr extends string {}` then `MyStr().upper()` reached
-`string`'s `upper` — a native that matches on `Value::Str` and treats anything else as
-`unreachable!` — and panicked the interpreter. Ordinary Quince code, a hard crash, and it
-only became expressible because the types became values: until then `extends string` was
-an undefined variable and the hole was closed by accident. The refusal is one check at
-class-definition time rather than a receiver guard in every native, which is the same
-trade as `op` being validated where it is written — and when subclassing lands, that one
-check becomes one rule in the payload lookup rather than a guard to unpick.
+`extends` on a builtin was refused at class-definition time, and that refusal was deferral
+rather than a decision — it has since been lifted, below. What it was not is optional. This
+case was written here as "semantically empty" before it was implemented, and it was worse
+than that: `class MyStr extends string {}` then `MyStr().upper()` reached `string`'s `upper`
+— a native that matches on `Value::Str` and treats anything else as `unreachable!` — and
+panicked the interpreter. Ordinary Quince code, a hard crash, and it only became
+expressible because the types became values: until then `extends string` was an undefined
+variable and the hole was closed by accident. Holding it shut in one place rather than
+guarding every native is what made lifting it cheap: the refusal became one substitution at
+the same choke point, not a guard to unpick in nineteen functions.
 
 ### `extend`, and the one thing it must not do
 
@@ -950,6 +951,156 @@ refuses a NaN key because it is not equal to itself.
 `int(true)` is `1`, as in Python, JavaScript and C#. That is not a crack in the rule that a
 bool is not a number: `1 + true` stays an error, because nobody asked for a conversion
 there. A conversion is a request, and arithmetic is not.
+
+## Extending a builtin
+
+```quince
+class Email extends string {
+  op init(str) {
+    const split = str.split('@')
+    if len(split) != 2 { throw Error("Invalid email address") }
+    super.init(str)
+    self.username = split[0]
+    self.domain = split[1]
+  }
+}
+
+final e = Email('marc@example.com')
+print(e.domain)     # example.com
+print(e.upper())    # MARC@EXAMPLE.COM
+print(type(e))      # Email
+```
+
+An instance gained a **payload**: `Option<Value>`, holding the value a builtin ancestor's
+`init` produced. `None` for every class that does not descend from a builtin, which is every
+class that does not say so.
+
+Not a field, though a field is where a wrapper class would keep it. A field is assignable
+and shadowable, so `e.value = 5` could leave an `Email` that is not a string, and `string`'s
+methods would then be looking at an int. The payload is reachable from Quince through
+exactly one piece of syntax, once.
+
+### `super.init` on a builtin is not a method call
+
+With a user parent, `super.init(x)` runs Quince code against the same `self`, filling
+fields. With a builtin parent there is no Quince code and no receiver: `string`'s `init` is
+the conversion, which takes the call's arguments and *returns* a string. So the rule is
+
+> `super.init(args…)` with a builtin superclass runs that builtin's conversion on `args…`
+> and stores the result as `self`'s payload.
+
+which makes the whole conversion table available through `super.init` at no cost — the
+arities are the conversions' arities, and `super.init('abc')` on an `int` ancestor raises the
+same `ValueError` as `int('abc')`, at the `super.init` rather than at the constructor call.
+
+It also means the lookup has to be split out rather than falling through: a builtin's `init`
+is deliberately not among its methods, because `(5).init(7)` has no meaning to give, so
+`Class::method("init")` does not find it and inserting a receiver would be wrong if it did.
+
+Which builtins can be extended follows from this and needs no second list: exactly the ones
+that convert. `function` and `class` have no `init`, so `super.init` would have nothing to
+call, and `extends function` stays refused with that as the reason. `nil` and `class` cannot
+be written after `extends` at all — one is a keyword, the other is not bound as a global.
+
+### One substitution, at the one place that gives a method a receiver
+
+`e.upper()` finds `UPPER` on `string` by walking the parent chain, and `UPPER` matches on
+`Value::Str`. The fix is one line at `call_method`, and the discriminator was already there:
+
+- the method is a `Function` → written in Quince → pass the **instance**, because
+  `self.domain` is why it was written.
+- the method is a `Native` → came from a builtin's seed → pass the **payload**.
+
+Every user method is a function and a native only ever comes from a builtin seed, so those
+two cases are exactly "written in Quince" and "written in Rust". Nineteen natives are
+untouched, `text()` still treats a non-string as unreachable, and `Value::BoundMethod` and
+`super.upper()` come through the same place and so need nothing of their own.
+
+An earlier note in this file claimed lifting the refusal meant touching every native. That
+was wrong, and checking rather than reasoning is what corrected it: `args.insert(0, receiver)`
+appears once in the interpreter.
+
+The consequence worth stating: **a builtin method returns the base type, not the subclass.**
+`type(e.upper())` is `string`. Same as Python, and for a reason — preserving the subclass
+would mean re-running `op init`, so `upper()` would re-validate an already-valid address on
+every call.
+
+### The check that a payload gets written
+
+An `op init` that forgets `super.init` builds an object that looks finished and fails at the
+first method call. Two static rules, both in the resolver, so the class is never stored:
+
+```quince
+class Bad extends string {
+  op init(str) { self.raw = str }        # `Bad`'s `op init` never calls `super.init`
+}
+class Stack extends list {}              # `Stack` extends `list` but has no `op init`
+class Odd extends string {
+  op init(s) { super.init(s) }
+  fn reset(s) { super.init(s) }          # `super.init` is only valid inside `op init`
+}
+```
+
+The second exists because the first has nothing to inspect when no `op init` is declared —
+and an inherited one is enough, since it has already been checked. The third is what keeps
+the first sound: without it `fn reset() { super.init(…) }` satisfies a scan of the class
+while leaving construction empty. It is also right on its own terms, which is why it applies
+to a plain user hierarchy too — `super.init` on an object that already finished re-runs a
+constructor, whatever the parent is.
+
+Answering the hierarchy questions needs `parents: HashMap<String, String>` and
+`inits: HashSet<String>` beside the `types` set, walked with a visited guard: `class A
+extends B` with `class B extends A` is a cycle in what was *written*, refused by the
+evaluator — a parent is read before the subclass's name is bound — but this walk runs first
+and has to terminate on its own.
+
+**Calls are counted, not paths.** The resolver checks that a `super.init` is *written*, not
+how many run, so this is accepted:
+
+```quince
+class Num extends int {
+  op init(x) { if x < 0 { super.init(0) } else { super.init(x) } }
+}
+```
+
+Refusing it would mean path-sensitive analysis for a rule that has an exact runtime answer
+for free: the payload is checked before it is written, so a second `super.init` is refused on
+the strength of the first rather than after quietly replacing it. Static "at least one",
+runtime "exactly one" — each where it is cheap and precise.
+
+**The runtime backstop cannot be removed.** The static check works on names in one pass, so
+`final S = string` followed by `class X extends S` gets past it: `S` is not a class name and
+nothing records what it holds. That path reaches a native with no payload, and reports
+
+```
+error[TypeError]: `X` was never given a string
+  = help: `X` extends `string`, so its `op init` must call `super.init` before it is used
+```
+
+rather than panicking inside `text()`. The name walk is wrong in one direction only, by
+construction — it can miss a class that owes a `super.init`, never accuse one that does not.
+
+### What this deliberately leaves for the slots
+
+The operator surface. Until it lands an `Email` behaves as any instance does:
+
+```quince
+print(e)                        # <Email instance>, not marc@example.com
+print(e == 'marc@example.com')  # false
+print(len(e))                   # TypeError: `len` does not apply to Email
+print(e + '!')                  # TypeError: cannot add Email and string
+```
+
+Splitting it here is what kept this reviewable: methods go through one choke point, while
+operators go through nine consuming sites plus `is_truthy`, `equals` and `display` — and
+equality drags hashing with it, since if `e == 'marc@example.com'` then the two must hash
+alike or a dict holds equal keys in different buckets.
+
+It also means the payload has no observable value in Quince yet — only its methods are
+reachable, and `int`, `float` and `bool` have no methods at all. So what `super.init` stored
+is asserted in Rust, and the collector test uses a `dict` ancestor: a string payload is an
+`Rc` rather than a handle, so a string subclass cannot prove `Instance::trace` names the
+payload at all. Written with a string first, it passed with the trace line deleted.
 
 ## `op` marks what the language calls
 
@@ -1504,23 +1655,29 @@ the way it names `upper`, and the one rule added is what construction yields. It
 different mistake from `int([1])` and both are catchable. Single-quoted string literals came
 with it, being a lexer change the same work wanted.
 
-What v0.5 still owes, in order: subclassing a builtin, then the slots, then `extend`, then
-the diagnostics sweep.
+Subclassing a builtin landed next, and cost less than this file had estimated — see
+Extending a builtin above. The estimate was wrong because it had been reasoned rather than
+checked: `args.insert(0, receiver)` appears once in the interpreter, so the receiver
+substitution is one line at one place and no native was touched. What it did cost was the
+static checks, which are the larger half of the change and were not in the estimate at all.
 
-Subclassing a builtin — `class Email extends string` — is refused today and should not
-stay that way. It needs a payload on `Object::Instance` that the parent's `init` writes
-through `super.init`, and the receiver unwrapped where a method is dispatched, which is one
-site: `call_method` inserts the receiver, so nothing in the natives has to change. What is
-left after that *is* the slot surface — `is_truthy`, `equals`, `display`, indexing, `len`,
-iteration — so it goes before the slots and not after, or the unwrapping gets written twice.
+It also settled where a rule belongs when both ends can enforce it. The resolver checks that
+a `super.init` is written, because catching it before the class is stored is worth more than
+precision; the evaluator checks that only one runs, because it is holding the payload anyway
+and a branch makes the syntactic count a lie. Neither check is a weaker version of the other.
 
-Two rules it brings, both worth stating before they are implemented. `super.init` may only
-appear inside `op init`, which makes "this class never calls `super.init`" a check the
-resolver can run at the class declaration rather than an error waiting for someone to
-construct one; the ancestor chain has to be walked, not just the parent, since a subclass of
-a subclass of `string` still needs the payload. And a runtime backstop survives anyway,
-because `throw` is a legitimate exit from a constructor and requiring the call on every path
-would need dataflow analysis this interpreter does not have.
+What v0.5 still owes, in order: the slots, then `extend`, then the diagnostics sweep. The
+slots are next and are the larger piece: `e == 'marc@example.com'`, `len(e)`, `e + '!'`,
+`print(e)`, `e[0]`, iteration and `in`, across nine consuming sites plus `is_truthy`,
+`equals` and `display`. Equality is the decision to make first, because hashing follows from
+it: if `e == 'marc@example.com'` then the two must hash alike, so `Key::from_value` unwraps a
+payload to `Key::Str` and needs no new variant. Python is the reference — it makes
+`Email('a@b') == Slug('a@b')` true, and transitivity leaves no other option.
+
+Subclassing a builtin went before the slots and not after, because what is left once the
+payload exists *is* the slot surface — `is_truthy`, `equals`, `display`, indexing, `len`,
+iteration. Doing it the other way round would have written the unwrapping twice. It has since
+landed; Extending a builtin above is the record.
 
 Equality is the one open decision, and Python settles it by force. If an `Email` equals a
 plain string then it must hash alike, or a dict holds two keys that are equal and land in

@@ -361,18 +361,17 @@ impl Interp {
                 // that `Class::method` walks.
                 let parent = match parent {
                     Some(parent) => match self.read(parent, env, stmt.span)? {
-                        // A builtin's methods are natives that match on the
-                        // receiver's `Value` variant, and an instance of a
-                        // subclass is an `Object::Instance` — so `MyStr().upper()`
-                        // would reach `string`'s `upper` holding something that is
-                        // not a string, which every native treats as
-                        // unreachable. Refused here, once, rather than guarded in
-                        // each of them.
-                        //
-                        // Only expressible at all since the builtin types became
-                        // values; before that `extends string` was an undefined
-                        // variable and the hole was closed by accident.
-                        Value::Class(id) if self.heap.class(id).builtin.is_some() => {
+                        // A builtin with no `init` is the one parent that cannot
+                        // work, and for a reason that needs no second list to
+                        // record: extending a builtin means `super.init` writes
+                        // the value the subclass *is*, and where there is no
+                        // conversion there is nothing for it to call. That rules
+                        // out `function` and `class`, exactly the two that refuse
+                        // to be constructed on their own.
+                        Value::Class(id)
+                            if self.heap.class(id).builtin.is_some()
+                                && self.heap.class(id).init.is_none() =>
+                        {
                             let builtin = self.heap.class(id).name.clone();
                             return Err(QuinceError::new(
                                 format!("`{name}` cannot extend `{builtin}`"),
@@ -380,7 +379,7 @@ impl Interp {
                             )
                             .with_kind(ErrorKind::Type)
                             .with_help(format!(
-                                "`{builtin}`'s methods only work on a {builtin}, and an instance of `{name}` is not one"
+                                "there is no value a {builtin} could be made from, so `super.init` would have nothing to call"
                             )));
                         }
                         Value::Class(id) => Some(id),
@@ -698,10 +697,13 @@ impl Interp {
         // building the object rather than a program asking for one. The values
         // match what `Error.init` would have produced.
         fields.insert(Key::Str(Rc::from(KIND)), Value::from(err.kind.class_name()));
-        Value::Instance(
-            self.heap
-                .alloc(Object::Instance(Instance { class, fields })),
-        )
+        Value::Instance(self.heap.alloc(Object::Instance(Instance {
+            class,
+            fields,
+            // `Error` extends nothing, so nothing in the chain a user's own error
+            // class sits on has a payload to fill.
+            payload: None,
+        })))
     }
 
     /// Whether `class` is `Error` or descends from it.
@@ -891,8 +893,25 @@ impl Interp {
                     receiver,
                 } = &callee.kind
                 {
-                    let (receiver, method) =
-                        self.super_method(parent, receiver, name, env, callee.span)?;
+                    let class = self.super_class(parent, env, callee.span)?;
+                    let receiver = self.read(receiver, env, callee.span)?;
+
+                    // `super.init` where the superclass is a builtin is the one
+                    // `super` call that is not a method call. A builtin's `init`
+                    // is a conversion — no receiver, and deliberately not among
+                    // its methods — so the lookup below would not find it and
+                    // inserting a receiver would be wrong if it did.
+                    if name == Op::Init.name()
+                        && let Some(builtin) = self.heap.class(class).builtin
+                    {
+                        let mark = self.temps.len();
+                        self.temps.push(receiver.clone());
+                        let values = self.eval_seq(args, env);
+                        self.temps.truncate(mark);
+                        return self.super_init(class, builtin, &receiver, values?, expr.span);
+                    }
+
+                    let method = self.super_method(class, name, callee.span)?;
                     let mark = self.temps.len();
                     self.temps.push(receiver.clone());
                     self.temps.push(method.clone());
@@ -963,8 +982,9 @@ impl Interp {
                 parent,
                 receiver,
             } => {
-                let (receiver, method) =
-                    self.super_method(parent, receiver, name, env, expr.span)?;
+                let class = self.super_class(parent, env, expr.span)?;
+                let receiver = self.read(receiver, env, expr.span)?;
+                let method = self.super_method(class, name, expr.span)?;
                 Ok(Value::BoundMethod(self.heap.alloc(Object::BoundMethod(
                     BoundMethod { receiver, method },
                 ))))
@@ -1255,6 +1275,10 @@ impl Interp {
                 let instance = Value::Instance(self.heap.alloc(Object::Instance(Instance {
                     class: id,
                     fields: Dict::new(),
+                    // Filled by `super.init` if a builtin is in the chain, which
+                    // is why it cannot be filled here: only the constructor knows
+                    // what value to convert, and it has not run yet.
+                    payload: None,
                 })));
 
                 // The `op init` the class resolved when it was built, not a
@@ -1335,6 +1359,73 @@ impl Interp {
         self.call(init, args, span)
     }
 
+    /// `super.init(…)` where the superclass is a builtin: the conversion runs,
+    /// and what it produces becomes the receiver's payload.
+    ///
+    /// The conversion is the same one `string(x)` reaches, so the arities and the
+    /// errors are the ones already written — `super.init("abc")` on an `int`
+    /// ancestor raises the same `ValueError` as `int("abc")` does, at the
+    /// `super.init` rather than at the constructor call.
+    fn super_init(
+        &mut self,
+        class: ObjId,
+        builtin: Builtin,
+        receiver: &Value,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, QuinceError> {
+        let Value::Instance(id) = receiver else {
+            unreachable!("`super` binds the enclosing method's receiver, always an instance");
+        };
+        // Checked before the conversion runs, so a second call is refused on the
+        // strength of the first rather than after quietly replacing it. The
+        // resolver requires that *a* `super.init` is written but cannot say how
+        // many run — a call in each arm of an `if` is one call — so this is where
+        // "once" is actually enforced.
+        if self.heap.instance(*id).payload.is_some() {
+            let name = self.heap.class(self.heap.instance(*id).class).name.clone();
+            return Err(QuinceError::new(
+                format!("`super.init` was already called for this {name}"),
+                span,
+            )
+            .with_kind(ErrorKind::Type)
+            .with_help(format!(
+                "{} is given its {} once, and this would replace it",
+                an(&name),
+                builtin.name()
+            )));
+        }
+
+        // A conversion is a native and natives reach no safe point, so the
+        // instance behind `id` cannot move or be collected across this call.
+        let value = self.construct_builtin(class, builtin, args, span)?;
+        match self.heap.instance_mut(*id) {
+            Ok(instance) => {
+                instance.payload = Some(value);
+                Ok(Value::Nil)
+            }
+            // Freezing happens to a value a constructor already returned, so
+            // reaching this means `init` was called a second time by hand, on an
+            // object that never got a payload the first time.
+            Err(_) => Err(frozen(&self.heap, receiver, span)),
+        }
+    }
+
+    /// The builtin a class descends from, if it descends from one at all.
+    ///
+    /// Walks the same chain `Class::method` walks, and terminates for the same
+    /// reason: a parent is read before its subclass's name is bound, so the chain
+    /// cannot contain a cycle.
+    fn builtin_base(&self, class: ObjId) -> Option<Builtin> {
+        let mut class = self.heap.class(class);
+        loop {
+            if let Some(builtin) = class.builtin {
+                return Some(builtin);
+            }
+            class = self.heap.class(class.parent?);
+        }
+    }
+
     /// Evaluates `receiver.name(args)`.
     ///
     /// Kept out of `eval` to stop the arm's locals widening a frame that
@@ -1407,6 +1498,25 @@ impl Interp {
             )?;
         }
 
+        // A native was written against a `Value` and matches on its variant, so
+        // an instance of a class extending a builtin has to arrive as the value
+        // it *is* rather than as the object holding it — `e.upper()` reaches
+        // `string`'s `upper`, which knows nothing about classes. A method written
+        // in Quince gets the instance, because `self.domain` is the whole reason
+        // it was written. Those two cases are exactly `Native` and `Function`:
+        // every user method is a function, and a native only ever comes from a
+        // builtin's seed.
+        //
+        // The one substitution in the interpreter, and the reason it is only one:
+        // every path that gives a method a receiver comes through here.
+        let receiver = match (&method, &receiver) {
+            (Value::Native(_), Value::Instance(id)) => match &self.heap.instance(*id).payload {
+                Some(payload) => payload.clone(),
+                None => return Err(self.no_payload(*id, span)),
+            },
+            _ => receiver,
+        };
+
         args.insert(0, receiver);
         self.call(method, args, span)
     }
@@ -1444,37 +1554,58 @@ impl Interp {
         }
     }
 
-    /// Resolves `super.name` to the receiver it will run on and the method to
-    /// run, without calling anything.
+    /// The class `super` searches from, read through the slot the resolver
+    /// assigned it in the scope wrapped around the methods.
     ///
-    /// The two halves come from different scopes — the parent class from the
-    /// one wrapped around the methods, the receiver from the enclosing method's
-    /// parameters — and both are read through slots the resolver assigned, so
-    /// nothing here searches by name.
-    ///
-    /// The lookup starts *at* the parent, which is what stops an override from
-    /// calling itself: `Dog.speak` reaching for `super.speak` must not find
-    /// `Dog.speak` again.
-    fn super_method(
-        &mut self,
-        parent: &Var,
-        receiver: &Var,
-        name: &str,
-        env: ObjId,
-        span: Span,
-    ) -> Result<(Value, Value), QuinceError> {
-        let Value::Class(id) = self.read(parent, env, span)? else {
-            unreachable!("`super` is only ever bound to a class");
-        };
-        let receiver = self.read(receiver, env, span)?;
+    /// Separate from the receiver, which comes from the enclosing method's
+    /// parameters — the two halves of `super` live in different scopes, and
+    /// neither is searched for by name.
+    fn super_class(&mut self, parent: &Var, env: ObjId, span: Span) -> Result<ObjId, QuinceError> {
+        match self.read(parent, env, span)? {
+            Value::Class(id) => Ok(id),
+            _ => unreachable!("`super` is only ever bound to a class"),
+        }
+    }
 
+    /// Looks `name` up starting *at* the superclass, which is what stops an
+    /// override from calling itself: `Dog.speak` reaching for `super.speak`
+    /// must not find `Dog.speak` again.
+    fn super_method(&mut self, id: ObjId, name: &str, span: Span) -> Result<Value, QuinceError> {
         match self.heap.class(id).method(name, &self.heap) {
-            Some(method) => Ok((receiver, method)),
+            Some(method) => Ok(method),
             None => Err(QuinceError::new(
                 format!("{} has no method `{name}`", self.heap.class(id).name),
                 span,
             )),
         }
+    }
+
+    /// A builtin's method reached through an instance that has no payload yet.
+    ///
+    /// The resolver refuses the ordinary way to arrive here — an `op init` with no
+    /// `super.init` — but it works on names in one pass, so `final S = string`
+    /// followed by `class X extends S` gets past it. This is what that costs, and
+    /// it is a report rather than the panic a native would otherwise hit.
+    fn no_payload(&self, id: ObjId, span: Span) -> QuinceError {
+        let class = self.heap.instance(id).class;
+        let name = self.heap.class(class).name.clone();
+        // A native is only ever found on an instance by walking the class chain to
+        // a builtin, since every method written in Quince is a `Function`. So
+        // there is always a builtin to name, and the span says which use of it
+        // asked — a method call, or the inherited conversion a class with no
+        // `op init` of its own ends up with as its constructor.
+        let builtin = self
+            .builtin_base(class)
+            .expect("a native method is only reachable through a builtin in the chain");
+        QuinceError::new(
+            format!("`{name}` was never given {}", an(builtin.name())),
+            span,
+        )
+        .with_kind(ErrorKind::Type)
+        .with_help(format!(
+            "`{name}` extends `{}`, so its `op init` must call `super.init` before it is used",
+            builtin.name()
+        ))
     }
 
     fn no_attr(&self, receiver: &Value, name: &str, span: Span) -> QuinceError {
@@ -2354,16 +2485,79 @@ mod tests {
         assert!(global(&interp, "class").is_none());
     }
 
+    /// Which builtins can be extended, decided by the one thing that decides it:
+    /// whether there is a conversion for `super.init` to call. Enumerated rather
+    /// than spot-checked, so a builtin added later cannot land on either side of
+    /// this line by accident.
     #[test]
-    fn a_class_cannot_extend_a_builtin_type() {
-        // Expressible only since the types became values, and a crash rather than
-        // an error if it gets through: `string`'s `upper` is a native that treats
-        // a non-string receiver as unreachable.
-        let program = crate::compile("class MyStr extends string {\n}").expect("should parse");
-        let mut interp = Interp::with_output(Box::new(Vec::new()));
-        let err = interp.run(&program).expect_err("should be refused");
+    fn a_builtin_can_be_extended_exactly_when_it_converts() {
+        for builtin in BUILTIN_TYPES {
+            // `nil` and `class` cannot be written after `extends` at all — one is
+            // a keyword, the other is not bound as a global — so the two that are
+            // reachable here are the constructible ones and `function`.
+            if matches!(builtin, Builtin::Nil | Builtin::Class) {
+                continue;
+            }
+            let source = format!(
+                "class Sub extends {} {{\n op init(x) {{ super.init(x) }}\n}}",
+                builtin.name()
+            );
+            let program = crate::compile(&source).expect("should parse");
+            let mut interp = Interp::with_output(Box::new(Vec::new()));
+            let result = interp.run(&program);
 
-        assert_eq!(err.message, "`MyStr` cannot extend `string`");
+            match builtin.seed().init {
+                Some(_) => assert!(
+                    result.is_ok(),
+                    "`{}` converts, so it can be extended: {result:?}",
+                    builtin.name()
+                ),
+                None => assert_eq!(
+                    result.expect_err("no conversion, so no subclass").message,
+                    format!("`Sub` cannot extend `{}`", builtin.name())
+                ),
+            }
+        }
+    }
+
+    /// The payload is unobservable from Quince until the operators land, so the
+    /// value `super.init` stored is checked here instead — and it has to be the
+    /// converted value, not the argument.
+    #[test]
+    fn super_init_stores_what_the_conversion_produced() {
+        let interp = run("class Count extends int {\n\
+                          op init(x) { super.init(x) }\n\
+                          }\n\
+                          final n = Count(\"42\")\n");
+
+        let Some(Value::Instance(id)) = global(&interp, "n") else {
+            panic!("`n` should be an instance");
+        };
+        assert_eq!(interp.heap.instance(id).payload, Some(Value::Int(42)));
+    }
+
+    /// A subclass gets its payload from the ancestor that has one, however far up
+    /// the chain that is, because `super`'s receiver is always the original `self`.
+    #[test]
+    fn a_payload_is_written_through_an_inherited_init() {
+        let interp = run("class Email extends string {\n\
+                          op init(s) { super.init(s) }\n\
+                          }\n\
+                          class Work extends Email {}\n\
+                          final e = Work(\"a@b.com\")\n");
+
+        let Some(Value::Instance(id)) = global(&interp, "e") else {
+            panic!("`e` should be an instance");
+        };
+        assert_eq!(
+            interp.heap.instance(id).payload,
+            Some(Value::from("a@b.com"))
+        );
+        // The subclass, not the class whose `init` ran.
+        assert_eq!(
+            interp.heap.class(interp.heap.instance(id).class).name,
+            "Work"
+        );
     }
 
     #[test]
@@ -2788,6 +2982,28 @@ mod tests {
 
         assert!(interp.heap.collections > 0, "the collector never ran");
         assert_eq!(global(&interp, "kept"), Some(Value::Int(3)));
+    }
+
+    /// The payload half of the same guarantee, which needs a payload that is
+    /// actually a handle: a string is an `Rc` and a collection cannot touch it, so
+    /// only a list or dict ancestor puts anything at risk. The payload is not a
+    /// field, so `Dict::trace` does not cover it and `Instance::trace` must.
+    #[test]
+    fn a_payload_survives_collection_with_its_instance() {
+        let interp = run(&format!(
+            "class Bag extends dict {{ op init(d) {{ super.init(d) }} }}\n\
+             let b = Bag({{\"a\": 1, \"b\": 2}})\n\
+             {}\
+             let junk = churn()\n\
+             let kept = b.keys()",
+            churn("0")
+        ));
+
+        assert!(interp.heap.collections > 0, "the collector never ran");
+        let Some(Value::List(id)) = global(&interp, "kept") else {
+            panic!("`keys` returns a list");
+        };
+        assert_eq!(interp.heap.list(id).len(), 2);
     }
 
     #[test]

@@ -1,0 +1,6 @@
+# The builtins that can be extended are exactly the ones that convert, and for
+# one reason: extending a builtin means `super.init` produces the value the
+# subclass is, and there is no value a function could be made from.
+class Callable extends function {
+  op init(f) { super.init(f) }
+}

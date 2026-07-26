@@ -1,0 +1,68 @@
+# A class extending a builtin is that builtin, and keeps its own fields too.
+class Email extends string {
+  op init(str) {
+    const split = str.split('@')
+    if len(split) != 2 { throw Error("Invalid email address") }
+    super.init(str)
+    self.username = split[0]
+    self.domain = split[1]
+  }
+}
+
+final e = Email('marc@example.com')
+print(e.username)
+print(e.domain)
+# The builtin's methods work, and hand back the base type rather than the
+# subclass: preserving it would mean re-running `op init`, so `upper` would
+# validate an already-valid address on every call.
+print(e.upper())
+print(e.split('@'))
+print(type(e))
+print(type(e.upper()))
+
+# The validation runs before `super.init`, so a refused address never becomes an
+# object at all.
+try { Email('nope') } catch err { print(err.kind + ": " + err.message) }
+
+# A subclass declaring no `op init` inherits one that already fills the payload.
+class Work extends Email {}
+final w = Work('marc@work.com')
+print(w.domain)
+print(w.upper())
+print(type(w))
+
+# Every builtin that converts can be extended, and `super.init` is the same
+# conversion — so the arguments it takes are the ones the type takes.
+class Bag extends dict {
+  op init(d) {
+    super.init(d)
+    self.owner = 'marc'
+  }
+}
+final b = Bag({'a': 1, 'b': 2})
+print(b.keys())
+print(b.values())
+print(b.remove('a'))
+print(b.keys())
+print(b.owner)
+
+class Stack extends list {
+  op init() { super.init() }
+}
+final s = Stack()
+s.push(1)
+print(type(s))
+
+# `super` reaches a builtin's ordinary methods too, on the payload.
+class Shouty extends string {
+  op init(s) { super.init(s) }
+  fn shout() { return super.upper() + '!' }
+}
+print(Shouty('hi').shout())
+
+# A conversion's own errors surface at the `super.init` that asked for one.
+class Count extends int {
+  op init(x) { super.init(x) }
+}
+print(type(Count('42')))
+try { Count('abc') } catch err { print(err.kind + ": " + err.message) }

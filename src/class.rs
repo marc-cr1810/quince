@@ -206,12 +206,25 @@ pub struct Instance {
     /// `HashMap` so fields keep insertion order and reuse the tracing that
     /// already exists.
     pub fields: Dict,
+    /// The value a builtin ancestor's `init` produced, for a class that extends
+    /// one — the string a `class Email extends string` *is*.
+    ///
+    /// `None` for a class descending from no builtin, which is every class that
+    /// does not say so, and also for the window between allocating an instance
+    /// and its `super.init` running.
+    ///
+    /// Not a field, though a field is where a wrapper class would keep it. A
+    /// field is assignable and shadowable, so `e.value = 5` could leave an
+    /// `Email` that is not a string, and `string`'s methods would then be
+    /// looking at an int. This is reachable only through `super.init`, once.
+    pub payload: Option<Value>,
 }
 
 impl Instance {
     pub fn trace(&self, worklist: &mut Vec<ObjId>) {
         worklist.push(self.class);
         self.fields.trace(worklist);
+        worklist.extend(self.payload.as_ref().and_then(Value::handle));
     }
 }
 

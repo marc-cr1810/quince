@@ -1,0 +1,1 @@
+`Bad`'s `op init` never calls `super.init`

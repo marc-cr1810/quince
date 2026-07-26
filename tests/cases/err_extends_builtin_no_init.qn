@@ -1,0 +1,6 @@
+# Extending a builtin with no constructor anywhere in the chain: there is nowhere
+# for `super.init` to go, so `push` and every other list method would fail on the
+# first call. Refused at the class instead.
+class Stack extends list {
+  fn peek() { return self }
+}
