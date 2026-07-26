@@ -312,13 +312,13 @@ impl Value {
 
     /// How a value prints with multiline formatting for large or nested collections.
     pub fn display_pretty(&self, heap: &Heap, color: bool) -> String {
-        let single = self.display_styled(heap, color);
-        if single.len() <= 60 {
-            return single;
+        let unstyled = self.display_styled(heap, false);
+        if unstyled.len() <= 80 && !unstyled.contains('\n') {
+            return self.display_styled(heap, color);
         }
         match self.base(heap) {
             Value::List(_) | Value::Dict(_) => self.format_pretty(heap, color, 0),
-            _ => single,
+            _ => self.display_styled(heap, color),
         }
     }
 
@@ -335,23 +335,69 @@ impl Value {
                         Style::BOLD.paint("]", color)
                     );
                 }
-                let mut lines = Vec::new();
-                for item in items {
-                    let formatted = match item {
-                        Value::List(_) | Value::Dict(_) => {
-                            item.format_pretty(heap, color, indent + 1)
+                let is_flat = items.iter().all(|item| {
+                    !matches!(item.base(heap), Value::List(_) | Value::Dict(_))
+                });
+
+                if is_flat {
+                    let mut lines = Vec::new();
+                    let mut current_line = String::from(&inner_pad);
+                    let mut current_len = inner_pad.len();
+                    let max_width = 80;
+
+                    for (i, item) in items.iter().enumerate() {
+                        let item_unstyled = item.repr(heap);
+                        let item_styled = item.repr_styled(heap, color);
+                        let comma = if i + 1 < items.len() { "," } else { "" };
+                        let sep_len = if i + 1 < items.len() { 2 } else { 0 };
+
+                        if current_len > inner_pad.len()
+                            && current_len + item_unstyled.len() + comma.len() > max_width
+                        {
+                            lines.push(current_line);
+                            current_line = format!("{inner_pad}{item_styled}{comma}");
+                            current_len = inner_pad.len() + item_unstyled.len() + comma.len();
+                        } else {
+                            if current_len > inner_pad.len() {
+                                current_line.push(' ');
+                            }
+                            current_line.push_str(&item_styled);
+                            if !comma.is_empty() {
+                                current_line.push(',');
+                            }
+                            current_len += item_unstyled.len() + sep_len;
                         }
-                        _ => format!("{inner_pad}{}", item.repr_styled(heap, color)),
-                    };
-                    lines.push(formatted);
+                    }
+                    if !current_line.is_empty() {
+                        lines.push(current_line);
+                    }
+
+                    format!(
+                        "{}\n{}\n{}{}",
+                        Style::BOLD.paint("[", color),
+                        lines.join("\n"),
+                        pad,
+                        Style::BOLD.paint("]", color)
+                    )
+                } else {
+                    let mut lines = Vec::new();
+                    for item in items {
+                        let formatted = match item.base(heap) {
+                            Value::List(_) | Value::Dict(_) => {
+                                item.format_pretty(heap, color, indent + 1)
+                            }
+                            _ => format!("{inner_pad}{}", item.repr_styled(heap, color)),
+                        };
+                        lines.push(formatted);
+                    }
+                    format!(
+                        "{}\n{}\n{}{}",
+                        Style::BOLD.paint("[", color),
+                        lines.join(",\n"),
+                        pad,
+                        Style::BOLD.paint("]", color)
+                    )
                 }
-                format!(
-                    "{}\n{}\n{}{}",
-                    Style::BOLD.paint("[", color),
-                    lines.join(",\n"),
-                    pad,
-                    Style::BOLD.paint("]", color)
-                )
             }
             Value::Dict(id) => {
                 let dict = heap.dict(*id);
@@ -365,7 +411,7 @@ impl Value {
                 let mut lines = Vec::new();
                 for (key, val) in dict.iter() {
                     let key_str = key.to_value().repr_styled(heap, color);
-                    let val_str = match val {
+                    let val_str = match val.base(heap) {
                         Value::List(_) | Value::Dict(_) => {
                             val.format_pretty(heap, color, indent + 1)
                         }
@@ -572,5 +618,21 @@ mod tests {
         assert_eq!(Value::from("hi").display(&heap), "hi");
         let list = Value::List(heap.alloc(Object::List(vec![Value::from("hi"), Value::Int(2)])));
         assert_eq!(list.display(&heap), r#"["hi", 2]"#);
+    }
+
+    #[test]
+    fn short_character_lists_print_on_single_line_in_display_pretty() {
+        let mut heap = Heap::new();
+        let items: Vec<Value> = "marc@gmail.com"
+            .chars()
+            .map(|c| Value::from(c.to_string().as_str()))
+            .collect();
+        let list = Value::List(heap.alloc(Object::List(items)));
+
+        let printed = list.display_pretty(&heap, false);
+        assert_eq!(
+            printed,
+            r#"["m", "a", "r", "c", "@", "g", "m", "a", "i", "l", ".", "c", "o", "m"]"#
+        );
     }
 }

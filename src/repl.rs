@@ -59,7 +59,13 @@ fn method_names_for_type(
         }
     }
 
-    method_names().into_iter().map(String::from).collect()
+    let mut names: Vec<String> = method_names().into_iter().map(String::from).collect();
+    for methods in custom_methods.values() {
+        names.extend(methods.clone());
+    }
+    names.sort();
+    names.dedup();
+    names
 }
 
 fn extract_var_before_dot(line: &str, dot_pos: usize) -> Option<&str> {
@@ -77,6 +83,44 @@ fn extract_var_before_dot(line: &str, dot_pos: usize) -> Option<&str> {
     } else {
         Some(var_name)
     }
+}
+
+fn get_dot_candidates(
+    line: &str,
+    dot_pos: usize,
+    globals: &[(String, String)],
+    custom_map: &HashMap<String, Vec<String>>,
+    var_fields_map: &HashMap<String, Vec<String>>,
+) -> Vec<String> {
+    let mut set = Vec::new();
+    if let Some(var_name) = extract_var_before_dot(line, dot_pos) {
+        if let Some((_, type_name)) = globals.iter().find(|(k, _)| k == var_name) {
+            set.extend(method_names_for_type(type_name, custom_map));
+        } else if let Some(methods) = custom_map.get(var_name) {
+            set.extend(methods.clone());
+        } else {
+            set.extend(method_names().into_iter().map(String::from));
+            for methods in custom_map.values() {
+                set.extend(methods.clone());
+            }
+        }
+
+        if let Some(fields) = var_fields_map.get(var_name) {
+            set.extend(fields.clone());
+        } else {
+            for fields in var_fields_map.values() {
+                set.extend(fields.clone());
+            }
+        }
+    } else {
+        set.extend(method_names().into_iter().map(String::from));
+        for methods in custom_map.values() {
+            set.extend(methods.clone());
+        }
+    }
+    set.sort();
+    set.dedup();
+    set
 }
 
 #[derive(Clone)]
@@ -124,26 +168,13 @@ impl Completer for QuinceHelper {
                 .lock()
                 .map(|m| m.clone())
                 .unwrap_or_default();
-            let methods = if let Some(var_name) = extract_var_before_dot(line, start - 1) {
-                let mut set = Vec::new();
-                if let Ok(globals) = self.globals.lock() {
-                    if let Some((_, type_name)) = globals.iter().find(|(k, _)| k == var_name) {
-                        set.extend(method_names_for_type(type_name, &custom_map));
-                    } else {
-                        set.extend(method_names().into_iter().map(String::from));
-                    }
-                } else {
-                    set.extend(method_names().into_iter().map(String::from));
-                }
-                if let Some(fields) = var_fields_map.get(var_name) {
-                    set.extend(fields.clone());
-                }
-                set.sort();
-                set.dedup();
-                set
-            } else {
-                method_names().into_iter().map(String::from).collect()
-            };
+            let globals = self
+                .globals
+                .lock()
+                .map(|g| g.clone())
+                .unwrap_or_default();
+            let methods =
+                get_dot_candidates(line, start - 1, &globals, &custom_map, &var_fields_map);
 
             for method in methods {
                 if method.starts_with(word) {
@@ -222,26 +253,13 @@ impl Hinter for QuinceHelper {
                 .lock()
                 .map(|m| m.clone())
                 .unwrap_or_default();
-            let methods = if let Some(var_name) = extract_var_before_dot(line, start - 1) {
-                let mut set = Vec::new();
-                if let Ok(globals) = self.globals.lock() {
-                    if let Some((_, type_name)) = globals.iter().find(|(k, _)| k == var_name) {
-                        set.extend(method_names_for_type(type_name, &custom_map));
-                    } else {
-                        set.extend(method_names().into_iter().map(String::from));
-                    }
-                } else {
-                    set.extend(method_names().into_iter().map(String::from));
-                }
-                if let Some(fields) = var_fields_map.get(var_name) {
-                    set.extend(fields.clone());
-                }
-                set.sort();
-                set.dedup();
-                set
-            } else {
-                method_names().into_iter().map(String::from).collect()
-            };
+            let globals = self
+                .globals
+                .lock()
+                .map(|g| g.clone())
+                .unwrap_or_default();
+            let methods =
+                get_dot_candidates(line, start - 1, &globals, &custom_map, &var_fields_map);
             candidates.extend(methods);
         } else {
             candidates.extend(KEYWORDS.iter().copied().map(String::from));
@@ -660,17 +678,27 @@ pub fn run_repl(use_color_stdout: bool, use_color_stderr: bool) -> Result<()> {
             let mut fields_map: HashMap<String, Vec<String>> = HashMap::new();
 
             for (k, v) in interp.get_globals() {
-                let type_name = v.type_name(&interp.heap).to_string();
-                vars.push((k.clone(), type_name));
-
-                match v {
+                match &v {
                     Value::Class(id) => {
-                        let class_obj = interp.heap.class(id);
-                        let methods: Vec<String> = class_obj.methods.keys().cloned().collect();
+                        let class_obj = interp.heap.class(*id);
+                        vars.push((k.clone(), class_obj.name.clone()));
+                        let mut methods = Vec::new();
+                        let mut current_id = Some(*id);
+                        while let Some(cls_id) = current_id {
+                            let cls = interp.heap.class(cls_id);
+                            for m in cls.methods.keys() {
+                                methods.push(m.clone());
+                            }
+                            current_id = cls.parent;
+                        }
+                        methods.sort();
+                        methods.dedup();
                         custom_map.insert(class_obj.name.clone(), methods);
                     }
                     Value::Instance(id) => {
-                        let inst = interp.heap.instance(id);
+                        let type_name = v.type_name(&interp.heap).to_string();
+                        vars.push((k.clone(), type_name.clone()));
+                        let inst = interp.heap.instance(*id);
                         let fields: Vec<String> = inst
                             .fields
                             .iter()
@@ -679,10 +707,27 @@ pub fn run_repl(use_color_stdout: bool, use_color_stderr: bool) -> Result<()> {
                                 _ => None,
                             })
                             .collect();
-                        fields_map.insert(k, fields);
+                        fields_map.insert(k.clone(), fields);
+
+                        if !custom_map.contains_key(&type_name) {
+                            let mut methods = Vec::new();
+                            let mut current_id = Some(inst.class);
+                            while let Some(cls_id) = current_id {
+                                let cls = interp.heap.class(cls_id);
+                                for m in cls.methods.keys() {
+                                    methods.push(m.clone());
+                                }
+                                current_id = cls.parent;
+                            }
+                            methods.sort();
+                            methods.dedup();
+                            custom_map.insert(type_name, methods);
+                        }
                     }
                     Value::Dict(id) => {
-                        let dict = interp.heap.dict(id);
+                        let type_name = v.type_name(&interp.heap).to_string();
+                        vars.push((k.clone(), type_name));
+                        let dict = interp.heap.dict(*id);
                         let fields: Vec<String> = dict
                             .iter()
                             .filter_map(|(key, _)| match key.to_value() {
@@ -690,9 +735,12 @@ pub fn run_repl(use_color_stdout: bool, use_color_stderr: bool) -> Result<()> {
                                 _ => None,
                             })
                             .collect();
-                        fields_map.insert(k, fields);
+                        fields_map.insert(k.clone(), fields);
                     }
-                    _ => {}
+                    _ => {
+                        let type_name = v.type_name(&interp.heap).to_string();
+                        vars.push((k.clone(), type_name));
+                    }
                 }
             }
             *store = vars;
@@ -914,6 +962,126 @@ mod tests {
             point_methods,
             vec!["distance".to_string(), "move".to_string()]
         );
+    }
+
+    #[test]
+    fn subclass_methods_and_variables_are_completed_and_hinted() {
+        let mut interp = Interp::new();
+        let code = r#"
+            class Animal {
+                fn speak() { return "..." }
+            }
+            class Dog extends Animal {
+                op init() {
+                    self.breed = "collie"
+                }
+                fn bark() { return "woof" }
+            }
+            let d = Dog()
+        "#;
+        let program = quince::compile(code).unwrap();
+        interp.run_repl(&program).unwrap();
+
+        let globals_store = Arc::new(Mutex::new(Vec::new()));
+        let custom_methods_store = Arc::new(Mutex::new(HashMap::new()));
+        let var_fields_store = Arc::new(Mutex::new(HashMap::new()));
+
+        let mut vars = Vec::new();
+        let mut custom_map: HashMap<String, Vec<String>> = HashMap::new();
+        let mut fields_map: HashMap<String, Vec<String>> = HashMap::new();
+
+        for (k, v) in interp.get_globals() {
+            match &v {
+                Value::Class(id) => {
+                    let class_obj = interp.heap.class(*id);
+                    vars.push((k.clone(), class_obj.name.clone()));
+                    let mut methods = Vec::new();
+                    let mut current_id = Some(*id);
+                    while let Some(cls_id) = current_id {
+                        let cls = interp.heap.class(cls_id);
+                        for m in cls.methods.keys() {
+                            methods.push(m.clone());
+                        }
+                        current_id = cls.parent;
+                    }
+                    methods.sort();
+                    methods.dedup();
+                    custom_map.insert(class_obj.name.clone(), methods);
+                }
+                Value::Instance(id) => {
+                    let type_name = v.type_name(&interp.heap).to_string();
+                    vars.push((k.clone(), type_name.clone()));
+                    let inst = interp.heap.instance(*id);
+                    let fields: Vec<String> = inst
+                        .fields
+                        .iter()
+                        .filter_map(|(key, _)| match key.to_value() {
+                            Value::Str(s) => Some(s.to_string()),
+                            _ => None,
+                        })
+                        .collect();
+                    fields_map.insert(k.clone(), fields);
+
+                    if !custom_map.contains_key(&type_name) {
+                        let mut methods = Vec::new();
+                        let mut current_id = Some(inst.class);
+                        while let Some(cls_id) = current_id {
+                            let cls = interp.heap.class(cls_id);
+                            for m in cls.methods.keys() {
+                                methods.push(m.clone());
+                            }
+                            current_id = cls.parent;
+                        }
+                        methods.sort();
+                        methods.dedup();
+                        custom_map.insert(type_name, methods);
+                    }
+                }
+                _ => {
+                    let type_name = v.type_name(&interp.heap).to_string();
+                    vars.push((k.clone(), type_name));
+                }
+            }
+        }
+        *globals_store.lock().unwrap() = vars;
+        *custom_methods_store.lock().unwrap() = custom_map;
+        *var_fields_store.lock().unwrap() = fields_map;
+
+        let helper = QuinceHelper {
+            use_color: false,
+            globals: globals_store,
+            custom_methods: custom_methods_store,
+            var_fields: var_fields_store,
+        };
+
+        let history = rustyline::history::MemHistory::new();
+        let dummy_ctx = rustyline::Context::new(&history);
+
+        // Test completion on instance variable `d.`
+        let (start, matches) = helper.complete("d.", 2, &dummy_ctx).unwrap();
+        assert_eq!(start, 2);
+        let match_displays: Vec<String> = matches.into_iter().map(|p| p.display).collect();
+        assert!(match_displays.contains(&"bark".to_string()), "should offer subclass method bark");
+        assert!(match_displays.contains(&"speak".to_string()), "should offer superclass method speak");
+        assert!(match_displays.contains(&"breed".to_string()), "should offer instance variable breed");
+
+        // Test hinter on `d.b`
+        let hint_b = helper.hint("d.b", 3, &dummy_ctx);
+        assert_eq!(hint_b, Some("ark".to_string()));
+
+        // Test hinter on `d.s`
+        let hint_s = helper.hint("d.s", 3, &dummy_ctx);
+        assert_eq!(hint_s, Some("peak".to_string()));
+
+        // Test hinter on `d.br`
+        let hint_br = helper.hint("d.br", 4, &dummy_ctx);
+        assert_eq!(hint_br, Some("eed".to_string()));
+
+        // Test completion directly on Class object `Dog.`
+        let (_, dog_matches) = helper.complete("Dog.", 4, &dummy_ctx).unwrap();
+        let dog_displays: Vec<String> = dog_matches.into_iter().map(|p| p.display).collect();
+        assert!(dog_displays.contains(&"bark".to_string()));
+        assert!(dog_displays.contains(&"speak".to_string()));
     }
 
     #[test]
@@ -1139,10 +1307,6 @@ fn handle_meta_command(
             print!("\x1B[2J\x1B[1;1H");
             let _ = std::io::Write::flush(&mut std::io::stdout());
             *interp = Interp::new();
-            println!(
-                "{}",
-                Style::DIM.paint("REPL state cleared.", use_color_stdout)
-            );
             Ok(true)
         }
         _ if input.starts_with(':') => {

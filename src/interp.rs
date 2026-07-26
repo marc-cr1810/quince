@@ -636,7 +636,8 @@ impl Interp {
                     format!("cannot iterate over {}", iterable.type_name(&self.heap)),
                     iter.span,
                 )
-                .with_kind(ErrorKind::Type));
+                .with_kind(ErrorKind::Type)
+                .with_help("only lists and dicts can be iterated in a for loop"));
             }
         };
 
@@ -871,8 +872,8 @@ impl Interp {
             }
 
             ExprKind::Binary { op, lhs, rhs } => {
-                let (lhs, rhs) = self.eval_pair(lhs, rhs, env)?;
-                self.binary(*op, lhs, rhs, expr.span)
+                let (l_val, r_val) = self.eval_pair(lhs, rhs, env)?;
+                self.binary(*op, l_val, r_val, lhs.span, rhs.span, expr.span)
             }
 
             ExprKind::Logical { op, lhs, rhs } => {
@@ -975,7 +976,11 @@ impl Interp {
             // ordinary value rather than syntax that works in one position.
             ExprKind::Field { target, name } => {
                 let receiver = self.eval(target, env)?;
-                match self.attr(&receiver, name, expr.span)? {
+                let name_span = Span::new(
+                    (target.span.end as usize + 1).min(expr.span.end as usize),
+                    expr.span.end as usize,
+                );
+                match self.attr(&receiver, name, target.span, name_span, expr.span)? {
                     Attr::Field(value) => Ok(value),
                     // Nothing between here and the allocation is a safe point,
                     // so the receiver needs no rooting on the way in; once it
@@ -1030,8 +1035,24 @@ impl Interp {
                 .get(&var.name)
                 .cloned()
                 .ok_or_else(|| {
-                    QuinceError::new(format!("undefined variable `{}`", var.name), span)
-                        .with_kind(ErrorKind::Name)
+                    let mut err =
+                        QuinceError::new(format!("undefined variable `{}`", var.name), span)
+                            .with_kind(ErrorKind::Name);
+
+                    let mut candidates: Vec<String> = self
+                        .heap
+                        .globals(self.globals)
+                        .iter()
+                        .map(|(k, _)| k.to_string())
+                        .collect();
+                    for builtin in crate::class::BUILTINS {
+                        candidates.push(builtin.name().to_string());
+                    }
+                    let refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
+                    if let Some(suggestion) = crate::error::did_you_mean(&var.name, refs) {
+                        err = err.with_help(format!("did you mean `{suggestion}`?"));
+                    }
+                    err
                 }),
         }
     }
@@ -1161,11 +1182,29 @@ impl Interp {
             Value::Dict(id) => {
                 let key = key_of(&self.heap, index, span)?;
                 self.heap.dict(*id).get(&key).cloned().ok_or_else(|| {
-                    QuinceError::new(
-                        format!("key {} is not in the dict", index.repr(&self.heap)),
+                    let key_repr = index.repr(&self.heap);
+                    let mut err = QuinceError::new(
+                        format!("key {key_repr} is not in the dict"),
                         span,
                     )
-                    .with_kind(ErrorKind::Key)
+                    .with_kind(ErrorKind::Key);
+
+                    if let Value::Str(query_str) = index.base(&self.heap) {
+                        let keys_strs: Vec<String> = self
+                            .heap
+                            .dict(*id)
+                            .keys()
+                            .filter_map(|k| match k {
+                                Value::Str(s) => Some(s.to_string()),
+                                _ => None,
+                            })
+                            .collect();
+                        let refs: Vec<&str> = keys_strs.iter().map(|s| s.as_str()).collect();
+                        if let Some(suggestion) = crate::error::did_you_mean(query_str, refs) {
+                            err = err.with_help(format!("did you mean `{suggestion}`?"));
+                        }
+                    }
+                    err
                 })
             }
             // Indexed by character, not by byte, because `len` already counts
@@ -1211,7 +1250,9 @@ impl Interp {
             _ => Err(QuinceError::new(
                 format!("cannot slice {}", target.type_name(&self.heap)),
                 span,
-            )),
+            )
+            .with_kind(ErrorKind::Type)
+            .with_help("only lists and strings support slicing")),
         }
     }
 
@@ -1226,7 +1267,9 @@ impl Interp {
             return Err(QuinceError::new(
                 format!("cannot index {}", target.type_name(&self.heap)),
                 span,
-            ));
+            )
+            .with_kind(ErrorKind::Type)
+            .with_help("only lists, dicts, and strings support indexing"));
         };
         let offset = resolve_index(&self.heap, index, self.heap.list(*id).len(), "list", span)?;
         Ok((*id, offset))
@@ -1374,7 +1417,8 @@ impl Interp {
                 format!("{} is not callable", other.type_name(&self.heap)),
                 span,
             )
-            .with_kind(ErrorKind::Type)),
+            .with_kind(ErrorKind::Type)
+            .with_help("only functions and classes can be called")),
         }
     }
 
@@ -1513,7 +1557,11 @@ impl Interp {
         span: Span,
     ) -> Result<Value, QuinceError> {
         let receiver = self.eval(target, env)?;
-        let attr = self.attr(&receiver, name, callee_span)?;
+        let name_span = Span::new(
+            (target.span.end as usize + 1).min(callee_span.end as usize),
+            callee_span.end as usize,
+        );
+        let attr = self.attr(&receiver, name, target.span, name_span, callee_span)?;
 
         // The receiver is held across every argument, any of which can reach a
         // safe point — the same hazard as an ordinary callee, and the same fix.
@@ -1598,7 +1646,14 @@ impl Interp {
     /// method is per-class, so the more specific one wins. It also means a
     /// field holding a function is called as an ordinary function rather than
     /// silently acquiring a receiver it was never written to take.
-    fn attr(&self, receiver: &Value, name: &str, span: Span) -> Result<Attr, QuinceError> {
+    fn attr(
+        &self,
+        receiver: &Value,
+        name: &str,
+        target_span: Span,
+        name_span: Span,
+        expr_span: Span,
+    ) -> Result<Attr, QuinceError> {
         if let Value::Instance(id) = receiver
             && let Some(value) = self
                 .heap
@@ -1614,14 +1669,14 @@ impl Interp {
         if let Value::Class(id) = receiver {
             return match self.heap.class(*id).method(name, &self.heap) {
                 Some(method) => Ok(Attr::Field(method)),
-                None => Err(self.no_attr(receiver, name, span)),
+                None => Err(self.no_attr(receiver, name, target_span, name_span, expr_span)),
             };
         }
 
         let class = receiver.class(&self.heap);
         match self.heap.class(class).method(name, &self.heap) {
             Some(method) => Ok(Attr::Method(method)),
-            None => Err(self.no_attr(receiver, name, span)),
+            None => Err(self.no_attr(receiver, name, target_span, name_span, expr_span)),
         }
     }
 
@@ -1679,18 +1734,55 @@ impl Interp {
         ))
     }
 
-    fn no_attr(&self, receiver: &Value, name: &str, span: Span) -> QuinceError {
+    fn no_attr(
+        &self,
+        receiver: &Value,
+        name: &str,
+        target_span: Span,
+        name_span: Span,
+        expr_span: Span,
+    ) -> QuinceError {
         // An instance can grow fields at run time, so a missing name there is a
         // different mistake from a missing method on a builtin type.
         let what = match receiver {
             Value::Instance(_) => "no field or method",
             _ => "no method",
         };
-        QuinceError::new(
+        let mut err = QuinceError::new(
             format!("{} has {what} `{name}`", receiver.type_name(&self.heap)),
-            span,
+            expr_span,
         )
-        .with_kind(ErrorKind::Attr)
+        .with_kind(ErrorKind::Attr);
+
+        if target_span.start < target_span.end {
+            err = err.with_label(target_span, receiver.type_name(&self.heap));
+        }
+        if name_span.start < name_span.end {
+            err = err.with_label(name_span, format!("no field or method `{name}`"));
+        }
+
+        let mut candidates: Vec<String> = Vec::new();
+        if let Value::Instance(id) = receiver {
+            for (key, _) in self.heap.instance(*id).fields.iter() {
+                if let crate::dict::Key::Str(s) = key {
+                    candidates.push(s.to_string());
+                }
+            }
+            let class = self.heap.instance(*id).class;
+            candidates.extend(self.heap.class(class).method_names(&self.heap));
+        } else if let Value::Class(id) = receiver {
+            candidates.extend(self.heap.class(*id).method_names(&self.heap));
+        } else {
+            let class = receiver.class(&self.heap);
+            candidates.extend(self.heap.class(class).method_names(&self.heap));
+        }
+
+        let refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
+        if let Some(suggestion) = crate::error::did_you_mean(name, refs) {
+            err = err.with_help(format!("did you mean `{suggestion}`?"));
+        }
+
+        err
     }
 
     // -- operators ---------------------------------------------------------
@@ -1720,7 +1812,9 @@ impl Interp {
         op: BinaryOp,
         lhs: Value,
         rhs: Value,
-        span: Span,
+        lhs_span: Span,
+        rhs_span: Span,
+        expr_span: Span,
     ) -> Result<Value, QuinceError> {
         use BinaryOp::*;
 
@@ -1728,20 +1822,12 @@ impl Interp {
         match op {
             Eq => return Ok(Value::Bool(lhs.equals(&rhs, &self.heap))),
             Ne => return Ok(Value::Bool(!lhs.equals(&rhs, &self.heap))),
-            In => return self.contains(&rhs, &lhs, span),
+            In => return self.contains(&rhs, &lhs, expr_span),
             _ => {}
         }
 
         // Dispatch on what the operands *are*, so a class extending a builtin is
         // operated on as one — and the result is the base type, not the subclass.
-        // `Username("marc") + "!"` is a string: preserving the class would mean
-        // re-running its `op init`, so a validating constructor would run on every
-        // concatenation.
-        //
-        // Reporting still uses `lhs` and `rhs`. The dispatch wants the base type
-        // and the message wants the name the line was written with, and they are
-        // different questions: `Username("a") - 1` is refused because a string
-        // cannot be subtracted, but naming `Username` is what says which value.
         let (a, b) = (lhs.base(&self.heap).clone(), rhs.base(&self.heap).clone());
 
         // `+` is the one operator shared between numbers and the collections.
@@ -1749,8 +1835,7 @@ impl Interp {
             return Ok(Value::Str(Rc::from(format!("{a}{b}"))));
         }
 
-        // Concatenation builds a new list rather than extending the left one,
-        // matching `+` on strings. `push` is there for growing in place.
+        // Concatenation builds a new list rather than extending the left one.
         if let (Add, Value::List(a), Value::List(b)) = (op, &a, &b) {
             let mut items = self.heap.list(*a).clone();
             items.extend_from_slice(self.heap.list(*b));
@@ -1763,20 +1848,20 @@ impl Interp {
                 Le => Ok(Value::Bool(x <= y)),
                 Gt => Ok(Value::Bool(x > y)),
                 Ge => Ok(Value::Bool(x >= y)),
-                _ => Err(type_error(&self.heap, op, &lhs, &rhs, span)),
+                _ => Err(type_error(&self.heap, op, &lhs, &rhs, lhs_span, rhs_span, expr_span)),
             };
         }
 
         match (&a, &b) {
             // Both ints: stay an int, and refuse to wrap on overflow.
-            (Value::Int(x), Value::Int(y)) => int_op(op, *x, *y, span),
+            (Value::Int(x), Value::Int(y)) => int_op(op, *x, *y, expr_span),
 
             // Any float involved promotes the whole operation.
             (Value::Float(_), Value::Int(_))
             | (Value::Int(_), Value::Float(_))
-            | (Value::Float(_), Value::Float(_)) => float_op(op, as_float(&a), as_float(&b), span),
+            | (Value::Float(_), Value::Float(_)) => float_op(op, as_float(&a), as_float(&b), expr_span),
 
-            _ => Err(type_error(&self.heap, op, &lhs, &rhs, span)),
+            _ => Err(type_error(&self.heap, op, &lhs, &rhs, lhs_span, rhs_span, expr_span)),
         }
     }
 
@@ -1967,7 +2052,15 @@ fn frozen(heap: &Heap, value: &Value, span: Span) -> QuinceError {
     .with_kind(ErrorKind::Frozen)
 }
 
-fn type_error(heap: &Heap, op: BinaryOp, lhs: &Value, rhs: &Value, span: Span) -> QuinceError {
+fn type_error(
+    heap: &Heap,
+    op: BinaryOp,
+    lhs: &Value,
+    rhs: &Value,
+    lhs_span: Span,
+    rhs_span: Span,
+    expr_span: Span,
+) -> QuinceError {
     use BinaryOp::*;
     let verb = match op {
         Add => "add",
@@ -1978,15 +2071,30 @@ fn type_error(heap: &Heap, op: BinaryOp, lhs: &Value, rhs: &Value, span: Span) -
         Lt | Le | Gt | Ge => "compare",
         Eq | Ne | In => unreachable!("handled before the numeric dispatch"),
     };
+
+    let op_span = if lhs_span.end <= rhs_span.start {
+        Span::new(lhs_span.end as usize, rhs_span.start as usize)
+    } else {
+        expr_span
+    };
+
     QuinceError::new(
         format!(
             "cannot {verb} {} and {}",
             lhs.type_name(heap),
             rhs.type_name(heap)
         ),
-        span,
+        expr_span,
     )
     .with_kind(ErrorKind::Type)
+    .with_label(lhs_span, lhs.type_name(heap))
+    .with_label(op_span, "doesn't support these values")
+    .with_label(rhs_span, rhs.type_name(heap))
+    .with_help(format!(
+        "Change {} or {} to be compatible types and try again",
+        lhs.type_name(heap),
+        rhs.type_name(heap)
+    ))
 }
 
 /// Resolves a subscript against a length, accepting Python-style negatives.
@@ -2013,11 +2121,19 @@ fn resolve_index(
 
     let offset = if *raw < 0 { *raw + len as i64 } else { *raw };
     if offset < 0 || offset >= len as i64 {
-        return Err(QuinceError::new(
+        let mut err = QuinceError::new(
             format!("index {raw} is out of range for a {what} of length {len}"),
             span,
         )
-        .with_kind(ErrorKind::Index));
+        .with_kind(ErrorKind::Index);
+
+        if len == 0 {
+            err = err.with_help(format!("the {what} is empty"));
+        } else {
+            err = err.with_help(format!("valid range is 0..{}", len - 1));
+        }
+
+        return Err(err);
     }
     Ok(offset as usize)
 }
@@ -2061,11 +2177,25 @@ fn check_arity(name: &str, expected: usize, found: usize, span: Span) -> Result<
         return Ok(());
     }
     let plural = if expected == 1 { "" } else { "s" };
+    let help = if found > expected {
+        let diff = found - expected;
+        format!(
+            "remove {diff} argument{} to match `{name}`'s signature",
+            if diff == 1 { "" } else { "s" }
+        )
+    } else {
+        let diff = expected - found;
+        format!(
+            "add {diff} argument{} to match `{name}`'s signature",
+            if diff == 1 { "" } else { "s" }
+        )
+    };
     Err(QuinceError::new(
         format!("`{name}` takes {expected} argument{plural}, but {found} were given"),
         span,
     )
-    .with_kind(ErrorKind::Type))
+    .with_kind(ErrorKind::Type)
+    .with_help(help))
 }
 
 // -- builtins --------------------------------------------------------------
