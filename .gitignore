@@ -1,1 +1,14 @@
+# Rust build artifacts
 /target
+Cargo.lock
+
+# Node / VS Code Extension dependencies and packages
+node_modules/
+editors/vscode/node_modules/
+*.vsix
+
+# Editor & OS files
+.DS_Store
+*.log
+.idea/
+.vscode/*.log

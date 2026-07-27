@@ -1,0 +1,83 @@
+{
+  "Function Declaration": {
+    "prefix": "fn",
+    "body": [
+      "fn ${1:name}(${2:params}) {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Declare a function in Quince"
+  },
+  "Class Declaration": {
+    "prefix": "class",
+    "body": [
+      "class ${1:Name} {",
+      "\top init(${2:params}) {",
+      "\t\t$0",
+      "\t}",
+      "}"
+    ],
+    "description": "Declare a class in Quince"
+  },
+  "Class Extension": {
+    "prefix": "extends",
+    "body": [
+      "class ${1:Name} extends ${2:Parent} {",
+      "\top init(${3:params}) {",
+      "\t\tsuper.init(${3:params})",
+      "\t\t$0",
+      "\t}",
+      "}"
+    ],
+    "description": "Declare a subclass extending a parent class"
+  },
+  "Operator Method": {
+    "prefix": "op",
+    "body": [
+      "op ${1|add,sub,mul,div,floordiv,rem,eq,cmp,lt,gt,len,get,set,contains,iter,bool,string,int,float,list,dict|}(${2:params}) {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Declare an operator method inside a class"
+  },
+  "For Loop": {
+    "prefix": "for",
+    "body": [
+      "for ${1:item} in ${2:iterable} {",
+      "\t$0",
+      "}"
+    ],
+    "description": "For in loop"
+  },
+  "If Statement": {
+    "prefix": "if",
+    "body": [
+      "if ${1:condition} {",
+      "\t$0",
+      "}"
+    ],
+    "description": "If conditional statement"
+  },
+  "If Else Statement": {
+    "prefix": "ifelse",
+    "body": [
+      "if ${1:condition} {",
+      "\t$2",
+      "} else {",
+      "\t$0",
+      "}"
+    ],
+    "description": "If/else conditional statement"
+  },
+  "Try Catch Block": {
+    "prefix": "try",
+    "body": [
+      "try {",
+      "\t$1",
+      "} catch ${2:err} {",
+      "\t$0",
+      "}"
+    ],
+    "description": "Try/catch block"
+  }
+}

@@ -11,4 +11,5 @@ rustyline = "14"
 lsp-types = "0.95"
 lsp-server = "0.7"
 serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
 

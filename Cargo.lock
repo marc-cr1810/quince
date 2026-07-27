@@ -451,6 +451,7 @@ dependencies = [
  "lsp-server",
  "lsp-types",
  "rustyline",
+ "serde",
  "serde_json",
 ]
 

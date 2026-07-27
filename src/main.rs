@@ -32,7 +32,7 @@ fn main() -> Result<()> {
         Command::Repl => {
             quince::interp::with_stack(|| repl::run_repl(use_color_stdout, use_color_stderr))
         }
-        Command::Lsp => lsp::run_lsp_server(),
+        Command::Lsp { .. } => lsp::run_lsp_server(),
     }
 }
 

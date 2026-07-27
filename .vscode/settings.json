@@ -1,0 +1,6 @@
+{
+  "files.associations": {
+    "*.qn": "quince"
+  },
+  "quince.lspPath": "/home/marc/programming/rust/quince/target/debug/quince"
+}

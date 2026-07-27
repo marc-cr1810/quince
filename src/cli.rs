@@ -32,7 +32,11 @@ pub enum Command {
     /// Start an interactive session
     Repl,
     /// Run Language Server Protocol (LSP) daemon over stdio
-    Lsp,
+    Lsp {
+        /// Use stdio transport (default)
+        #[arg(long, default_value_t = true)]
+        stdio: bool,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]

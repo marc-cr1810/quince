@@ -13,7 +13,9 @@
   "main": "./extension.js",
   "activationEvents": [
     "onLanguage:quince",
-    "onStartupFinished"
+    "workspaceContains:**/*.qn",
+    "onStartupFinished",
+    "*"
   ],
   "contributes": {
     "languages": [
@@ -37,6 +39,26 @@
         "path": "./syntaxes/quince.tmLanguage.json"
       }
     ],
+    "snippets": [
+      {
+        "language": "quince",
+        "path": "./snippets/quince.json"
+      }
+    ],
+    "semanticTokenScopes": [
+      {
+        "language": "quince",
+        "scopes": {
+          "class": ["entity.name.type.class.quince"],
+          "function": ["entity.name.function.quince"],
+          "method": ["entity.name.function.member.quince"],
+          "variable": ["variable.other.readwrite.quince"],
+          "parameter": ["variable.parameter.quince"],
+          "property": ["variable.other.property.quince"],
+          "type": ["entity.name.type.quince"]
+        }
+      }
+    ],
     "commands": [
       {
         "command": "quince.restartServer",
@@ -54,5 +76,14 @@
         }
       }
     }
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "vscode-languageclient": "^10.1.0"
   }
 }

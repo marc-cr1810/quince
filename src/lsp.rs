@@ -1,14 +1,39 @@
 use std::collections::HashMap;
 
-use lsp_server::{Connection, Message, Notification};
+use lsp_server::{Connection, Message, Notification, Request, Response};
 use lsp_types::{
     notification::{Notification as _, PublishDiagnostics},
+    request::{Completion, GotoDefinition, HoverRequest, Request as _},
+    CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams, CompletionResponse,
     Diagnostic, DiagnosticSeverity, DidChangeTextDocumentParams, DidOpenTextDocumentParams,
-    Position, PublishDiagnosticsParams, Range, ServerCapabilities, TextDocumentSyncCapability,
-    TextDocumentSyncKind, Url,
+    DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse,
+    Hover, HoverContents, HoverParams, HoverProviderCapability, LanguageString, Location,
+    MarkedString, OneOf, Position, PublishDiagnosticsParams, Range, ServerCapabilities,
+    SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokens,
+    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
+    SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities,
+    SymbolInformation, SymbolKind, TextDocumentSyncCapability, TextDocumentSyncKind, Url,
 };
+
+use quince::ast::{Expr, ExprKind, Stmt, StmtKind};
 use quince::error::QuinceError;
-use quince::token::Span;
+use quince::token::{Span, KEYWORDS};
+
+struct DocumentState {
+    text: String,
+    ast: Option<Vec<Stmt>>,
+}
+
+const LEGEND_TYPES: &[SemanticTokenType] = &[
+    SemanticTokenType::CLASS,     // 0
+    SemanticTokenType::FUNCTION,  // 1
+    SemanticTokenType::METHOD,    // 2
+    SemanticTokenType::VARIABLE,  // 3
+    SemanticTokenType::PARAMETER, // 4
+    SemanticTokenType::PROPERTY,  // 5
+    SemanticTokenType::TYPE,      // 6
+    SemanticTokenType::KEYWORD,   // 7
+];
 
 /// Runs the Quince LSP server event loop over stdio.
 pub fn run_lsp_server() -> anyhow::Result<()> {
@@ -18,12 +43,34 @@ pub fn run_lsp_server() -> anyhow::Result<()> {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(
             TextDocumentSyncKind::FULL,
         )),
+        completion_provider: Some(CompletionOptions {
+            resolve_provider: Some(false),
+            trigger_characters: Some(vec![".".to_string()]),
+            ..Default::default()
+        }),
+        hover_provider: Some(HoverProviderCapability::Simple(true)),
+        definition_provider: Some(OneOf::Left(true)),
+        document_symbol_provider: Some(OneOf::Left(true)),
+        semantic_tokens_provider: Some(
+            SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
+                legend: SemanticTokensLegend {
+                    token_types: LEGEND_TYPES.to_vec(),
+                    token_modifiers: vec![
+                        SemanticTokenModifier::DECLARATION,
+                        SemanticTokenModifier::DEFAULT_LIBRARY,
+                    ],
+                },
+                full: Some(SemanticTokensFullOptions::Bool(true)),
+                range: Some(false),
+                work_done_progress_options: Default::default(),
+            }),
+        ),
         ..Default::default()
     })?;
 
     connection.initialize(server_capabilities)?;
 
-    let mut documents: HashMap<Url, String> = HashMap::new();
+    let mut documents: HashMap<Url, DocumentState> = HashMap::new();
 
     for msg in &connection.receiver {
         match msg {
@@ -31,9 +78,14 @@ pub fn run_lsp_server() -> anyhow::Result<()> {
                 if connection.handle_shutdown(&req)? {
                     return Ok(());
                 }
+                if let Err(err) = handle_request(&connection, &documents, req) {
+                    eprintln!("Error handling LSP request: {err}");
+                }
             }
             Message::Notification(notif) => {
-                handle_notification(&connection, &mut documents, notif)?;
+                if let Err(err) = handle_notification(&connection, &mut documents, notif) {
+                    eprintln!("Error handling LSP notification: {err}");
+                }
             }
             Message::Response(_) => {}
         }
@@ -43,9 +95,74 @@ pub fn run_lsp_server() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn parse_ast_lenient(source: &str) -> Option<Vec<Stmt>> {
+    if let Ok(stmts) = quince::compile(source) {
+        return Some(stmts);
+    }
+    if let Ok(tokens) = quince::lexer::Lexer::new(source).tokenize() {
+        if let Ok(stmts) = quince::parser::Parser::new(tokens).parse() {
+            return Some(stmts);
+        }
+    }
+    None
+}
+
+fn handle_request(
+    connection: &Connection,
+    documents: &HashMap<Url, DocumentState>,
+    req: Request,
+) -> anyhow::Result<()> {
+    let id = req.id.clone();
+    match req.method.as_str() {
+        Completion::METHOD => {
+            let params: CompletionParams = serde_json::from_value(req.params)?;
+            let uri = &params.text_document_position.text_document.uri;
+            let pos = params.text_document_position.position;
+            let items = get_completions(documents.get(uri), pos);
+            let resp = Response::new_ok(id, CompletionResponse::Array(items));
+            connection.sender.send(Message::Response(resp))?;
+        }
+        HoverRequest::METHOD => {
+            let params: HoverParams = serde_json::from_value(req.params)?;
+            let uri = &params.text_document_position_params.text_document.uri;
+            let pos = params.text_document_position_params.position;
+            let hover = get_hover(documents.get(uri), pos);
+            let resp = Response::new_ok(id, hover);
+            connection.sender.send(Message::Response(resp))?;
+        }
+        GotoDefinition::METHOD => {
+            let params: GotoDefinitionParams = serde_json::from_value(req.params)?;
+            let uri = &params.text_document_position_params.text_document.uri;
+            let pos = params.text_document_position_params.position;
+            let location = get_definition(uri, documents.get(uri), pos);
+            let resp = Response::new_ok(id, location);
+            connection.sender.send(Message::Response(resp))?;
+        }
+        lsp_types::request::DocumentSymbolRequest::METHOD => {
+            let params: DocumentSymbolParams = serde_json::from_value(req.params)?;
+            let uri = &params.text_document.uri;
+            let symbols = get_document_symbols(uri, documents.get(uri));
+            let resp = Response::new_ok(id, DocumentSymbolResponse::Flat(symbols));
+            connection.sender.send(Message::Response(resp))?;
+        }
+        "textDocument/semanticTokens/full" => {
+            let params: SemanticTokensParams = serde_json::from_value(req.params)?;
+            let uri = &params.text_document.uri;
+            let tokens = get_semantic_tokens(documents.get(uri));
+            let resp = Response::new_ok(id, SemanticTokensResult::Tokens(tokens));
+            connection.sender.send(Message::Response(resp))?;
+        }
+        _ => {
+            let resp = Response::new_ok(id, serde_json::Value::Null);
+            connection.sender.send(Message::Response(resp))?;
+        }
+    }
+    Ok(())
+}
+
 fn handle_notification(
     connection: &Connection,
-    documents: &mut HashMap<Url, String>,
+    documents: &mut HashMap<Url, DocumentState>,
     notif: Notification,
 ) -> anyhow::Result<()> {
     match notif.method.as_str() {
@@ -53,21 +170,22 @@ fn handle_notification(
             let params: DidOpenTextDocumentParams = serde_json::from_value(notif.params)?;
             let uri = params.text_document.uri;
             let text = params.text_document.text;
-            documents.insert(uri.clone(), text.clone());
+            let ast = parse_ast_lenient(&text);
+            documents.insert(uri.clone(), DocumentState { text: text.clone(), ast });
             publish_diagnostics(connection, uri, &text)?;
         }
         "textDocument/didChange" => {
             let params: DidChangeTextDocumentParams = serde_json::from_value(notif.params)?;
             let uri = params.text_document.uri;
             if let Some(change) = params.content_changes.into_iter().last() {
-                documents.insert(uri.clone(), change.text.clone());
+                let ast = parse_ast_lenient(&change.text);
+                documents.insert(uri.clone(), DocumentState { text: change.text.clone(), ast });
                 publish_diagnostics(connection, uri, &change.text)?;
             }
         }
         "textDocument/didClose" => {
             let params: lsp_types::DidCloseTextDocumentParams = serde_json::from_value(notif.params)?;
             documents.remove(&params.text_document.uri);
-            // Clear diagnostics when file closes
             let notif = Notification {
                 method: PublishDiagnostics::METHOD.to_string(),
                 params: serde_json::to_value(PublishDiagnosticsParams {
@@ -83,7 +201,6 @@ fn handle_notification(
     Ok(())
 }
 
-/// Lexes, parses, and resolves source code, publishing any syntax/resolver errors to VS Code.
 fn publish_diagnostics(connection: &Connection, uri: Url, source: &str) -> anyhow::Result<()> {
     let mut diagnostics = Vec::new();
 
@@ -126,11 +243,1040 @@ fn quince_error_to_diagnostic(source: &str, err: &QuinceError) -> Diagnostic {
     }
 }
 
+// --- LSP IDE Capabilities ---
+
+fn get_completions(state: Option<&DocumentState>, pos: Position) -> Vec<CompletionItem> {
+    let mut items = Vec::new();
+    let state = match state {
+        Some(s) => s,
+        None => return items,
+    };
+
+    // Check if user is typing a dot (e.g. `self.` or `p.`)
+    let is_dot_trigger = is_preceded_by_dot(&state.text, pos);
+
+    // 1. User-defined classes and type constructors
+    if !is_dot_trigger {
+        // Language Keywords
+        for &kw in KEYWORDS {
+            items.push(CompletionItem {
+                label: kw.to_string(),
+                kind: Some(CompletionItemKind::KEYWORD),
+                detail: Some("Quince keyword".to_string()),
+                ..Default::default()
+            });
+        }
+
+        // Builtin Functions & Types
+        let builtins = &[
+            ("print", "fn print(...) - Prints values to stdout", CompletionItemKind::FUNCTION),
+            ("type", "fn type(value) - Returns the type name of a value", CompletionItemKind::FUNCTION),
+            ("len", "fn len(collection) - Returns the length of a collection", CompletionItemKind::FUNCTION),
+            ("int", "Built-in integer type constructor", CompletionItemKind::TYPE_PARAMETER),
+            ("float", "Built-in float type constructor", CompletionItemKind::TYPE_PARAMETER),
+            ("string", "Built-in string type constructor", CompletionItemKind::TYPE_PARAMETER),
+            ("list", "Built-in list type constructor", CompletionItemKind::TYPE_PARAMETER),
+            ("dict", "Built-in dict type constructor", CompletionItemKind::TYPE_PARAMETER),
+        ];
+
+        for &(name, doc, kind) in builtins {
+            items.push(CompletionItem {
+                label: name.to_string(),
+                kind: Some(kind),
+                detail: Some(doc.to_string()),
+                ..Default::default()
+            });
+        }
+    }
+
+    // 2. Traversal for AST & Text Symbols (Classes, Methods, Functions, Variables)
+    if is_dot_trigger {
+        if let Some(receiver) = get_receiver_before_dot(&state.text, pos) {
+            let target_class = infer_receiver_class(&state.text, &receiver, pos);
+            collect_dot_completions_for_class(&state.text, state.ast.as_deref(), &receiver, target_class.as_deref(), &mut items);
+        }
+    } else {
+        if let Some(ast) = &state.ast {
+            collect_ast_completions(ast, &mut items);
+        }
+        collect_text_variable_completions(&state.text, &mut items);
+    }
+
+    items
+}
+
+fn is_preceded_by_dot(source: &str, pos: Position) -> bool {
+    let line = match source.lines().nth(pos.line as usize) {
+        Some(l) => l,
+        None => return false,
+    };
+    let col = (pos.character as usize).min(line.len());
+    line[..col].trim_end().ends_with('.')
+}
+
+const BUILTIN_TYPE_METHODS: &[(&str, &[&str])] = &[
+    (
+        "string",
+        &[
+            "chars",
+            "ends_with",
+            "join",
+            "lower",
+            "replace",
+            "split",
+            "starts_with",
+            "trim",
+            "upper",
+        ],
+    ),
+    ("list", &["push"]),
+    ("dict", &["keys", "values", "remove"]),
+    ("int", &[]),
+    ("float", &[]),
+    ("bool", &[]),
+];
+
+fn get_receiver_before_dot(source: &str, pos: Position) -> Option<String> {
+    let line = source.lines().nth(pos.line as usize)?;
+    let col = (pos.character as usize).min(line.len());
+    let trimmed = line[..col].trim_end();
+    if !trimmed.ends_with('.') {
+        return None;
+    }
+    let before_dot = trimmed[..trimmed.len() - 1].trim_end();
+    if before_dot.is_empty() {
+        return None;
+    }
+
+    let mut cleaned = before_dot;
+    if cleaned.ends_with(')') {
+        if let Some(open_paren) = cleaned.rfind('(') {
+            cleaned = cleaned[..open_paren].trim_end();
+        }
+    }
+
+    if cleaned.ends_with('"') || cleaned.ends_with(']') || cleaned.ends_with('}') {
+        return Some(cleaned.to_string());
+    }
+
+    let start = cleaned
+        .rfind(|c: char| !(c == '_' || c == '.' || c.is_alphanumeric()))
+        .map_or(0, |i| i + 1);
+
+    if start < cleaned.len() {
+        Some(cleaned[start..].to_string())
+    } else {
+        Some(cleaned.to_string())
+    }
+}
+
+fn infer_receiver_class(source: &str, receiver: &str, pos: Position) -> Option<String> {
+    let clean_recv = receiver.split('(').next().unwrap_or(receiver).trim();
+
+    // String literal e.g. `"test".`
+    if clean_recv.starts_with('"') || clean_recv.ends_with('"') {
+        return Some("string".to_string());
+    }
+    // List literal e.g. `[1, 2, 3, 4].`
+    if clean_recv.starts_with('[') || clean_recv.ends_with(']') {
+        return Some("list".to_string());
+    }
+    // Dict literal e.g. `{"a": 1}.`
+    if clean_recv.starts_with('{') || clean_recv.ends_with('}') {
+        return Some("dict".to_string());
+    }
+    // Int or Float literal e.g. `5.` or `5.0.`
+    if !clean_recv.is_empty() && clean_recv.chars().all(|c| c.is_ascii_digit() || c == '.') {
+        if clean_recv.contains('.') {
+            return Some("float".to_string());
+        } else {
+            return Some("int".to_string());
+        }
+    }
+
+    // Direct Class Constructor Call e.g. `Shadow().` or `Point(3, 4).`
+    if clean_recv.chars().next().map_or(false, |c| c.is_uppercase()) {
+        return Some(clean_recv.to_string());
+    }
+
+    if clean_recv == "self" {
+        let mut current_class = None;
+        let mut brace_depth = 0;
+        let mut class_brace_depth = 0;
+
+        for (line_idx, line) in source.lines().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("class ") {
+                let parts: Vec<_> = trimmed.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    let name = parts[1].split('{').next().unwrap_or("").trim();
+                    if !name.is_empty() {
+                        current_class = Some(name.to_string());
+                        class_brace_depth = brace_depth;
+                    }
+                }
+            }
+
+            if line_idx == pos.line as usize {
+                return current_class;
+            }
+
+            for c in line.chars() {
+                if c == '{' {
+                    brace_depth += 1;
+                } else if c == '}' {
+                    if brace_depth > 0 {
+                        brace_depth -= 1;
+                    }
+                    if current_class.is_some() && brace_depth <= class_brace_depth {
+                        current_class = None;
+                    }
+                }
+            }
+        }
+        return current_class;
+    }
+
+    let max_line = (pos.line as usize).min(source.lines().count().saturating_sub(1));
+    for line_idx in (0..=max_line).rev() {
+        if let Some(line) = source.lines().nth(line_idx) {
+            let trimmed = line.trim();
+            if trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some(eq_idx) = trimmed.find('=') {
+                let lhs = trimmed[..eq_idx].trim();
+                let var_name = lhs.split_whitespace().last().unwrap_or("");
+                if var_name == receiver {
+                    let rhs = trimmed[eq_idx + 1..].trim();
+                    let first_word = rhs.split(&['(', ' ', ';'][..]).next().unwrap_or("").trim();
+                    if !first_word.is_empty()
+                        && first_word.chars().next().map_or(false, |c| c.is_uppercase())
+                    {
+                        return Some(first_word.to_string());
+                    }
+
+                    if rhs.starts_with('"') {
+                        return Some("string".to_string());
+                    }
+                    if rhs.starts_with('[') {
+                        return Some("list".to_string());
+                    }
+                    if rhs.starts_with('{') {
+                        return Some("dict".to_string());
+                    }
+
+                    if let Some(dot_idx) = rhs.find('.') {
+                        let obj_name = rhs[..dot_idx].trim();
+                        let rest = rhs[dot_idx + 1..].trim();
+                        let method_name = rest.split('(').next().unwrap_or("").trim();
+                        if let Some(parent_class) = infer_receiver_class(source, obj_name, Position { line: line_idx as u32, character: 0 }) {
+                            if let Some(ret_class) = infer_method_return_class(source, &parent_class, method_name) {
+                                return Some(ret_class);
+                            }
+                            return Some(parent_class);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn infer_method_return_class(source: &str, class_name: &str, method_name: &str) -> Option<String> {
+    let mut inside_target_class = false;
+    let mut inside_target_method = false;
+
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("class ") {
+            let parts: Vec<_> = trimmed.split_whitespace().collect();
+            if parts.len() >= 2 {
+                let name = parts[1].split('{').next().unwrap_or("").trim();
+                inside_target_class = (name == class_name);
+            }
+        }
+
+        if inside_target_class {
+            if trimmed.starts_with("fn ") || trimmed.starts_with("op ") {
+                let parts: Vec<_> = trimmed.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    let mname = parts[1].split('(').next().unwrap_or("").trim();
+                    inside_target_method = (mname == method_name);
+                }
+            }
+
+            if inside_target_method && trimmed.contains("return ") {
+                if let Some(ret_idx) = trimmed.find("return ") {
+                    let expr = trimmed[ret_idx + "return ".len()..].trim();
+                    let first_word = expr.split('(').next().unwrap_or("").trim();
+                    if !first_word.is_empty() && first_word.chars().next().map_or(false, |c| c.is_uppercase()) {
+                        return Some(first_word.to_string());
+                    }
+                    if expr.starts_with('"') {
+                        return Some("string".to_string());
+                    }
+                    if expr.starts_with('[') {
+                        return Some("list".to_string());
+                    }
+                    if expr.starts_with('{') {
+                        return Some("dict".to_string());
+                    }
+                }
+            }
+
+            if trimmed.starts_with('}') {
+                inside_target_method = false;
+            }
+        }
+    }
+    None
+}
+
+fn collect_dot_completions_for_class(
+    source: &str,
+    ast: Option<&[Stmt]>,
+    receiver: &str,
+    target_class: Option<&str>,
+    items: &mut Vec<CompletionItem>,
+) {
+    let mut seen = std::collections::HashSet::new();
+
+    // 0. Dynamically populate built-in type methods directly from engine runtime tables (crate::class::BUILTINS)
+    if let Some(tc) = target_class {
+        let tc_lower = tc.to_lowercase();
+        for &builtin in quince::class::BUILTINS {
+            let seed = builtin.seed();
+            if seed.name == tc_lower || (tc_lower == "str" && seed.name == "string") {
+                for &(m_name, _) in seed.methods {
+                    if !seen.contains(m_name) {
+                        seen.insert(m_name.to_string());
+                        items.push(CompletionItem {
+                            label: m_name.to_string(),
+                            kind: Some(CompletionItemKind::METHOD),
+                            detail: Some(format!("builtin method {}.{}()", seed.name, m_name)),
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // 1. Try AST-based class methods if AST is present
+    if let Some(stmts) = ast {
+        for stmt in stmts {
+            if let StmtKind::Class { name, methods, .. } = &stmt.kind {
+                if target_class.is_none() || target_class == Some(name.as_str()) {
+                    for m in methods {
+                        if !seen.contains(&m.name) {
+                            seen.insert(m.name.clone());
+                            items.push(CompletionItem {
+                                label: m.name.clone(),
+                                kind: Some(CompletionItemKind::METHOD),
+                                detail: Some(format!("method {name}.{}()", m.name)),
+                                ..Default::default()
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Text-based scan for class methods & fields matching target_class
+    let mut inside_class = false;
+    let mut current_class_name = String::new();
+    let mut brace_depth = 0;
+    let mut class_brace_depth = 0;
+
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+
+        if trimmed.starts_with("class ") {
+            let parts: Vec<_> = trimmed.split_whitespace().collect();
+            if parts.len() >= 2 {
+                let name = parts[1].split('{').next().unwrap_or("").trim().to_string();
+                current_class_name = name;
+                inside_class = true;
+                class_brace_depth = brace_depth;
+            }
+        }
+
+        let is_matching_class = target_class.map_or(true, |tc| current_class_name == tc);
+
+        if inside_class && is_matching_class {
+            // Class methods
+            if trimmed.starts_with("fn ") || trimmed.starts_with("op ") {
+                let parts: Vec<_> = trimmed.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    let mname = parts[1].split('(').next().unwrap_or("").trim();
+                    if !mname.is_empty() && !seen.contains(mname) && !KEYWORDS.contains(&mname) {
+                        seen.insert(mname.to_string());
+                        items.push(CompletionItem {
+                            label: mname.to_string(),
+                            kind: Some(CompletionItemKind::METHOD),
+                            detail: Some(format!("method {current_class_name}.{mname}()")),
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
+
+            // Fields inside class body (e.g. self.x = x)
+            for part in line.split(|c: char| !(c == '.' || c == '_' || c.is_alphanumeric())) {
+                if let Some(idx) = part.find('.') {
+                    let recv = part[..idx].trim();
+                    let field = part[idx + 1..].trim();
+                    if (recv == "self" || recv == receiver)
+                        && !field.is_empty()
+                        && field.chars().all(|c| c == '_' || c.is_alphanumeric())
+                    {
+                        if !seen.contains(field) && !KEYWORDS.contains(&field) {
+                            seen.insert(field.to_string());
+                            items.push(CompletionItem {
+                                label: field.to_string(),
+                                kind: Some(CompletionItemKind::FIELD),
+                                detail: Some(format!("property {current_class_name}.{field}")),
+                                ..Default::default()
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fields assigned on receiver explicitly (e.g. p.z = 99)
+        for part in line.split(|c: char| !(c == '.' || c == '_' || c.is_alphanumeric())) {
+            if let Some(idx) = part.find('.') {
+                let recv = part[..idx].trim();
+                let field = part[idx + 1..].trim();
+                if recv == receiver
+                    && !field.is_empty()
+                    && field.chars().all(|c| c == '_' || c.is_alphanumeric())
+                {
+                    if !seen.contains(field) && !KEYWORDS.contains(&field) {
+                        seen.insert(field.to_string());
+                        items.push(CompletionItem {
+                            label: field.to_string(),
+                            kind: Some(CompletionItemKind::FIELD),
+                            detail: Some(format!("property {field}")),
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
+        }
+
+        for c in line.chars() {
+            if c == '{' {
+                brace_depth += 1;
+            } else if c == '}' {
+                if brace_depth > 0 {
+                    brace_depth -= 1;
+                }
+                if inside_class && brace_depth <= class_brace_depth {
+                    inside_class = false;
+                }
+            }
+        }
+    }
+}
+
+fn collect_ast_completions(stmts: &[Stmt], items: &mut Vec<CompletionItem>) {
+    for stmt in stmts {
+        match &stmt.kind {
+            StmtKind::Fn { decl, .. } => {
+                items.push(CompletionItem {
+                    label: decl.name.clone(),
+                    kind: Some(CompletionItemKind::FUNCTION),
+                    detail: Some(format!("fn {}(...)", decl.name)),
+                    ..Default::default()
+                });
+                for p in &decl.params {
+                    items.push(CompletionItem {
+                        label: p.name.clone(),
+                        kind: Some(CompletionItemKind::VARIABLE),
+                        detail: Some("parameter".to_string()),
+                        ..Default::default()
+                    });
+                }
+                collect_ast_completions(&decl.body.stmts, items);
+            }
+            StmtKind::Class { name, methods, .. } => {
+                items.push(CompletionItem {
+                    label: name.clone(),
+                    kind: Some(CompletionItemKind::CLASS),
+                    detail: Some(format!("class {name}")),
+                    ..Default::default()
+                });
+                for m in methods {
+                    items.push(CompletionItem {
+                        label: m.name.clone(),
+                        kind: Some(CompletionItemKind::METHOD),
+                        detail: Some(format!("method {}.{}()", name, m.name)),
+                        ..Default::default()
+                    });
+                    for p in &m.params {
+                        items.push(CompletionItem {
+                            label: p.name.clone(),
+                            kind: Some(CompletionItemKind::VARIABLE),
+                            detail: Some("parameter".to_string()),
+                            ..Default::default()
+                        });
+                    }
+                    collect_ast_completions(&m.body.stmts, items);
+                }
+            }
+            StmtKind::Let { name, bind, .. } => {
+                items.push(CompletionItem {
+                    label: name.clone(),
+                    kind: Some(CompletionItemKind::VARIABLE),
+                    detail: Some(format!("{} variable", bind.word())),
+                    ..Default::default()
+                });
+            }
+            StmtKind::If { then, otherwise, .. } => {
+                collect_ast_completions(&then.stmts, items);
+                if let Some(other) = otherwise {
+                    collect_ast_completions(std::slice::from_ref(other.as_ref()), items);
+                }
+            }
+            StmtKind::While { body, .. } => collect_ast_completions(&body.stmts, items),
+            StmtKind::For { var, body, .. } => {
+                items.push(CompletionItem {
+                    label: var.clone(),
+                    kind: Some(CompletionItemKind::VARIABLE),
+                    detail: Some("loop variable".to_string()),
+                    ..Default::default()
+                });
+                collect_ast_completions(&body.stmts, items);
+            }
+            StmtKind::Try { body, handler, binding, .. } => {
+                items.push(CompletionItem {
+                    label: binding.clone(),
+                    kind: Some(CompletionItemKind::VARIABLE),
+                    detail: Some("caught error variable".to_string()),
+                    ..Default::default()
+                });
+                collect_ast_completions(&body.stmts, items);
+                collect_ast_completions(&handler.stmts, items);
+            }
+            StmtKind::Block(block) => collect_ast_completions(&block.stmts, items),
+            _ => {}
+        }
+    }
+}
+
+fn collect_text_variable_completions(source: &str, items: &mut Vec<CompletionItem>) {
+    let mut seen: std::collections::HashSet<String> = items.iter().map(|i| i.label.clone()).collect();
+    let is_ident_start = |c: char| c == '_' || c.is_alphabetic();
+
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        for word in line.split(|c: char| !(c == '_' || c.is_alphanumeric())) {
+            if word.len() > 1
+                && is_ident_start(word.chars().next().unwrap())
+                && !KEYWORDS.contains(&word)
+                && !seen.contains(word)
+            {
+                seen.insert(word.to_string());
+                items.push(CompletionItem {
+                    label: word.to_string(),
+                    kind: Some(CompletionItemKind::VARIABLE),
+                    detail: Some("variable".to_string()),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+}
+
+fn collect_text_dot_completions(source: &str, items: &mut Vec<CompletionItem>) {
+    let mut seen: std::collections::HashSet<String> = items.iter().map(|i| i.label.clone()).collect();
+    let mut inside_class = false;
+    let mut brace_depth = 0;
+    let mut class_brace_depth = 0;
+
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+
+        if trimmed.starts_with("class ") {
+            inside_class = true;
+            class_brace_depth = brace_depth;
+        }
+
+        if inside_class {
+            if trimmed.starts_with("fn ") || trimmed.starts_with("op ") {
+                let parts: Vec<_> = trimmed.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    let name = parts[1].split('(').next().unwrap_or("").trim();
+                    if !name.is_empty() && !seen.contains(name) && !KEYWORDS.contains(&name) {
+                        seen.insert(name.to_string());
+                        items.push(CompletionItem {
+                            label: name.to_string(),
+                            kind: Some(CompletionItemKind::METHOD),
+                            detail: Some("method".to_string()),
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
+        }
+
+        for c in line.chars() {
+            if c == '{' {
+                brace_depth += 1;
+            } else if c == '}' {
+                if brace_depth > 0 {
+                    brace_depth -= 1;
+                }
+                if inside_class && brace_depth <= class_brace_depth {
+                    inside_class = false;
+                }
+            }
+        }
+
+        for part in line.split(|c: char| !(c == '.' || c == '_' || c.is_alphanumeric())) {
+            if let Some(idx) = part.find('.') {
+                let field = &part[idx + 1..];
+                if !field.is_empty() && field.chars().all(|c| c == '_' || c.is_alphanumeric()) {
+                    if !seen.contains(field) && !KEYWORDS.contains(&field) {
+                        seen.insert(field.to_string());
+                        items.push(CompletionItem {
+                            label: field.to_string(),
+                            kind: Some(CompletionItemKind::FIELD),
+                            detail: Some("property".to_string()),
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn get_hover(state: Option<&DocumentState>, pos: Position) -> Option<Hover> {
+    let state = state?;
+    let word = get_word_at_position(&state.text, pos)?;
+
+    // Builtin Hover Docs
+    let doc = match word.as_str() {
+        "print" => Some("**print(...)**\n\nPrints one or more values to standard output."),
+        "type" => Some("**type(val)**\n\nReturns the type representation or type name of a value."),
+        "len" => Some("**len(val)**\n\nReturns the length of a string, list, or dict."),
+        "int" => Some("**int**\n\nBuilt-in integer type and converter function."),
+        "float" => Some("**float**\n\nBuilt-in floating-point number type and converter function."),
+        "string" => Some("**string**\n\nBuilt-in text string type and converter function."),
+        "list" => Some("**list**\n\nBuilt-in dynamic array type and converter function."),
+        "dict" => Some("**dict**\n\nBuilt-in key-value dictionary type."),
+        "self" => Some("**self**\n\nReference to the current class instance inside a method."),
+        "super" => Some("**super**\n\nReference to the parent class inside a method."),
+        _ => None,
+    };
+
+    if let Some(content) = doc {
+        return Some(Hover {
+            contents: HoverContents::Scalar(MarkedString::String(content.to_string())),
+            range: None,
+        });
+    }
+
+    // Check user declarations in AST
+    if let Some(ast) = &state.ast {
+        if let Some(info) = find_decl_hover(ast, &word) {
+            return Some(Hover {
+                contents: HoverContents::Scalar(MarkedString::LanguageString(LanguageString {
+                    language: "quince".to_string(),
+                    value: info,
+                })),
+                range: None,
+            });
+        }
+    }
+
+    None
+}
+
+fn find_decl_hover(stmts: &[Stmt], target: &str) -> Option<String> {
+    for stmt in stmts {
+        match &stmt.kind {
+            StmtKind::Fn { decl, .. } if decl.name == target => {
+                let params: Vec<_> = decl.params.iter().map(|p| p.name.as_str()).collect();
+                return Some(format!("fn {}({})", decl.name, params.join(", ")));
+            }
+            StmtKind::Class { name, parent, .. } if name == target => {
+                if let Some(p) = parent {
+                    return Some(format!("class {name} extends {}", p.name));
+                } else {
+                    return Some(format!("class {name}"));
+                }
+            }
+            StmtKind::Let { name, bind, .. } if name == target => {
+                return Some(format!("{} {name}", bind.word()));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn get_definition(uri: &Url, state: Option<&DocumentState>, pos: Position) -> Option<GotoDefinitionResponse> {
+    let state = state?;
+    let word = get_word_at_position(&state.text, pos)?;
+    let ast = state.ast.as_ref()?;
+
+    if let Some(span) = find_decl_span(ast, &word) {
+        let range = span_to_range(&state.text, span);
+        let location = Location {
+            uri: uri.clone(),
+            range,
+        };
+        return Some(GotoDefinitionResponse::Scalar(location));
+    }
+
+    None
+}
+
+fn find_decl_span(stmts: &[Stmt], target: &str) -> Option<Span> {
+    for stmt in stmts {
+        match &stmt.kind {
+            StmtKind::Fn { decl, .. } if decl.name == target => return Some(stmt.span),
+            StmtKind::Class { name, .. } if name == target => return Some(stmt.span),
+            StmtKind::Let { name, .. } if name == target => return Some(stmt.span),
+            StmtKind::Class { methods, .. } => {
+                for m in methods {
+                    if m.name == target {
+                        return Some(m.body.span);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn find_name_range(source: &str, span: Span, name: &str) -> Option<Range> {
+    let start_idx = (span.start as usize).min(source.len());
+    let end_idx = (span.end as usize).min(source.len());
+    if start_idx >= end_idx {
+        return None;
+    }
+    let text = &source[start_idx..end_idx];
+    let rel_offset = text.find(name)?;
+    let abs_start = start_idx + rel_offset;
+    let abs_end = abs_start + name.len();
+    Some(Range {
+        start: offset_to_position(source, abs_start),
+        end: offset_to_position(source, abs_end),
+    })
+}
+
+fn get_document_symbols(uri: &Url, state: Option<&DocumentState>) -> Vec<SymbolInformation> {
+    let mut symbols = Vec::new();
+    let state = match state {
+        Some(s) => s,
+        None => return symbols,
+    };
+    let ast = match &state.ast {
+        Some(a) => a,
+        None => return symbols,
+    };
+
+    for stmt in ast {
+        let stmt_range = span_to_range(&state.text, stmt.span);
+        match &stmt.kind {
+            StmtKind::Fn { decl, .. } => {
+                #[allow(deprecated)]
+                symbols.push(SymbolInformation {
+                    name: decl.name.clone(),
+                    kind: SymbolKind::FUNCTION,
+                    tags: None,
+                    deprecated: None,
+                    location: Location {
+                        uri: uri.clone(),
+                        range: stmt_range,
+                    },
+                    container_name: None,
+                });
+            }
+            StmtKind::Class { name, methods, .. } => {
+                #[allow(deprecated)]
+                symbols.push(SymbolInformation {
+                    name: name.clone(),
+                    kind: SymbolKind::CLASS,
+                    tags: None,
+                    deprecated: None,
+                    location: Location {
+                        uri: uri.clone(),
+                        range: stmt_range,
+                    },
+                    container_name: None,
+                });
+
+                for m in methods {
+                    let m_range = span_to_range(&state.text, m.body.span);
+                    #[allow(deprecated)]
+                    symbols.push(SymbolInformation {
+                        name: m.name.clone(),
+                        kind: SymbolKind::METHOD,
+                        tags: None,
+                        deprecated: None,
+                        location: Location {
+                            uri: uri.clone(),
+                            range: m_range,
+                        },
+                        container_name: Some(name.clone()),
+                    });
+                }
+            }
+            StmtKind::Let { name, .. } => {
+                #[allow(deprecated)]
+                symbols.push(SymbolInformation {
+                    name: name.clone(),
+                    kind: SymbolKind::VARIABLE,
+                    tags: None,
+                    deprecated: None,
+                    location: Location {
+                        uri: uri.clone(),
+                        range: stmt_range,
+                    },
+                    container_name: None,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    symbols
+}
+
+// --- Semantic Tokens Highlighting ---
+
+#[derive(Clone, Copy)]
+struct RawSemanticToken {
+    line: u32,
+    col: u32,
+    len: u32,
+    token_type: u32,
+    modifiers: u32,
+}
+
+fn get_semantic_tokens(state: Option<&DocumentState>) -> SemanticTokens {
+    let mut raw_tokens = Vec::new();
+    let state = match state {
+        Some(s) => s,
+        None => return SemanticTokens { result_id: None, data: Vec::new() },
+    };
+    let ast = match &state.ast {
+        Some(a) => a,
+        None => return SemanticTokens { result_id: None, data: Vec::new() },
+    };
+
+    collect_stmt_semantic_tokens(&state.text, ast, &mut raw_tokens);
+
+    // Sort tokens by line and column
+    raw_tokens.sort_by(|a, b| a.line.cmp(&b.line).then_with(|| a.col.cmp(&b.col)));
+
+    let mut data = Vec::new();
+    let mut prev_line = 0;
+    let mut prev_col = 0;
+
+    for t in raw_tokens {
+        let delta_line = t.line - prev_line;
+        let delta_start = if delta_line == 0 {
+            t.col - prev_col
+        } else {
+            t.col
+        };
+
+        data.push(SemanticToken {
+            delta_line,
+            delta_start,
+            length: t.len,
+            token_type: t.token_type,
+            token_modifiers_bitset: t.modifiers,
+        });
+
+        prev_line = t.line;
+        prev_col = t.col;
+    }
+
+    SemanticTokens {
+        result_id: None,
+        data,
+    }
+}
+
+fn push_raw_token(
+    source: &str,
+    span: Span,
+    name: &str,
+    token_type: u32,
+    modifiers: u32,
+    raw_tokens: &mut Vec<RawSemanticToken>,
+) {
+    if let Some(range) = find_name_range(source, span, name) {
+        raw_tokens.push(RawSemanticToken {
+            line: range.start.line,
+            col: range.start.character,
+            len: name.len() as u32,
+            token_type,
+            modifiers,
+        });
+    }
+}
+
+fn collect_stmt_semantic_tokens(
+    source: &str,
+    stmts: &[Stmt],
+    raw_tokens: &mut Vec<RawSemanticToken>,
+) {
+    for stmt in stmts {
+        match &stmt.kind {
+            StmtKind::Fn { decl, .. } => {
+                // Function declaration (1), declaration modifier (1)
+                push_raw_token(source, stmt.span, &decl.name, 1, 1, raw_tokens);
+                for param in &decl.params {
+                    // Parameter (4), declaration modifier (1)
+                    push_raw_token(source, stmt.span, &param.name, 4, 1, raw_tokens);
+                }
+                collect_stmt_semantic_tokens(source, &decl.body.stmts, raw_tokens);
+            }
+            StmtKind::Class { name, parent, methods, .. } => {
+                // Class declaration (0), declaration modifier (1)
+                push_raw_token(source, stmt.span, name, 0, 1, raw_tokens);
+                if let Some(p) = parent {
+                    // Parent class reference (0)
+                    push_raw_token(source, stmt.span, &p.name, 0, 0, raw_tokens);
+                }
+                for m in methods {
+                    let m_span = Span { start: m.body.span.start.saturating_sub(40), end: m.body.span.end };
+                    // Method declaration (2), declaration modifier (1)
+                    push_raw_token(source, m_span, &m.name, 2, 1, raw_tokens);
+                    for param in &m.params {
+                        push_raw_token(source, m_span, &param.name, 4, 1, raw_tokens);
+                    }
+                    collect_stmt_semantic_tokens(source, &m.body.stmts, raw_tokens);
+                }
+            }
+            StmtKind::Let { name, value, .. } => {
+                // Variable declaration (3), declaration modifier (1)
+                push_raw_token(source, stmt.span, name, 3, 1, raw_tokens);
+                collect_expr_semantic_tokens(source, value, raw_tokens);
+            }
+            StmtKind::Expr(expr) => collect_expr_semantic_tokens(source, expr, raw_tokens),
+            StmtKind::If { cond, then, otherwise, .. } => {
+                collect_expr_semantic_tokens(source, cond, raw_tokens);
+                collect_stmt_semantic_tokens(source, &then.stmts, raw_tokens);
+                if let Some(other) = otherwise {
+                    collect_stmt_semantic_tokens(source, std::slice::from_ref(other.as_ref()), raw_tokens);
+                }
+            }
+            StmtKind::While { cond, body, .. } => {
+                collect_expr_semantic_tokens(source, cond, raw_tokens);
+                collect_stmt_semantic_tokens(source, &body.stmts, raw_tokens);
+            }
+            StmtKind::For { var, iter, body, .. } => {
+                push_raw_token(source, stmt.span, var, 3, 1, raw_tokens);
+                collect_expr_semantic_tokens(source, iter, raw_tokens);
+                collect_stmt_semantic_tokens(source, &body.stmts, raw_tokens);
+            }
+            StmtKind::Try { body, handler, binding, .. } => {
+                push_raw_token(source, stmt.span, binding, 3, 1, raw_tokens);
+                collect_stmt_semantic_tokens(source, &body.stmts, raw_tokens);
+                collect_stmt_semantic_tokens(source, &handler.stmts, raw_tokens);
+            }
+            StmtKind::Block(block) => collect_stmt_semantic_tokens(source, &block.stmts, raw_tokens),
+            _ => {}
+        }
+    }
+}
+
+fn collect_expr_semantic_tokens(
+    source: &str,
+    expr: &Expr,
+    raw_tokens: &mut Vec<RawSemanticToken>,
+) {
+    match &expr.kind {
+        ExprKind::Call { callee, args } => {
+            if let ExprKind::Var(var) = &callee.kind {
+                // Call (Function / Class constructor)
+                push_raw_token(source, callee.span, &var.name, 1, 0, raw_tokens);
+            } else {
+                collect_expr_semantic_tokens(source, callee, raw_tokens);
+            }
+            for arg in args {
+                collect_expr_semantic_tokens(source, arg, raw_tokens);
+            }
+        }
+        ExprKind::Field { target, name } => {
+            collect_expr_semantic_tokens(source, target, raw_tokens);
+            // Member property / method (5)
+            push_raw_token(source, expr.span, name, 5, 0, raw_tokens);
+        }
+        ExprKind::Var(var) => {
+            if var.name == "self" || var.name == "super" {
+                push_raw_token(source, expr.span, &var.name, 7, 0, raw_tokens); // Keyword (7)
+            } else {
+                push_raw_token(source, expr.span, &var.name, 3, 0, raw_tokens); // Variable (3)
+            }
+        }
+        ExprKind::Binary { lhs, rhs, .. } => {
+            collect_expr_semantic_tokens(source, lhs, raw_tokens);
+            collect_expr_semantic_tokens(source, rhs, raw_tokens);
+        }
+        ExprKind::Unary { rhs, .. } => collect_expr_semantic_tokens(source, rhs, raw_tokens),
+        ExprKind::List(items) => {
+            for item in items {
+                collect_expr_semantic_tokens(source, item, raw_tokens);
+            }
+        }
+        ExprKind::Assign { target, value } => {
+            collect_expr_semantic_tokens(source, target, raw_tokens);
+            collect_expr_semantic_tokens(source, value, raw_tokens);
+        }
+        _ => {}
+    }
+}
+
+fn get_word_at_position(source: &str, pos: Position) -> Option<String> {
+    let line = source.lines().nth(pos.line as usize)?;
+    let col = pos.character as usize;
+    if col > line.len() {
+        return None;
+    }
+
+    let is_ident_char = |c: char| c == '_' || c.is_alphanumeric();
+
+    let start = line[..col].rfind(|c| !is_ident_char(c)).map_or(0, |i| i + 1);
+    let end = line[col..]
+        .find(|c| !is_ident_char(c))
+        .map_or(line.len(), |i| col + i);
+
+    if start < end {
+        Some(line[start..end].to_string())
+    } else {
+        None
+    }
+}
+
 /// Converts Quince byte-offset Span into an LSP Range (0-indexed line and character).
 fn span_to_range(source: &str, span: Span) -> Range {
     let start = offset_to_position(source, span.start as usize);
     let end = offset_to_position(source, span.end as usize);
-    // Ensure range spans at least 1 character if start == end
     if start == end {
         let next_char = offset_to_position(source, (span.end as usize + 1).min(source.len()));
         Range { start, end: next_char }
