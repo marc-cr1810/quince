@@ -31,6 +31,8 @@ pub enum Command {
     },
     /// Start an interactive session
     Repl,
+    /// Run Language Server Protocol (LSP) daemon over stdio
+    Lsp,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]

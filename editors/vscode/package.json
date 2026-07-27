@@ -1,0 +1,58 @@
+{
+  "name": "quince-vscode",
+  "displayName": "Quince Language Support",
+  "description": "Language Server Protocol integration, syntax highlighting, and live development tools for Quince.",
+  "version": "0.1.0",
+  "publisher": "quince-lang",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:quince",
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "quince",
+        "aliases": [
+          "Quince",
+          "quince"
+        ],
+        "extensions": [
+          ".qn"
+        ],
+        "configuration": "./language-configuration.json",
+        "firstLine": "^#!.*\\bquince\\b"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "quince",
+        "scopeName": "source.quince",
+        "path": "./syntaxes/quince.tmLanguage.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "quince.restartServer",
+        "title": "Quince: Restart Language Server"
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "Quince Language Server",
+      "properties": {
+        "quince.lspPath": {
+          "type": "string",
+          "default": "",
+          "description": "Custom path to the Quince LSP executable binary. Defaults to target/debug/quince in the current workspace."
+        }
+      }
+    }
+  }
+}
