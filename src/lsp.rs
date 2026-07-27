@@ -301,6 +301,17 @@ fn get_completions(state: Option<&DocumentState>, pos: Position) -> Vec<Completi
                 ..Default::default()
             });
         }
+
+        // Builtin Error Classes
+        for kind in quince::error::ERROR_KINDS {
+            let class_name = kind.class_name();
+            items.push(CompletionItem {
+                label: class_name.to_string(),
+                kind: Some(CompletionItemKind::CLASS),
+                detail: Some(format!("Built-in error class {class_name}")),
+                ..Default::default()
+            });
+        }
     }
 
     // 2. Traversal for AST & Text Symbols (Classes, Methods, Functions, Variables)
@@ -311,13 +322,14 @@ fn get_completions(state: Option<&DocumentState>, pos: Position) -> Vec<Completi
         }
     } else {
         if let Some(ast) = &state.ast {
-            collect_ast_completions(ast, &mut items);
+            collect_ast_completions(&state.text, ast, pos, &mut items);
         }
-        collect_text_variable_completions(&state.text, &mut items);
+        collect_text_variable_completions(&state.text, pos, &mut items);
     }
 
     items
 }
+
 
 fn is_preceded_by_dot(source: &str, pos: Position) -> bool {
     let line = match source.lines().nth(pos.line as usize) {
@@ -702,8 +714,13 @@ fn collect_dot_completions_for_class(
     }
 }
 
-fn collect_ast_completions(stmts: &[Stmt], items: &mut Vec<CompletionItem>) {
+fn collect_ast_completions(source: &str, stmts: &[Stmt], pos: Position, items: &mut Vec<CompletionItem>) {
     for stmt in stmts {
+        let stmt_pos = offset_to_position(source, stmt.span.start as usize);
+        if stmt_pos.line > pos.line {
+            continue;
+        }
+
         match &stmt.kind {
             StmtKind::Fn { decl, .. } => {
                 items.push(CompletionItem {
@@ -720,7 +737,7 @@ fn collect_ast_completions(stmts: &[Stmt], items: &mut Vec<CompletionItem>) {
                         ..Default::default()
                     });
                 }
-                collect_ast_completions(&decl.body.stmts, items);
+                collect_ast_completions(source, &decl.body.stmts, pos, items);
             }
             StmtKind::Class { name, methods, .. } => {
                 items.push(CompletionItem {
@@ -744,7 +761,7 @@ fn collect_ast_completions(stmts: &[Stmt], items: &mut Vec<CompletionItem>) {
                             ..Default::default()
                         });
                     }
-                    collect_ast_completions(&m.body.stmts, items);
+                    collect_ast_completions(source, &m.body.stmts, pos, items);
                 }
             }
             StmtKind::Let { name, bind, .. } => {
@@ -756,12 +773,12 @@ fn collect_ast_completions(stmts: &[Stmt], items: &mut Vec<CompletionItem>) {
                 });
             }
             StmtKind::If { then, otherwise, .. } => {
-                collect_ast_completions(&then.stmts, items);
+                collect_ast_completions(source, &then.stmts, pos, items);
                 if let Some(other) = otherwise {
-                    collect_ast_completions(std::slice::from_ref(other.as_ref()), items);
+                    collect_ast_completions(source, std::slice::from_ref(other.as_ref()), pos, items);
                 }
             }
-            StmtKind::While { body, .. } => collect_ast_completions(&body.stmts, items),
+            StmtKind::While { body, .. } => collect_ast_completions(source, &body.stmts, pos, items),
             StmtKind::For { var, body, .. } => {
                 items.push(CompletionItem {
                     label: var.clone(),
@@ -769,7 +786,7 @@ fn collect_ast_completions(stmts: &[Stmt], items: &mut Vec<CompletionItem>) {
                     detail: Some("loop variable".to_string()),
                     ..Default::default()
                 });
-                collect_ast_completions(&body.stmts, items);
+                collect_ast_completions(source, &body.stmts, pos, items);
             }
             StmtKind::Try { body, handler, binding, .. } => {
                 items.push(CompletionItem {
@@ -778,20 +795,23 @@ fn collect_ast_completions(stmts: &[Stmt], items: &mut Vec<CompletionItem>) {
                     detail: Some("caught error variable".to_string()),
                     ..Default::default()
                 });
-                collect_ast_completions(&body.stmts, items);
-                collect_ast_completions(&handler.stmts, items);
+                collect_ast_completions(source, &body.stmts, pos, items);
+                collect_ast_completions(source, &handler.stmts, pos, items);
             }
-            StmtKind::Block(block) => collect_ast_completions(&block.stmts, items),
+            StmtKind::Block(block) => collect_ast_completions(source, &block.stmts, pos, items),
             _ => {}
         }
     }
 }
 
-fn collect_text_variable_completions(source: &str, items: &mut Vec<CompletionItem>) {
+fn collect_text_variable_completions(source: &str, pos: Position, items: &mut Vec<CompletionItem>) {
     let mut seen: std::collections::HashSet<String> = items.iter().map(|i| i.label.clone()).collect();
     let is_ident_start = |c: char| c == '_' || c.is_alphabetic();
 
-    for line in source.lines() {
+    for (line_idx, line) in source.lines().enumerate() {
+        if line_idx > pos.line as usize {
+            break;
+        }
         let trimmed = line.trim();
         if trimmed.starts_with('#') {
             continue;
@@ -806,13 +826,14 @@ fn collect_text_variable_completions(source: &str, items: &mut Vec<CompletionIte
                 items.push(CompletionItem {
                     label: word.to_string(),
                     kind: Some(CompletionItemKind::VARIABLE),
-                    detail: Some("variable".to_string()),
+                    detail: Some("identifier".to_string()),
                     ..Default::default()
                 });
             }
         }
     }
 }
+
 
 fn collect_text_dot_completions(source: &str, items: &mut Vec<CompletionItem>) {
     let mut seen: std::collections::HashSet<String> = items.iter().map(|i| i.label.clone()).collect();
@@ -1339,6 +1360,25 @@ fn get_signature_help(state: Option<&DocumentState>, pos: Position) -> Option<Si
         });
     }
 
+    if callee == "Error" || quince::error::ERROR_KINDS.iter().any(|k| k.class_name() == callee) {
+        return Some(SignatureHelp {
+            signatures: vec![SignatureInformation {
+                label: format!("{callee}(message)"),
+                documentation: Some(lsp_types::Documentation::String(
+                    format!("Constructs a `{callee}` instance with a message string."),
+                )),
+                parameters: Some(vec![ParameterInformation {
+                    label: ParameterLabel::Simple("message".to_string()),
+                    documentation: None,
+                }]),
+                active_parameter: Some(active_param),
+            }],
+            active_signature: Some(0),
+            active_parameter: Some(active_param),
+        });
+    }
+
+
     let target_class = if let Some(recv) = &receiver {
         infer_receiver_class(&state.text, recv, pos)
     } else if callee.chars().next().map_or(false, |c| c.is_uppercase()) {
@@ -1741,7 +1781,36 @@ mod tests {
         assert_eq!(help.signatures[0].label, "fn split(arg1, arg2)");
         assert_eq!(help.active_parameter, Some(0));
     }
+
+    #[test]
+    fn signature_help_extracts_error_class_params() {
+        let code = "TypeError(";
+        let state = DocumentState {
+            text: code.to_string(),
+            ast: parse_ast_lenient(code),
+        };
+        let pos = Position { line: 0, character: 10 };
+        let help = get_signature_help(Some(&state), pos).expect("Expected signature help for TypeError");
+        assert_eq!(help.signatures.len(), 1);
+        assert_eq!(help.signatures[0].label, "TypeError(message)");
+        assert_eq!(help.active_parameter, Some(0));
+    }
+
+    #[test]
+    fn completion_excludes_symbols_defined_after_cursor() {
+        let code = "let defined_above = 1\n\nlet defined_below = 2";
+        let state = DocumentState {
+            text: code.to_string(),
+            ast: parse_ast_lenient(code),
+        };
+        let pos = Position { line: 1, character: 0 };
+        let items = get_completions(Some(&state), pos);
+        let labels: Vec<String> = items.into_iter().map(|i| i.label).collect();
+        assert!(labels.contains(&"defined_above".to_string()));
+        assert!(!labels.contains(&"defined_below".to_string()));
+    }
 }
+
 
 
 
