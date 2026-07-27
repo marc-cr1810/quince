@@ -3,16 +3,17 @@ use std::collections::HashMap;
 use lsp_server::{Connection, Message, Notification, Request, Response};
 use lsp_types::{
     notification::{Notification as _, PublishDiagnostics},
-    request::{Completion, GotoDefinition, HoverRequest, Request as _},
+    request::{Completion, GotoDefinition, HoverRequest, Request as _, SignatureHelpRequest},
     CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams, CompletionResponse,
     Diagnostic, DiagnosticSeverity, DidChangeTextDocumentParams, DidOpenTextDocumentParams,
     DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse,
     Hover, HoverContents, HoverParams, HoverProviderCapability, LanguageString, Location,
-    MarkedString, OneOf, Position, PublishDiagnosticsParams, Range, ServerCapabilities,
-    SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokens,
+    MarkedString, OneOf, ParameterInformation, ParameterLabel, Position, PublishDiagnosticsParams,
+    Range, SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokens,
     SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
-    SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities,
-    SymbolInformation, SymbolKind, TextDocumentSyncCapability, TextDocumentSyncKind, Url,
+    SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities,
+    SignatureHelp, SignatureHelpOptions, SignatureHelpParams, SignatureInformation, SymbolInformation,
+    SymbolKind, TextDocumentSyncCapability, TextDocumentSyncKind, Url,
 };
 
 use quince::ast::{Expr, ExprKind, Stmt, StmtKind};
@@ -49,6 +50,11 @@ pub fn run_lsp_server() -> anyhow::Result<()> {
             ..Default::default()
         }),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
+        signature_help_provider: Some(SignatureHelpOptions {
+            trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
+            retrigger_characters: None,
+            work_done_progress_options: Default::default(),
+        }),
         definition_provider: Some(OneOf::Left(true)),
         document_symbol_provider: Some(OneOf::Left(true)),
         semantic_tokens_provider: Some(
@@ -128,6 +134,14 @@ fn handle_request(
             let pos = params.text_document_position_params.position;
             let hover = get_hover(documents.get(uri), pos);
             let resp = Response::new_ok(id, hover);
+            connection.sender.send(Message::Response(resp))?;
+        }
+        SignatureHelpRequest::METHOD => {
+            let params: SignatureHelpParams = serde_json::from_value(req.params)?;
+            let uri = &params.text_document_position_params.text_document.uri;
+            let pos = params.text_document_position_params.position;
+            let help = get_signature_help(documents.get(uri), pos);
+            let resp = Response::new_ok(id, help);
             connection.sender.send(Message::Response(resp))?;
         }
         GotoDefinition::METHOD => {
@@ -1285,6 +1299,378 @@ fn span_to_range(source: &str, span: Span) -> Range {
     }
 }
 
+fn get_signature_help(state: Option<&DocumentState>, pos: Position) -> Option<SignatureHelp> {
+    let state = state?;
+    let (callee, receiver, active_param) = find_call_context(&state.text, pos)?;
+
+    if callee == "print" {
+        return Some(SignatureHelp {
+            signatures: vec![SignatureInformation {
+                label: "print(*args)".to_string(),
+                documentation: Some(lsp_types::Documentation::String(
+                    "Prints values to standard output.".to_string(),
+                )),
+                parameters: Some(vec![ParameterInformation {
+                    label: ParameterLabel::Simple("*args".to_string()),
+                    documentation: None,
+                }]),
+                active_parameter: Some(active_param),
+            }],
+            active_signature: Some(0),
+            active_parameter: Some(active_param),
+        });
+    }
+
+    if callee == "type" {
+        return Some(SignatureHelp {
+            signatures: vec![SignatureInformation {
+                label: "type(value)".to_string(),
+                documentation: Some(lsp_types::Documentation::String(
+                    "Returns the type of a value.".to_string(),
+                )),
+                parameters: Some(vec![ParameterInformation {
+                    label: ParameterLabel::Simple("value".to_string()),
+                    documentation: None,
+                }]),
+                active_parameter: Some(active_param),
+            }],
+            active_signature: Some(0),
+            active_parameter: Some(active_param),
+        });
+    }
+
+    let target_class = if let Some(recv) = &receiver {
+        infer_receiver_class(&state.text, recv, pos)
+    } else if callee.chars().next().map_or(false, |c| c.is_uppercase()) {
+        Some(callee.clone())
+    } else {
+        None
+    };
+
+    let sig_info = find_function_signature(&state.text, state.ast.as_deref(), &callee, target_class.as_deref())?;
+
+    Some(SignatureHelp {
+        signatures: vec![sig_info],
+        active_signature: Some(0),
+        active_parameter: Some(active_param),
+    })
+}
+
+fn find_call_context(source: &str, pos: Position) -> Option<(String, Option<String>, u32)> {
+    let mut total_offset = 0;
+    for (idx, line) in source.lines().enumerate() {
+        if idx == pos.line as usize {
+            total_offset += (pos.character as usize).min(line.len());
+            break;
+        }
+        total_offset += line.len() + 1;
+    }
+    let text_before = &source[..total_offset.min(source.len())];
+
+    let mut depth = 0;
+    let mut comma_count = 0;
+    let mut open_paren_idx = None;
+
+    let chars: Vec<(usize, char)> = text_before.char_indices().collect();
+    for i in (0..chars.len()).rev() {
+        let (_, c) = chars[i];
+        if c == ')' {
+            depth += 1;
+        } else if c == '(' {
+            if depth == 0 {
+                open_paren_idx = Some(chars[i].0);
+                break;
+            } else {
+                depth -= 1;
+            }
+        } else if c == ',' && depth == 0 {
+            comma_count += 1;
+        }
+    }
+
+    let open_idx = open_paren_idx?;
+    let text_before_paren = text_before[..open_idx].trim_end();
+
+    let end_ident = text_before_paren.len();
+    let start_ident = text_before_paren
+        .rfind(|c: char| !(c == '_' || c.is_alphanumeric()))
+        .map_or(0, |i| i + 1);
+
+    if start_ident >= end_ident {
+        return None;
+    }
+    let callee = text_before_paren[start_ident..end_ident].to_string();
+
+    let mut receiver = None;
+    let before_ident = text_before_paren[..start_ident].trim_end();
+    if before_ident.ends_with('.') {
+        let recv_part = before_ident[..before_ident.len() - 1].trim_end();
+        if !recv_part.is_empty() {
+            let mut cleaned = recv_part;
+            if cleaned.ends_with(')') {
+                if let Some(open_paren) = cleaned.rfind('(') {
+                    cleaned = cleaned[..open_paren].trim_end();
+                }
+            }
+
+            if cleaned.ends_with('"') || cleaned.ends_with(']') || cleaned.ends_with('}') {
+                receiver = Some(cleaned.to_string());
+            } else {
+                let rstart = cleaned
+                    .rfind(|c: char| !(c == '_' || c == '.' || c.is_alphanumeric()))
+                    .map_or(0, |i| i + 1);
+                receiver = Some(cleaned[rstart..].to_string());
+            }
+        }
+    }
+
+
+    Some((callee, receiver, comma_count))
+}
+
+fn find_function_signature(
+    source: &str,
+    ast: Option<&[Stmt]>,
+    callee: &str,
+    target_class: Option<&str>,
+) -> Option<SignatureInformation> {
+    // 0. Search Built-in class methods dynamically from engine runtime tables (quince::class::BUILTINS)
+    if let Some(tc) = target_class {
+        let tc_lower = tc.to_lowercase();
+        for &builtin in quince::class::BUILTINS {
+            let seed = builtin.seed();
+            if seed.name == tc_lower || (tc_lower == "str" && seed.name == "string") {
+                for &(m_name, native) in seed.methods {
+                    if m_name == callee {
+                        let params = match native.arity {
+                            Some(0) => vec![],
+                            Some(1) => vec!["arg".to_string()],
+                            Some(n) => (1..=n).map(|i| format!("arg{i}")).collect(),
+                            None => vec!["*args".to_string()],
+                        };
+                        let label = format!("fn {}({})", m_name, params.join(", "));
+                        let param_infos = params
+                            .into_iter()
+                            .map(|p| ParameterInformation {
+                                label: ParameterLabel::Simple(p),
+                                documentation: None,
+                            })
+                            .collect();
+                        return Some(SignatureInformation {
+                            label,
+                            documentation: Some(lsp_types::Documentation::String(
+                                format!("Builtin method `{}.{}()`", seed.name, m_name),
+                            )),
+                            parameters: Some(param_infos),
+                            active_parameter: None,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(stmts) = ast {
+        if let Some(sig) = find_ast_signature(stmts, callee, target_class) {
+            return Some(sig);
+        }
+    }
+
+    find_text_signature(source, callee, target_class)
+}
+
+
+
+fn find_ast_signature(
+    stmts: &[Stmt],
+    callee: &str,
+    target_class: Option<&str>,
+) -> Option<SignatureInformation> {
+    for stmt in stmts {
+        match &stmt.kind {
+            StmtKind::Fn { decl, .. } => {
+                if target_class.is_none() && decl.name == callee {
+                    let params: Vec<String> = decl.params.iter().map(|p| p.name.clone()).collect();
+                    let label = format!("fn {}({})", decl.name, params.join(", "));
+                    let param_infos = params
+                        .into_iter()
+                        .map(|p| ParameterInformation {
+                            label: ParameterLabel::Simple(p),
+                            documentation: None,
+                        })
+                        .collect();
+                    return Some(SignatureInformation {
+                        label,
+                        documentation: None,
+                        parameters: Some(param_infos),
+                        active_parameter: None,
+                    });
+                }
+            }
+            StmtKind::Class { name, methods, .. } => {
+                if target_class.is_none() && name == callee {
+                    for m in methods {
+                        if m.name == "init" {
+                            let params: Vec<String> = m.params.iter().filter(|p| !p.receiver && p.name != "self").map(|p| p.name.clone()).collect();
+                            let label = format!("{}({})", name, params.join(", "));
+                            let param_infos = params
+                                .into_iter()
+                                .map(|p| ParameterInformation {
+                                    label: ParameterLabel::Simple(p),
+                                    documentation: None,
+                                })
+                                .collect();
+                            return Some(SignatureInformation {
+                                label,
+                                documentation: None,
+                                parameters: Some(param_infos),
+                                active_parameter: None,
+                            });
+                        }
+                    }
+                    return Some(SignatureInformation {
+                        label: format!("{}()", name),
+                        documentation: None,
+                        parameters: Some(vec![]),
+                        active_parameter: None,
+                    });
+                }
+
+                if target_class.map_or(true, |tc| tc == name.as_str()) {
+                    for m in methods {
+                        if m.name == callee {
+                            let params: Vec<String> = m.params.iter().filter(|p| !p.receiver && p.name != "self").map(|p| p.name.clone()).collect();
+                            let label = format!("fn {}({})", m.name, params.join(", "));
+                            let param_infos = params
+                                .into_iter()
+                                .map(|p| ParameterInformation {
+                                    label: ParameterLabel::Simple(p),
+                                    documentation: None,
+                                })
+                                .collect();
+                            return Some(SignatureInformation {
+                                label,
+                                documentation: None,
+                                parameters: Some(param_infos),
+                                active_parameter: None,
+                            });
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn find_text_signature(
+    source: &str,
+    callee: &str,
+    target_class: Option<&str>,
+) -> Option<SignatureInformation> {
+    let mut inside_class = false;
+    let mut current_class = String::new();
+
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("class ") {
+            let parts: Vec<_> = trimmed.split_whitespace().collect();
+            if parts.len() >= 2 {
+                current_class = parts[1].split('{').next().unwrap_or("").trim().to_string();
+                inside_class = true;
+            }
+        }
+
+        if target_class.is_some() && current_class == callee && (trimmed.starts_with("op init") || trimmed.starts_with("init")) {
+            let params = extract_params_from_line(trimmed);
+            let filtered_params: Vec<String> = params.into_iter().filter(|p| p != "self").collect();
+            let label = format!("{}({})", callee, filtered_params.join(", "));
+            let param_infos = filtered_params
+                .into_iter()
+                .map(|p| ParameterInformation {
+                    label: ParameterLabel::Simple(p),
+                    documentation: None,
+                })
+                .collect();
+            return Some(SignatureInformation {
+                label,
+                documentation: None,
+                parameters: Some(param_infos),
+                active_parameter: None,
+            });
+        }
+
+        if trimmed.starts_with("fn ") || trimmed.starts_with("op ") {
+            let parts: Vec<_> = trimmed.split_whitespace().collect();
+            if parts.len() >= 2 {
+                let name = parts[1].split('(').next().unwrap_or("").trim();
+                if name == callee {
+                    let is_matching = if inside_class {
+                        target_class.map_or(true, |tc| tc == current_class)
+                    } else {
+                        target_class.is_none()
+                    };
+
+                    if is_matching {
+                        let params = extract_params_from_line(trimmed);
+                        let filtered_params: Vec<String> = params.into_iter().filter(|p| p != "self").collect();
+                        let label = format!("fn {}({})", callee, filtered_params.join(", "));
+                        let param_infos = filtered_params
+                            .into_iter()
+                            .map(|p| ParameterInformation {
+                                label: ParameterLabel::Simple(p),
+                                documentation: None,
+                            })
+                            .collect();
+                        return Some(SignatureInformation {
+                            label,
+                            documentation: None,
+                            parameters: Some(param_infos),
+                            active_parameter: None,
+                        });
+                    }
+                }
+            }
+        }
+
+        if trimmed.starts_with('}') {
+            inside_class = false;
+        }
+    }
+
+    if callee.chars().next().map_or(false, |c| c.is_uppercase()) {
+        return Some(SignatureInformation {
+            label: format!("{}()", callee),
+            documentation: None,
+            parameters: Some(vec![]),
+            active_parameter: None,
+        });
+    }
+
+    None
+}
+
+fn extract_params_from_line(line: &str) -> Vec<String> {
+    let open = match line.find('(') {
+        Some(i) => i,
+        None => return vec![],
+    };
+    let close = match line.find(')') {
+        Some(i) => i,
+        None => line.len(),
+    };
+    if open >= close {
+        return vec![];
+    }
+    let param_str = &line[open + 1..close];
+    param_str
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 fn offset_to_position(source: &str, offset: usize) -> Position {
     let offset = offset.min(source.len());
     let line = source[..offset].matches('\n').count() as u32;
@@ -1295,3 +1681,69 @@ fn offset_to_position(source: &str, offset: usize) -> Position {
         character: col,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signature_help_extracts_class_constructor_params() {
+        let code = "class Point {\n    op init(x, y) {\n        self.x = x\n        self.y = y\n    }\n}\n\nlet p = Point(3, ";
+        let state = DocumentState {
+            text: code.to_string(),
+            ast: parse_ast_lenient(code),
+        };
+        let pos = Position { line: 7, character: 17 }; // Cursor right after `, `
+        let help = get_signature_help(Some(&state), pos).expect("Expected signature help");
+        assert_eq!(help.signatures.len(), 1);
+        assert_eq!(help.signatures[0].label, "Point(x, y)");
+        assert_eq!(help.active_parameter, Some(1));
+    }
+
+    #[test]
+    fn signature_help_extracts_method_params() {
+        let code = "class Point {\n    fn scaled(k) {\n        return Point(self.x * k, self.y * k)\n    }\n}\n\nlet p = Point(3, 4)\np.scaled(";
+        let state = DocumentState {
+            text: code.to_string(),
+            ast: parse_ast_lenient(code),
+        };
+        let pos = Position { line: 7, character: 9 };
+        let help = get_signature_help(Some(&state), pos).expect("Expected signature help");
+        assert_eq!(help.signatures.len(), 1);
+        assert_eq!(help.signatures[0].label, "fn scaled(k)");
+        assert_eq!(help.active_parameter, Some(0));
+    }
+
+    #[test]
+    fn signature_help_extracts_builtin_method_params() {
+        let code = "let text = \"hello world\"\ntext.split(";
+        let state = DocumentState {
+            text: code.to_string(),
+            ast: parse_ast_lenient(code),
+        };
+        let pos = Position { line: 1, character: 11 };
+        let help = get_signature_help(Some(&state), pos).expect("Expected signature help");
+        assert_eq!(help.signatures.len(), 1);
+        assert_eq!(help.signatures[0].label, "fn split(arg1, arg2)");
+        assert_eq!(help.active_parameter, Some(0));
+    }
+
+    #[test]
+    fn signature_help_extracts_literal_string_method_params() {
+        let code = "\"test\".split(";
+        let state = DocumentState {
+            text: code.to_string(),
+            ast: parse_ast_lenient(code),
+        };
+        let pos = Position { line: 0, character: 13 };
+        let help = get_signature_help(Some(&state), pos).expect("Expected signature help for literal string method");
+        assert_eq!(help.signatures.len(), 1);
+        assert_eq!(help.signatures[0].label, "fn split(arg1, arg2)");
+        assert_eq!(help.active_parameter, Some(0));
+    }
+}
+
+
+
+
+
