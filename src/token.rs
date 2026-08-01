@@ -227,3 +227,99 @@ pub struct Token {
     /// itself, which would otherwise have to be skipped at every match site.
     pub newline_before: bool,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The VS Code grammar, read at compile time so a renamed or deleted file
+    /// fails the build rather than the assertion.
+    const GRAMMAR: &str = include_str!("../editors/vscode/syntaxes/quince.tmLanguage.json");
+
+    /// Every whole word the grammar highlights.
+    ///
+    /// Each keyword rule is an alternation of literal words — `\b(fn|op|class)\b`
+    /// — so the words are whatever sits between `\b(` and the `)` that closes it.
+    /// Alternatives that are not plain words belong to the character-class rules
+    /// and are dropped.
+    fn highlighted_words(grammar: &str) -> Vec<String> {
+        let json: serde_json::Value =
+            serde_json::from_str(grammar).expect("the grammar is JSON");
+        let mut patterns = Vec::new();
+        collect_matches(&json, &mut patterns);
+
+        let mut words = Vec::new();
+        for pattern in patterns {
+            let mut rest = pattern.as_str();
+            while let Some(open) = rest.find("\\b(") {
+                let inner = &rest[open + 3..];
+                let Some(close) = inner.find(')') else { break };
+                words.extend(
+                    inner[..close]
+                        .split('|')
+                        .filter(|word| {
+                            !word.is_empty() && word.chars().all(|c| c.is_ascii_alphabetic())
+                        })
+                        .map(String::from),
+                );
+                rest = &inner[close..];
+            }
+        }
+        words
+    }
+
+    fn collect_matches(node: &serde_json::Value, into: &mut Vec<String>) {
+        match node {
+            serde_json::Value::Object(map) => {
+                for (key, value) in map {
+                    if key == "match"
+                        && let Some(pattern) = value.as_str()
+                    {
+                        into.push(pattern.to_string());
+                    }
+                    collect_matches(value, into);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    collect_matches(item, into);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The one consumer of [`KEYWORDS`] that cannot read it.
+    ///
+    /// VS Code parses `quince.tmLanguage.json` without ever running our code, so
+    /// the words in it are a copy, and the copy had drifted by three — `extend`,
+    /// `complete`, and `sealed` were reserved by the lexer and plain identifiers
+    /// to the highlighter. Generating the file would be the obvious fix and is
+    /// the wrong one: the grammar sorts keywords into four rules by category, and
+    /// only a person can say which category a new word belongs to. So the copy
+    /// stays a copy and this says when it is wrong.
+    #[test]
+    fn the_editor_grammar_spells_every_keyword() {
+        let highlighted = highlighted_words(GRAMMAR);
+        for keyword in KEYWORDS {
+            assert!(
+                highlighted.iter().any(|word| word == keyword),
+                "`{keyword}` is reserved but the VS Code grammar does not highlight it — \
+                 add it to editors/vscode/syntaxes/quince.tmLanguage.json"
+            );
+        }
+    }
+
+    /// And nothing the grammar highlights has stopped being a keyword, which is
+    /// the same drift in the other direction: a word removed from the language
+    /// keeps its colour and reads as reserved when it is not.
+    #[test]
+    fn the_editor_grammar_highlights_nothing_else() {
+        for word in highlighted_words(GRAMMAR) {
+            assert!(
+                KEYWORDS.contains(&word.as_str()),
+                "the VS Code grammar highlights `{word}`, which is not a reserved word"
+            );
+        }
+    }
+}

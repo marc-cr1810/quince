@@ -2351,9 +2351,22 @@ because a `.tmLanguage.json` is data VS Code reads without ever running our code
 drifted exactly as far as that predicts: `extend`, `complete`, and `sealed` were reserved by
 the lexer and unknown to the highlighter, so three keywords rendered as plain identifiers in
 the editor the language ships an extension for. The list is now correct and it is still a
-copy, which means it will drift again. Generating it from `KEYWORDS` at build time is the
-fix, and it waits for v0.6 — the milestone that owns the tooling — rather than being smuggled
-into a release commit.
+copy, which means it will drift again.
+
+The release commit predicted the fix and got it wrong, which is worth keeping rather than
+quietly correcting. It said to generate the file from `KEYWORDS` at build time. But the
+grammar sorts keywords into four rules by category — control, declaration, the two
+receivers, the literals — and a generator would have to be told which category a new word
+belongs to, which is the only part of the job that needed a person. The generator saves
+nothing and adds a build step that writes into the source tree.
+
+What went in instead is a pair of tests beside `KEYWORDS`, and they cost eleven lines
+between them: one asserts every reserved word is highlighted, the other that every
+highlighted word is still reserved. The second direction is not symmetry for its own sake —
+a word removed from the language keeps its colour and goes on reading as reserved, which is
+the same drift wearing the other face. Both were checked by breaking the grammar and
+watching them fail, because the first of them is a test that would have passed for the whole
+time the bug existed had it been written to iterate the grammar instead of the list.
 
 What it does *not* do is type inference. A document mid-keystroke usually does not parse,
 and an editor that goes blank between two valid states is worse than one that guesses, so
