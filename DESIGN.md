@@ -2789,6 +2789,9 @@ The day a real type checker exists it should take both.
 
 **v0.6 — modules, a library, and a language server that knows rather than guesses**
 
+**Done.** Modules, the standard library, the inference pass, doc comments, and two
+editing surfaces that read the language instead of guessing at it.
+
 The milestone was scoped as tooling and a library, on the assumption that the module
 system stayed deferred and the library worked around its absence with namespace objects.
 It did not stay deferred. `import` went in instead, for files as well as for the stdlib,
@@ -2824,10 +2827,25 @@ pass that gave up there would be useless at the only moment it is wanted; and th
 corpus check — every claim against the runtime class of the value that name ended up
 holding — is what makes the whole thing more than a set of assertions about itself.
 
-The natives were the gap it shipped with, and they are closed: `Native` now records what
-it returns and what it is for, so a call into the library is understood and the editor's
-documentation lives beside the code it describes. Cross-file inference is still after it,
-not before.
+The natives were the gap it shipped with, and they are closed: `Native` records what it
+returns, what it is for, and what its parameters are called, so a call into the library is
+understood and the editor's documentation lives beside the code it describes.
+
+**Doc comments went in last and were not on the list.** `##` above a declaration, with
+`@param`, `@return` and `@throws` — and the tags checked against the declaration they sit
+above, which is the whole reason the format is parsed rather than stored. Documentation is
+a second copy of the signature and a second copy drifts; this milestone found that defect
+three separate times (the TextMate grammar, the builtin completions, and then every doc
+comment nobody would ever have checked) before deciding to refuse it at the source.
+
+**Every guess is gone from both surfaces.** The editor's text heuristics went once the
+library made them measurably wrong — `"a,b".split(",")` is a list, and reading the literal
+at the front of the line called it a string. The REPL's three hand-maintained maps went
+for the opposite reason: it holds values, so there was never anything to infer. What is
+left is `cursor.rs`, which reads structure and is deliberately incapable of deciding what
+anything means.
+
+Cross-file inference is still after it, not before.
 
 The keyword guard added at the start of the milestone paid for itself twice inside it:
 once when `import` arrived, and once when `from` stopped being reserved. Both times it
@@ -2840,6 +2858,14 @@ missing `bool`. The grammar cannot read `KEYWORDS` — VS Code parses it without
 our code — so it is guarded by a test. The completions can, so they now do. That is the
 rule: point at the list where you can, and where you cannot, fail loudly when the copy is
 wrong.
+
+**What it cost to finish, and what that bought.** The milestone ran long, and the trade
+named at the start — cut library domains, never the module system half-built — never had
+to be taken. What did happen is that finishing revealed two things nobody had listed: that
+the editor's guesses were wrong rather than merely approximate, and that a language with a
+library needs somewhere to write down what the library is for. Both were found by
+measuring rather than by argument, which is the reason the tranche has three new guards
+and not three new opinions.
 
 The milestone is chosen because the limit on using Quince is no longer the language. v0.5
 closed the expressiveness gaps that were worth closing — a class can answer for anything a

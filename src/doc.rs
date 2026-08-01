@@ -481,6 +481,29 @@ mod tests {
         assert!(err.message.contains("`@return` does not describe a binding"), "{}", err.message);
     }
 
+    /// The grammar that cannot read [`TAGS`].
+    ///
+    /// The same copy the keywords are under, guarded the same way and for the
+    /// reason that one exists: VS Code parses the file without running our
+    /// code, so a tag added here and not there is a tag the editor renders as
+    /// prose while the parser accepts it.
+    #[test]
+    fn the_editor_grammar_spells_every_documentation_tag() {
+        const GRAMMAR: &str =
+            include_str!("../editors/vscode/syntaxes/quince.tmLanguage.json");
+        for tag in TAGS {
+            let written = format!("{}|", tag.name());
+            let last = format!("{})", tag.name());
+            assert!(
+                GRAMMAR.contains(&written) || GRAMMAR.contains(&last),
+                "`@{}` is a documentation tag and the VS Code grammar does not \
+                 highlight it — add it to the `comments` rule in \
+                 editors/vscode/syntaxes/quince.tmLanguage.json",
+                tag.name()
+            );
+        }
+    }
+
     #[test]
     fn every_listed_tag_round_trips_through_its_name() {
         for tag in TAGS {

@@ -15,6 +15,19 @@
     "comments": {
       "patterns": [
         {
+          "comment": "`##` at the start of a line is documentation and is attached to the declaration below it; `#` anywhere is a comment and is discarded. Listed first so the more specific rule wins.",
+          "name": "comment.line.documentation.quince",
+          "begin": "^\\s*##",
+          "end": "$",
+          "patterns": [
+            {
+              "comment": "The tag set is closed — see `Tag` in src/doc.rs, which `the_editor_grammar_spells_every_documentation_tag` holds this against.",
+              "name": "keyword.other.documentation.quince",
+              "match": "@(param|return|throws)\\b"
+            }
+          ]
+        },
+        {
           "name": "comment.line.number-sign.quince",
           "match": "#.*$"
         }

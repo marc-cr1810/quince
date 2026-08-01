@@ -50,7 +50,17 @@ impl Snapshot {
         let mut snapshot = Snapshot::default();
         for (name, value) in interp.get_globals() {
             let class = value.type_name(&interp.heap).to_string();
-            let mut symbol = Symbol::new(&name, kind_of(&value), Type::class(&class));
+            // A native keeps what its table records, so `from math import floor`
+            // leaves `floor` with the parameters and documentation `math.floor`
+            // has. Anything else is named by the class of the value bound.
+            let mut symbol = match &value {
+                Value::Native(native) => {
+                    let mut symbol = quince::infer::symbol_of_native(native, Kind::Function);
+                    symbol.name = name.clone();
+                    symbol
+                }
+                _ => Symbol::new(&name, kind_of(&value), Type::class(&class)),
+            };
             // Calling a class makes one of it, which is what `Point(` needs to
             // know to offer the parameters of `Point`'s `init`.
             match &value {
@@ -264,6 +274,24 @@ fn kind_of(value: &Value) -> Kind {
     }
 }
 
+/// What may be written at an `import` position.
+///
+/// Off `stdlib::MODULES` both times, which is the list `import` itself reads —
+/// so a module or a member added to the library is offered without this being
+/// touched.
+fn import_candidates(site: &cursor::ImportSite) -> Vec<String> {
+    match site {
+        cursor::ImportSite::Module => quince::stdlib::MODULES
+            .iter()
+            .map(|module| module.name.to_string())
+            .collect(),
+        cursor::ImportSite::Member(module) => quince::infer::module_symbols(module)
+            .into_iter()
+            .map(|symbol| symbol.name)
+            .collect(),
+    }
+}
+
 /// The text before the dot the cursor sits after, if it does.
 fn before_dot(line: &str, start: usize) -> Option<&str> {
     if start == 0 || line.as_bytes().get(start - 1) != Some(&b'.') {
@@ -317,6 +345,20 @@ impl Completer for QuinceHelper {
                     matches.push(Pair {
                         display: cmd.to_string(),
                         replacement: cmd.to_string(),
+                    });
+                }
+            }
+            return Ok((start, matches));
+        }
+
+        // An `import` line wants modules or a module's members, and which one
+        // depends on how far along it is.
+        if let Some(site) = cursor::import_site(&line[..start.min(line.len())]) {
+            for candidate in import_candidates(&site) {
+                if candidate.starts_with(word) {
+                    matches.push(Pair {
+                        display: candidate.clone(),
+                        replacement: candidate,
                     });
                 }
             }
@@ -392,6 +434,8 @@ impl Hinter for QuinceHelper {
         let mut candidates = Vec::new();
         if word.starts_with(':') {
             candidates.extend(META_COMMANDS.iter().copied().map(String::from));
+        } else if let Some(site) = cursor::import_site(&line[..start.min(line.len())]) {
+            candidates.extend(import_candidates(&site));
         } else if let Some(before) = before_dot(line, start) {
             candidates.extend(self.members(before).into_iter().map(|member| member.name));
         } else {
@@ -1164,6 +1208,84 @@ mod tests {
             .collect();
         names.sort();
         names
+    }
+
+    /// What a REPL that has run `code` would offer for `line`.
+    fn completed(code: &str, line: &str) -> Vec<String> {
+        let mut interp = Interp::new();
+        let program = quince::compile(code).expect("the test program compiles");
+        interp.run_repl(&program).expect("it runs");
+        let helper = QuinceHelper {
+            use_color: false,
+            snapshot: Arc::new(Mutex::new(Snapshot::of(&interp))),
+        };
+        let history = rustyline::history::MemHistory::new();
+        let context = rustyline::Context::new(&history);
+        let (_, matches) = helper
+            .complete(line, line.len(), &context)
+            .expect("completion works");
+        matches.into_iter().map(|pair| pair.replacement).collect()
+    }
+
+    #[test]
+    fn an_import_line_offers_modules_then_their_members() {
+        // Two positions wanting two lists. `from math import ` used to offer
+        // `math, io, time, random` — the four things that cannot go there.
+        let modules = completed("let unused = 1", "import ");
+        assert!(modules.contains(&"math".to_string()), "{modules:?}");
+        assert!(!modules.contains(&"floor".to_string()), "{modules:?}");
+
+        let members = completed("let unused = 1", "from math import ");
+        assert!(members.contains(&"floor".to_string()), "{members:?}");
+        assert!(members.contains(&"pi".to_string()), "{members:?}");
+        assert!(!members.contains(&"math".to_string()), "{members:?}");
+        // `io`'s members belong to `io`.
+        assert!(!members.contains(&"read".to_string()), "{members:?}");
+
+        // And every name after the first, so a list keeps completing.
+        let more = completed("let unused = 1", "from math import abs, ");
+        assert!(more.contains(&"floor".to_string()), "{more:?}");
+
+        // Still naming the module, so still modules.
+        let naming = completed("let unused = 1", "from ma");
+        assert!(naming.contains(&"math".to_string()), "{naming:?}");
+    }
+
+    #[test]
+    fn an_imported_name_keeps_what_the_module_knew_about_it() {
+        let mut interp = Interp::new();
+        let program = quince::compile("from math import floor, pi").expect("it compiles");
+        interp.run_repl(&program).expect("it runs");
+        let snapshot = Snapshot::of(&interp);
+
+        let floor = snapshot
+            .globals
+            .iter()
+            .find(|symbol| symbol.name == "floor")
+            .expect("`floor` is bound");
+        // The short spelling is not the worse one: `floor` carries the
+        // parameters and documentation `math.floor` carries.
+        assert_eq!(floor.signature(), "fn floor(n): int");
+        assert!(floor.doc.is_some(), "an imported native keeps its documentation");
+
+        let pi = snapshot
+            .globals
+            .iter()
+            .find(|symbol| symbol.name == "pi")
+            .expect("`pi` is bound");
+        assert_eq!(pi.signature(), "pi: float");
+    }
+
+    #[test]
+    fn a_from_import_does_not_bind_the_module() {
+        // `from math import floor` binds `floor` and nothing else, so `math.`
+        // reaches nothing — which is what the language does, and the completion
+        // list says so rather than papering over it.
+        let names = completed("from math import floor", "math.");
+        assert!(names.is_empty(), "{names:?}");
+
+        let bound = completed("import io", "io.");
+        assert!(bound.contains(&"read".to_string()), "{bound:?}");
     }
 
     #[test]

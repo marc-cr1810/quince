@@ -18,7 +18,7 @@ use lsp_types::{
 
 use quince::ast::{Expr, ExprKind, Stmt, StmtKind};
 use quince::error::QuinceError;
-use crate::cursor::{path_ending_at, trailing_literal_type};
+use crate::cursor::{ImportSite, import_site, path_ending_at, trailing_literal_type};
 use quince::doc::Doc;
 use quince::infer::{self, Kind, Symbol, Type, Types};
 use quince::token::{Span, KEYWORDS};
@@ -399,30 +399,42 @@ fn get_completions(state: Option<&DocumentState>, pos: Position) -> Vec<Completi
             .collect();
     }
 
-    // After `import` or `from`, the only thing that can follow is a module, so
-    // that is the only thing offered. Offering the stdlib names everywhere would
-    // suggest `math` to a file that never imported it, where the name means
-    // nothing — the point of `import` is that a module is not there until asked
-    // for, and a completion list that forgets it undoes exactly that.
-    if at_import(&state.text, pos) {
-        return quince::stdlib::MODULES
-            .iter()
-            .map(|module| CompletionItem {
-                label: module.name.to_string(),
-                kind: Some(CompletionItemKind::MODULE),
-                detail: Some(format!(
-                    "{} — {}",
-                    module.name,
-                    module
-                        .members
-                        .iter()
-                        .map(|(name, _)| *name)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )),
-                ..Default::default()
-            })
-            .collect();
+    // An `import` line wants one of two lists and they are not the same list.
+    // A module is not there until asked for — that is the whole point of
+    // `import`, and offering `math` to a file that never imported it undoes it
+    // — while after `from math import` the only things that can follow are the
+    // names `math` declares.
+    if let Some(line) = state.text.lines().nth(pos.line as usize) {
+        let col = (pos.character as usize).min(line.len());
+        match import_site(&line[..col]) {
+            Some(ImportSite::Module) => {
+                return quince::stdlib::MODULES
+                    .iter()
+                    .map(|module| CompletionItem {
+                        label: module.name.to_string(),
+                        kind: Some(CompletionItemKind::MODULE),
+                        detail: Some(format!(
+                            "{} — {}",
+                            module.name,
+                            module
+                                .members
+                                .iter()
+                                .map(|(name, _)| *name)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )),
+                        ..Default::default()
+                    })
+                    .collect();
+            }
+            Some(ImportSite::Member(module)) => {
+                return quince::infer::module_symbols(&module)
+                    .iter()
+                    .map(item_of)
+                    .collect();
+            }
+            None => {}
+        }
     }
 
     // The keywords, the globals, and everything the pass found in scope here.
@@ -446,25 +458,6 @@ fn get_completions(state: Option<&DocumentState>, pos: Position) -> Vec<Completi
         items.extend(types.in_scope(offset).iter().map(item_of));
     }
     items
-}
-
-/// Whether the cursor sits where a module name goes.
-///
-/// The text before it on this line is `import`, or `from`, or a `from` and the
-/// module being imported from — which is where a member name goes rather than a
-/// module, but the members are what the module's own completion lists anyway.
-fn at_import(source: &str, pos: Position) -> bool {
-    let Some(line) = source.lines().nth(pos.line as usize) else {
-        return false;
-    };
-    let before = &line[..(pos.character as usize).min(line.len())];
-    let mut words = before.split_whitespace();
-    match (words.next(), words.next()) {
-        (Some("import"), None) => true,
-        (Some("from"), None) => false,
-        (Some("from"), Some(_)) => true,
-        _ => false,
-    }
 }
 
 fn is_preceded_by_dot(source: &str, pos: Position) -> bool {
@@ -1069,6 +1062,55 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_import_line_offers_modules_then_their_members() {
+        let offered = |line: &str| -> Vec<String> {
+            let state = typed(&["", line]);
+            get_completions(Some(&state), end_of(line))
+                .into_iter()
+                .map(|item| item.label)
+                .collect()
+        };
+
+        let modules = offered("import ");
+        assert!(modules.contains(&"math".to_string()), "{modules:?}");
+        assert!(!modules.contains(&"floor".to_string()), "{modules:?}");
+
+        // This used to offer `math, io, time, random` — the four names that
+        // cannot follow `import` on a `from` line.
+        let members = offered("from math import ");
+        assert!(members.contains(&"floor".to_string()), "{members:?}");
+        assert!(!members.contains(&"math".to_string()), "{members:?}");
+        assert!(!members.contains(&"read".to_string()), "{members:?}");
+
+        assert!(offered("from math import abs, ").contains(&"floor".to_string()));
+        assert!(offered("from ma").contains(&"math".to_string()));
+    }
+
+    #[test]
+    fn an_imported_name_keeps_what_the_module_knew_about_it() {
+        let src = "from math import floor\n";
+        let state = typed(&[src]);
+        // `floor` on the import line, which is where it is bound.
+        let pos = Position { line: 0, character: 18 };
+        assert_eq!(hovered_at(&state, pos).as_deref(), Some("fn floor(n): int"));
+
+        let code = "from math import floor\nfloor(";
+        let state = typed(&[src, code]);
+        let help = get_signature_help(Some(&state), end_of(code)).expect("an import helps");
+        assert_eq!(help.signatures[0].label, "fn floor(n): int");
+    }
+
+    #[test]
+    fn a_from_import_does_not_bind_the_module() {
+        // `from math import floor` binds `floor` and nothing else. `math.`
+        // reaching nothing is the language's answer, not a gap.
+        let before = "from math import floor\nmath";
+        let code = &format!("{before}.");
+        let state = typed(&[before, code]);
+        assert!(get_completions(Some(&state), end_of(code)).is_empty());
+    }
+
+    #[test]
     fn signature_help_extracts_class_constructor_params() {
         let before = "class Point {\n    op init(x, y) {\n        self.x = x\n        self.y = y\n    }\n}\n";
         let code = &format!("{before}\nlet p = Point(3, ");
@@ -1253,8 +1295,11 @@ mod tests {
 
     /// The code block a hover leads with, which is the signature.
     fn hovered(code: &str, pos: Position) -> Option<String> {
-        let state = DocumentState::new(code.to_string(), None);
-        let hover = get_hover(Some(&state), pos)?;
+        hovered_at(&DocumentState::new(code.to_string(), None), pos)
+    }
+
+    fn hovered_at(state: &DocumentState, pos: Position) -> Option<String> {
+        let hover = get_hover(Some(state), pos)?;
         let HoverContents::Array(parts) = hover.contents else {
             panic!("expected an array of hover contents");
         };

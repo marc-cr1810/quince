@@ -140,3 +140,41 @@ pub fn trailing_literal_type(text: &str) -> Type {
     }
     Type::Unknown
 }
+
+/// What may follow the cursor on an `import` line.
+pub enum ImportSite {
+    /// A module name — after `import`, and after `from`.
+    Module,
+    /// A name the named module declares, after `from … import`.
+    Member(String),
+}
+
+/// Where on an `import` line the cursor is, if it is on one.
+///
+/// The two positions want different lists and used to get the same one: `from
+/// math import ` offered `math, io, time, random`, which are the four things
+/// that cannot go there. The comment above it even said the members were what
+/// a module's completion listed anyway, which was not true and had never been.
+///
+/// `text` is the line up to the cursor. Whether it ends in whitespace is what
+/// separates a word being typed from one about to be — `from ma` is still
+/// naming a module and `from math ` is waiting for the word `import`.
+pub fn import_site(text: &str) -> Option<ImportSite> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let editing = !text.ends_with(char::is_whitespace);
+
+    match words.as_slice() {
+        // `import ` and `import ma`.
+        ["import"] if !editing => Some(ImportSite::Module),
+        ["import", _] if editing => Some(ImportSite::Module),
+        // `from ` and `from ma`.
+        ["from"] if !editing => Some(ImportSite::Module),
+        ["from", _] if editing => Some(ImportSite::Module),
+        // `from math import `, and every name after it. Not while `import`
+        // itself is still being typed, which is what the length check is for.
+        ["from", module, "import", ..] if !(words.len() == 3 && editing) => {
+            Some(ImportSite::Member((*module).to_string()))
+        }
+        _ => None,
+    }
+}

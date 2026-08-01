@@ -2,7 +2,7 @@
   "name": "quince-vscode",
   "displayName": "Quince Language Support",
   "description": "Language Server Protocol integration, syntax highlighting, and live development tools for Quince.",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "publisher": "quince-lang",
   "engines": {
     "vscode": "^1.75.0"

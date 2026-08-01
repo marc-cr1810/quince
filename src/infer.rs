@@ -1069,13 +1069,23 @@ impl Infer {
                         self.bind(module, Kind::Module, ty, stmt.span.start);
                     }
                     ImportNames::Names(names) => {
+                        // The member's own symbol, so `from math import floor`
+                        // leaves `floor` with the documentation and parameters
+                        // `math.floor` has. Binding only its type would have
+                        // made the shorter spelling the worse one.
+                        let members = module_symbols(module);
                         for name in names {
-                            let ty = if known {
-                                module_member(module, &name.name)
-                            } else {
-                                Type::Unknown
-                            };
-                            self.bind(&name.name, Kind::Variable, ty, stmt.span.start);
+                            match members.iter().find(|symbol| symbol.name == name.name) {
+                                Some(symbol) if known => {
+                                    self.bind_symbol(symbol.clone(), stmt.span.start)
+                                }
+                                _ => self.bind(
+                                    &name.name,
+                                    Kind::Variable,
+                                    Type::Unknown,
+                                    stmt.span.start,
+                                ),
+                            }
                         }
                     }
                 }
