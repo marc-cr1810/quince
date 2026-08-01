@@ -1,0 +1,79 @@
+# A class can be a collection without holding one. None of the five ops requires
+# the object to be carrying a list or a dict — `Range` stores two numbers and
+# answers every question a list would.
+class Range {
+    op init(from, to) {
+        self.from = from
+        self.to = to
+    }
+    op len() { return self.to - self.from }
+    op get(i) { return self.from + i }
+    op contains(n) { return n >= self.from && n < self.to }
+    op iter() {
+        final out = []
+        let n = self.from
+        while n < self.to {
+            out.push(n)
+            n = n + 1
+        }
+        return out
+    }
+}
+
+final r = Range(3, 7)
+print(len(r), r[0], r[3])
+print(2 in r, 3 in r, 6 in r, 7 in r)
+
+final seen = []
+for n in r {
+    seen.push(n)
+}
+print(seen)
+
+# Each op is asked before the payload, so a class extending `list` that counts or
+# iterates over something else does. An op it did not declare — `get`, here —
+# still falls through to the list it carries.
+class Doubled extends list {
+    op len() { return 100 }
+    op iter() {
+        final out = []
+        for x in list(self) {
+            out.push(x * 2)
+        }
+        return out
+    }
+}
+
+final d = Doubled([1, 2, 3])
+final doubled = []
+for x in d {
+    doubled.push(x)
+}
+print(doubled, len(d), d[0])
+
+# `op set` runs on the object a program holds, so `const` is checked before it:
+# a frozen object must not get to observe a write that is refused anyway. `trace`
+# is a separate list and is not frozen with the instance, so an op that ran would
+# leave a mark whether or not the write itself succeeded.
+final trace = []
+
+class Log {
+    op init() { self.d = {} }
+    op set(key, value) {
+        trace.push(key)
+        self.d[key] = value
+    }
+    op get(key) { return self.d[key] }
+}
+
+final log = Log()
+log["a"] = 1
+print(log["a"], trace)
+
+const frozen_log = Log()
+try {
+    frozen_log["b"] = 2
+} catch e {
+    print(e.message)
+}
+print(trace)

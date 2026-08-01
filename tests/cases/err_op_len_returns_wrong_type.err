@@ -1,0 +1,1 @@
+`op len` must answer with an int, but Sized's returned string

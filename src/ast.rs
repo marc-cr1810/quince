@@ -265,7 +265,12 @@ pub enum Op {
 
     /// `len(x)`.
     Len,
-    /// `x[i]` and `x[a:b]`.
+    /// `x[i]`, one index at a time.
+    ///
+    /// Not `x[a:b]`: there is no value in the language that means "1 to 3", so
+    /// there is nothing to hand an op that takes one argument. Slicing a class
+    /// that declares this is refused rather than quietly reaching past it to the
+    /// list or string underneath.
     Get,
     /// `x[i] = v`.
     Set,

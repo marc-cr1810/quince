@@ -1,0 +1,7 @@
+# `len` answers with an int. A string that happens to look like a number is not
+# coerced, for the same reason `op bool` refuses a list.
+class Sized {
+    op len() { return "three" }
+}
+
+print(len(Sized()))

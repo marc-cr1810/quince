@@ -681,24 +681,40 @@ impl Interp {
         env: ObjId,
     ) -> Result<Flow, QuinceError> {
         let iterable = self.eval(iter, env)?;
-        // A class extending `list` or `dict` iterates as one. A string is not
-        // iterable to begin with — `chars` is how its characters are reached — so
-        // neither is a class extending it, which is the consistent answer rather
-        // than a gap.
-        let items = match iterable.base(&self.heap) {
-            // Snapshotted, so mutating the collection inside the loop cannot
-            // invalidate the iteration.
-            Value::List(id) => self.heap.list(*id).clone(),
-            // A dict iterates over its keys, as in Python. Its values are the
-            // half you can already reach, through `d[k]`.
-            Value::Dict(id) => self.heap.dict(*id).keys().collect(),
-            _ => {
-                return Err(QuinceError::new(
-                    format!("cannot iterate over {}", iterable.type_name(&self.heap)),
-                    iter.span,
-                )
-                .with_kind(ErrorKind::Type)
-                .with_help("only lists and dicts can be iterated in a for loop"));
+
+        // A class says what it iterates as by answering with a list — eager, and
+        // the whole list at once, which is the same shape the loop already gets
+        // from a list or a dict below. See Iteration in DESIGN.md for why there
+        // is no lazier form to be had here yet.
+        let items = if let Some(method) = self.slot(&iterable, Op::Iter) {
+            let answer = self.call_op(method, &iterable, Vec::new())?;
+            match answer.base(&self.heap) {
+                Value::List(id) => {
+                    let id = *id;
+                    self.heap.list(id).clone()
+                }
+                got => return Err(self.op_returned(Op::Iter, &iterable, "a list", got)),
+            }
+        } else {
+            // Otherwise a class extending `list` or `dict` iterates as one. A
+            // string is not iterable to begin with — `chars` is how its
+            // characters are reached — so neither is a class extending it, which
+            // is the consistent answer rather than a gap.
+            match iterable.base(&self.heap) {
+                // Snapshotted, so mutating the collection inside the loop cannot
+                // invalidate the iteration.
+                Value::List(id) => self.heap.list(*id).clone(),
+                // A dict iterates over its keys, as in Python. Its values are the
+                // half you can already reach, through `d[k]`.
+                Value::Dict(id) => self.heap.dict(*id).keys().collect(),
+                _ => {
+                    return Err(QuinceError::new(
+                        format!("cannot iterate over {}", iterable.type_name(&self.heap)),
+                        iter.span,
+                    )
+                    .with_kind(ErrorKind::Type)
+                    .with_help("only lists and dicts can be iterated in a for loop"));
+                }
             }
         };
 
@@ -1167,6 +1183,25 @@ impl Interp {
                 self.temps.truncate(mark);
                 let (collection, index) = evaluated?;
 
+                // The class first, and `const` before the class. A frozen object
+                // must not get to *run* on a write that is already refused: an
+                // `op set` that logged, counted or raised would have happened,
+                // and the assignment it belonged to would still fail. Freezing is
+                // a promise about the object a program holds, so it is checked on
+                // the instance rather than on the payload underneath it.
+                if let Some(method) = self.slot(&collection, Op::Set) {
+                    if collection
+                        .handle()
+                        .is_some_and(|id| self.heap.is_frozen(id))
+                    {
+                        return Err(frozen(&self.heap, &collection, target.span));
+                    }
+                    // What the op answers is discarded: `x[i] = v` is worth `v`,
+                    // the same as every other assignment in the language.
+                    self.call_op(method, &collection, vec![index, value.clone()])?;
+                    return Ok(value);
+                }
+
                 // Written through to the payload for a class extending `dict` or
                 // `list`, so `bag['a'] = 1` reaches the dict the object *is*. The
                 // `const` check still names `collection`, since freezing applies to
@@ -1239,7 +1274,20 @@ impl Interp {
     ///
     /// A class extending a builtin is subscripted as one, and yields the base
     /// type: `Username("marc")[0]` is the string `"m"`.
-    fn index_get(&self, target: &Value, index: &Value, span: Span) -> Result<Value, QuinceError> {
+    fn index_get(
+        &mut self,
+        target: &Value,
+        index: &Value,
+        span: Span,
+    ) -> Result<Value, QuinceError> {
+        // The class first, so a class extending `dict` whose `x[k]` answers with
+        // a default is asked before the dict it carries raises a key error.
+        // Whatever the op returns is the answer — a subscript has no type it has
+        // to be, any more than `+` does.
+        if let Some(method) = self.slot(target, Op::Get) {
+            return self.call_op(method, target, vec![index.clone()]);
+        }
+
         match target.base(&self.heap) {
             Value::Dict(id) => {
                 let key = key_of(&self.heap, index, span)?;
@@ -1293,6 +1341,26 @@ impl Interp {
         end: Option<&Value>,
         span: Span,
     ) -> Result<Value, QuinceError> {
+        // A class that declares `op get` is not sliced around it. The op answers
+        // one index, because there is no value in the language meaning "1 to 3"
+        // for it to be handed — so slicing an instance would reach past the op to
+        // whatever it is carrying, which is the one thing declaring the op said
+        // not to do.
+        if self.slot(target, Op::Get).is_some() {
+            return Err(QuinceError::new(
+                format!(
+                    "{} declares `op get`, which answers one index at a time",
+                    target.type_name(&self.heap)
+                ),
+                span,
+            )
+            .with_kind(ErrorKind::Type)
+            .with_help(
+                "read the elements one at a time — or slice `list(x)`, if the slice you want is \
+                 of what the object holds rather than of what `op get` answers",
+            ));
+        }
+
         // Cloned rather than matched in place: the list arm allocates, so the
         // immutable borrow `base` takes of the heap has to be over by then.
         match target.base(&self.heap).clone() {
@@ -2447,6 +2515,18 @@ impl Interp {
         needle: &Value,
         span: Span,
     ) -> Result<Value, QuinceError> {
+        // The haystack's class first. `op contains` is the other half of `in`:
+        // [`Op::Eq`] decides what a *list* holds by comparing items, and this
+        // decides for a class that does its own looking — a range that answers
+        // from two numbers rather than by storing what is between them.
+        if let Some(method) = self.slot(haystack, Op::Contains) {
+            let answer = self.call_op(method, haystack, vec![needle.clone()])?;
+            return match answer.base(&self.heap) {
+                Value::Bool(b) => Ok(Value::Bool(*b)),
+                got => Err(self.op_returned(Op::Contains, haystack, "a bool", got)),
+            };
+        }
+
         // Both sides unwrap: a subclass of `list` can be searched, and a subclass
         // of `string` can be the part searched for. `equals` and `key_of` unwrap the
         // needle for themselves, so only the string arm needs it named.
@@ -2840,18 +2920,32 @@ static LEN: Native = Native {
     // Not a method, so it does not come through `call_method`'s substitution and
     // has to unwrap for itself. The error names the class rather than its base:
     // `len` failing on a `Box` should say `Box`.
-    func: |interp, args, span| match args[0].base(&interp.heap) {
-        Value::Str(s) => Ok(Value::Int(s.chars().count() as i64)),
-        Value::List(id) => Ok(Value::Int(interp.heap.list(*id).len() as i64)),
-        Value::Dict(id) => Ok(Value::Int(interp.heap.dict(*id).len() as i64)),
-        _ => Err(QuinceError::new(
-            format!(
-                "`len` does not apply to {}",
-                args[0].type_name(&interp.heap)
-            ),
-            span,
-        )
-        .with_kind(ErrorKind::Type)),
+    func: |interp, args, span| {
+        // The class first, so a class extending `list` that counts something
+        // other than its items is asked before the list it carries is measured.
+        if let Some(method) = interp.slot(&args[0], Op::Len) {
+            let answer = interp.call_op(method, &args[0], Vec::new())?;
+            return match answer.base(&interp.heap) {
+                // Read as it is given. A negative one is not refused: nothing
+                // indexes with this, so an odd length is the class's own answer
+                // to its own question, the way any int is a fine `op cmp`.
+                Value::Int(n) => Ok(Value::Int(*n)),
+                got => Err(interp.op_returned(Op::Len, &args[0], "an int", got)),
+            };
+        }
+        match args[0].base(&interp.heap) {
+            Value::Str(s) => Ok(Value::Int(s.chars().count() as i64)),
+            Value::List(id) => Ok(Value::Int(interp.heap.list(*id).len() as i64)),
+            Value::Dict(id) => Ok(Value::Int(interp.heap.dict(*id).len() as i64)),
+            _ => Err(QuinceError::new(
+                format!(
+                    "`len` does not apply to {}",
+                    args[0].type_name(&interp.heap)
+                ),
+                span,
+            )
+            .with_kind(ErrorKind::Type)),
+        }
     },
 };
 

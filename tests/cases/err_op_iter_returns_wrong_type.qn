@@ -1,0 +1,10 @@
+# `op iter` answers with a list — the whole thing at once, since iteration is
+# eager. A dict is not it: a class that wants to be iterated over keys can say so
+# by answering with `keys(d)`.
+class Countdown {
+    op iter() { return {"a": 1} }
+}
+
+for x in Countdown() {
+    print(x)
+}

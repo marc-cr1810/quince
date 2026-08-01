@@ -1,0 +1,1 @@
+`op iter` must answer with a list, but Countdown's returned dict

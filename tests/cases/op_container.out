@@ -1,0 +1,7 @@
+4 3 6
+false true true false
+[3, 4, 5, 6]
+[2, 4, 6] 100 1
+1 ["a"]
+cannot modify `const` Log
+["a"]

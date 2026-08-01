@@ -1,0 +1,10 @@
+# `op get` answers one index. There is no value in the language that means "0 to
+# 2", so there is nothing to hand it for a slice — and slicing around it to reach
+# the list underneath would undo the one thing declaring the op said to do.
+class Reversed extends list {
+    op get(i) { return list(self)[len(list(self)) - 1 - i] }
+}
+
+final r = Reversed([1, 2, 3])
+print(r[0])
+print(r[0:2])
