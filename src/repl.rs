@@ -448,16 +448,13 @@ impl Highlighter for QuinceHelper {
             return Cow::Borrowed(prompt);
         }
 
-        if prompt.starts_with(">>>") {
-            let rest = &prompt[3..];
+        if let Some(rest) = prompt.strip_prefix(">>>") {
             Cow::Owned(format!("{}{rest}", Style::BOLD_GREEN.paint(">>>", true)))
-        } else if prompt.starts_with("...") {
-            let rest = &prompt[3..];
+        } else if let Some(rest) = prompt.strip_prefix("...") {
             Cow::Owned(format!("{}{rest}", Style::BOLD_YELLOW.paint("...", true)))
         } else if prompt.starts_with('>') {
             Cow::Owned(format!("{} ", Style::BOLD_GREEN.paint(">", true)))
-        } else if prompt.starts_with('.') {
-            let rest = &prompt[1..];
+        } else if let Some(rest) = prompt.strip_prefix('.') {
             Cow::Owned(format!("{}{rest}", Style::BOLD_YELLOW.paint(".", true)))
         } else {
             Cow::Borrowed(prompt)
@@ -494,8 +491,8 @@ fn find_matching_brackets(line: &str, pos: usize) -> Vec<usize> {
 
         if search_forward {
             let mut depth = 0;
-            for i in check_pos..bytes.len() {
-                let c = bytes[i] as char;
+            for (i, &byte) in bytes.iter().enumerate().skip(check_pos) {
+                let c = byte as char;
                 if c == ch {
                     depth += 1;
                 } else if c == matching_ch {
@@ -710,7 +707,7 @@ pub fn run_repl(use_color_stdout: bool, use_color_stderr: bool) -> Result<()> {
                             .collect();
                         fields_map.insert(k.clone(), fields);
 
-                        if !custom_map.contains_key(&type_name) {
+                        if let std::collections::hash_map::Entry::Vacant(e) = custom_map.entry(type_name) {
                             let mut methods = Vec::new();
                             let mut current_id = Some(inst.class);
                             while let Some(cls_id) = current_id {
@@ -722,7 +719,7 @@ pub fn run_repl(use_color_stdout: bool, use_color_stderr: bool) -> Result<()> {
                             }
                             methods.sort();
                             methods.dedup();
-                            custom_map.insert(type_name, methods);
+                            e.insert(methods);
                         }
                     }
                     Value::Dict(id) => {
@@ -783,25 +780,25 @@ pub fn run_repl(use_color_stdout: bool, use_color_stderr: bool) -> Result<()> {
                     Some(h) => h.highlight(&line, line.len()),
                     None => Cow::Borrowed(&line[..]),
                 };
-                print!("\x1B[1A\x1B[2K{prompt_dot} {highlighted}\n");
+                println!("\x1B[1A\x1B[2K{prompt_dot} {highlighted}");
                 let _ = std::io::Write::flush(&mut std::io::stdout());
             } else {
-                print!("\x1B[1A\x1B[2K... {line}\n");
+                println!("\x1B[1A\x1B[2K... {line}");
                 let _ = std::io::Write::flush(&mut std::io::stdout());
             }
         }
 
         // Handle REPL Meta-Commands
         let trimmed_line = line.trim();
-        if buffer.is_empty() && trimmed_line.starts_with(':') {
-            if handle_meta_command(
+        if buffer.is_empty() && trimmed_line.starts_with(':')
+            && handle_meta_command(
                 trimmed_line,
                 &mut interp,
                 use_color_stdout,
                 use_color_stderr,
-            )? {
-                continue;
-            }
+            )?
+        {
+            continue;
         }
 
         buffer.push_str(&line);
@@ -841,287 +838,6 @@ pub fn run_repl(use_color_stdout: bool, use_color_stderr: bool) -> Result<()> {
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn completion_offers_the_methods_that_exist_and_no_others() {
-        // The list this replaced was written from memory: it offered `pop`,
-        // `insert`, `clear`, `slice`, `contains`, and Rust's `to_uppercase`,
-        // none of which are Quince methods, and omitted `chars`, `upper`, and
-        // `lower`, which are. Deriving it makes that unrepresentable; this
-        // fails if anyone hand-writes the list again.
-        let names = method_names();
-
-        for real in ["chars", "upper", "lower", "push", "keys", "remove", "join"] {
-            assert!(names.contains(&real), "{real} should be offered");
-        }
-        for fake in [
-            "pop",
-            "insert",
-            "clear",
-            "slice",
-            "contains",
-            "to_uppercase",
-            "len",
-        ] {
-            assert!(!names.contains(&fake), "{fake} is not a method");
-        }
-    }
-
-    #[test]
-    fn all_keywords_are_highlighted() {
-        for kw in KEYWORDS {
-            if let Some(kind) = TokenKind::keyword(kw) {
-                let styled = highlight_token(kind.clone(), kw, true, None, None);
-
-                if kw == &"self" || kw == &"super" {
-                    assert!(styled.contains("\x1b[1;36m"), "{kw} should be bold cyan");
-                } else if kw == &"true" || kw == &"false" {
-                    assert!(styled.contains("\x1b[33m"), "{kw} should be yellow");
-                } else if kw == &"nil" {
-                    assert!(styled.contains("\x1b[2m"), "{kw} should be dim");
-                } else {
-                    assert!(styled.contains("\x1b[1;35m"), "{kw} should be bold magenta");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn context_aware_syntax_highlighting_differentiates_identifiers() {
-        let fn_decl = highlight_token(
-            TokenKind::Ident("calculate".to_string()),
-            "calculate",
-            true,
-            Some(&TokenKind::Fn),
-            None,
-        );
-        assert!(
-            fn_decl.contains("\x1b[1;36m"),
-            "fn name should be bold cyan"
-        );
-
-        let class_decl = highlight_token(
-            TokenKind::Ident("Point".to_string()),
-            "Point",
-            true,
-            Some(&TokenKind::Class),
-            None,
-        );
-        assert!(
-            class_decl.contains("\x1b[1;33m"),
-            "class name should be bold yellow"
-        );
-
-        let call = highlight_token(
-            TokenKind::Ident("foo".to_string()),
-            "foo",
-            true,
-            None,
-            Some(&TokenKind::LParen),
-        );
-        assert!(
-            call.contains("\x1b[1;34m"),
-            "function call should be bold blue"
-        );
-
-        let builtin = highlight_token(
-            TokenKind::Ident("print".to_string()),
-            "print",
-            true,
-            None,
-            None,
-        );
-        assert!(
-            builtin.contains("\x1b[1;36m"),
-            "builtin function should be bold cyan"
-        );
-    }
-
-    #[test]
-    fn validator_detects_incomplete_expressions() {
-        assert!(is_input_incomplete("1 +"));
-        assert!(is_input_incomplete("fn foo() {"));
-        assert!(is_input_incomplete("print([1, 2,"));
-        assert!(is_input_incomplete("\"unterminated string"));
-        assert!(!is_input_incomplete("1 + 2"));
-        assert!(!is_input_incomplete("let x = 10"));
-    }
-
-    #[test]
-    fn context_aware_method_completion_filters_by_type() {
-        let custom_map = HashMap::from([(
-            "Point".to_string(),
-            vec!["distance".to_string(), "move".to_string()],
-        )]);
-
-        let string_methods = method_names_for_type("string", &HashMap::new());
-        assert!(string_methods.contains(&"upper".to_string()));
-        assert!(string_methods.contains(&"lower".to_string()));
-        assert!(!string_methods.contains(&"push".to_string()));
-        assert!(!string_methods.contains(&"keys".to_string()));
-
-        let list_methods = method_names_for_type("list", &HashMap::new());
-        assert!(list_methods.contains(&"push".to_string()));
-        assert!(!list_methods.contains(&"upper".to_string()));
-
-        let point_methods = method_names_for_type("Point", &custom_map);
-        assert_eq!(
-            point_methods,
-            vec!["distance".to_string(), "move".to_string()]
-        );
-    }
-
-    #[test]
-    fn subclass_methods_and_variables_are_completed_and_hinted() {
-        let mut interp = Interp::new();
-        let code = r#"
-            class Animal {
-                fn speak() { return "..." }
-            }
-            class Dog extends Animal {
-                op init() {
-                    self.breed = "collie"
-                }
-                fn bark() { return "woof" }
-            }
-            let d = Dog()
-        "#;
-        let program = quince::compile(code).unwrap();
-        interp.run_repl(&program).unwrap();
-
-        let globals_store = Arc::new(Mutex::new(Vec::new()));
-        let custom_methods_store = Arc::new(Mutex::new(HashMap::new()));
-        let var_fields_store = Arc::new(Mutex::new(HashMap::new()));
-
-        let mut vars = Vec::new();
-        let mut custom_map: HashMap<String, Vec<String>> = HashMap::new();
-        let mut fields_map: HashMap<String, Vec<String>> = HashMap::new();
-
-        for (k, v) in interp.get_globals() {
-            match &v {
-                Value::Class(id) => {
-                    let class_obj = interp.heap.class(*id);
-                    vars.push((k.clone(), class_obj.name.clone()));
-                    let mut methods = Vec::new();
-                    let mut current_id = Some(*id);
-                    while let Some(cls_id) = current_id {
-                        let cls = interp.heap.class(cls_id);
-                        for m in cls.methods.keys() {
-                            methods.push(m.clone());
-                        }
-                        current_id = cls.parent;
-                    }
-                    methods.sort();
-                    methods.dedup();
-                    custom_map.insert(class_obj.name.clone(), methods);
-                }
-                Value::Instance(id) => {
-                    let type_name = v.type_name(&interp.heap).to_string();
-                    vars.push((k.clone(), type_name.clone()));
-                    let inst = interp.heap.instance(*id);
-                    let fields: Vec<String> = inst
-                        .fields
-                        .iter()
-                        .filter_map(|(key, _)| match key.to_value() {
-                            Value::Str(s) => Some(s.to_string()),
-                            _ => None,
-                        })
-                        .collect();
-                    fields_map.insert(k.clone(), fields);
-
-                    if !custom_map.contains_key(&type_name) {
-                        let mut methods = Vec::new();
-                        let mut current_id = Some(inst.class);
-                        while let Some(cls_id) = current_id {
-                            let cls = interp.heap.class(cls_id);
-                            for m in cls.methods.keys() {
-                                methods.push(m.clone());
-                            }
-                            current_id = cls.parent;
-                        }
-                        methods.sort();
-                        methods.dedup();
-                        custom_map.insert(type_name, methods);
-                    }
-                }
-                _ => {
-                    let type_name = v.type_name(&interp.heap).to_string();
-                    vars.push((k.clone(), type_name));
-                }
-            }
-        }
-        *globals_store.lock().unwrap() = vars;
-        *custom_methods_store.lock().unwrap() = custom_map;
-        *var_fields_store.lock().unwrap() = fields_map;
-
-        let helper = QuinceHelper {
-            use_color: false,
-            globals: globals_store,
-            custom_methods: custom_methods_store,
-            var_fields: var_fields_store,
-        };
-
-        let history = rustyline::history::MemHistory::new();
-        let dummy_ctx = rustyline::Context::new(&history);
-
-        // Test completion on instance variable `d.`
-        let (start, matches) = helper.complete("d.", 2, &dummy_ctx).unwrap();
-        assert_eq!(start, 2);
-        let match_displays: Vec<String> = matches.into_iter().map(|p| p.display).collect();
-        assert!(match_displays.contains(&"bark".to_string()), "should offer subclass method bark");
-        assert!(match_displays.contains(&"speak".to_string()), "should offer superclass method speak");
-        assert!(match_displays.contains(&"breed".to_string()), "should offer instance variable breed");
-
-        // Test hinter on `d.b`
-        let hint_b = helper.hint("d.b", 3, &dummy_ctx);
-        assert_eq!(hint_b, Some("ark".to_string()));
-
-        // Test hinter on `d.s`
-        let hint_s = helper.hint("d.s", 3, &dummy_ctx);
-        assert_eq!(hint_s, Some("peak".to_string()));
-
-        // Test hinter on `d.br`
-        let hint_br = helper.hint("d.br", 4, &dummy_ctx);
-        assert_eq!(hint_br, Some("eed".to_string()));
-
-        // Test completion directly on Class object `Dog.`
-        let (_, dog_matches) = helper.complete("Dog.", 4, &dummy_ctx).unwrap();
-        let dog_displays: Vec<String> = dog_matches.into_iter().map(|p| p.display).collect();
-        assert!(dog_displays.contains(&"bark".to_string()));
-        assert!(dog_displays.contains(&"speak".to_string()));
-    }
-
-    #[test]
-    fn repl_binds_last_value_to_underscore() {
-        let mut interp = Interp::new();
-        let program = quince::compile("10 + 20").unwrap();
-        if let Ok(Some(val)) = interp.run_repl(&program) {
-            interp.set_global("_", val);
-        }
-        let check_pgm = quince::compile("_ * 2").unwrap();
-        let res = interp.run_repl(&check_pgm).unwrap();
-        assert_eq!(res, Some(Value::Int(60)));
-    }
-
-    #[test]
-    fn a_repl_entry_may_redefine_what_an_earlier_one_declared() {
-        // Declaring a name twice in one program is refused. This is why that
-        // refusal is per-compile and not per-process: at a prompt, writing the
-        // function again *is* how you fix it, and a REPL that made you restart
-        // over a typo would be the worse tool.
-        let mut interp = Interp::new();
-        for source in ["fn a() { return 1 }", "fn a() { return 2 }"] {
-            let program = quince::compile(source).expect("each entry compiles on its own");
-            interp.run_repl(&program).expect("and runs");
-        }
-        let call = quince::compile("a()").unwrap();
-        assert_eq!(interp.run_repl(&call).unwrap(), Some(Value::Int(2)));
-    }
 }
 
 fn handle_meta_command(
@@ -1375,5 +1091,286 @@ fn handle_meta_command(
             Ok(true)
         }
         _ => Ok(false),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn completion_offers_the_methods_that_exist_and_no_others() {
+        // The list this replaced was written from memory: it offered `pop`,
+        // `insert`, `clear`, `slice`, `contains`, and Rust's `to_uppercase`,
+        // none of which are Quince methods, and omitted `chars`, `upper`, and
+        // `lower`, which are. Deriving it makes that unrepresentable; this
+        // fails if anyone hand-writes the list again.
+        let names = method_names();
+
+        for real in ["chars", "upper", "lower", "push", "keys", "remove", "join"] {
+            assert!(names.contains(&real), "{real} should be offered");
+        }
+        for fake in [
+            "pop",
+            "insert",
+            "clear",
+            "slice",
+            "contains",
+            "to_uppercase",
+            "len",
+        ] {
+            assert!(!names.contains(&fake), "{fake} is not a method");
+        }
+    }
+
+    #[test]
+    fn all_keywords_are_highlighted() {
+        for kw in KEYWORDS {
+            if let Some(kind) = TokenKind::keyword(kw) {
+                let styled = highlight_token(kind.clone(), kw, true, None, None);
+
+                if kw == &"self" || kw == &"super" {
+                    assert!(styled.contains("\x1b[1;36m"), "{kw} should be bold cyan");
+                } else if kw == &"true" || kw == &"false" {
+                    assert!(styled.contains("\x1b[33m"), "{kw} should be yellow");
+                } else if kw == &"nil" {
+                    assert!(styled.contains("\x1b[2m"), "{kw} should be dim");
+                } else {
+                    assert!(styled.contains("\x1b[1;35m"), "{kw} should be bold magenta");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn context_aware_syntax_highlighting_differentiates_identifiers() {
+        let fn_decl = highlight_token(
+            TokenKind::Ident("calculate".to_string()),
+            "calculate",
+            true,
+            Some(&TokenKind::Fn),
+            None,
+        );
+        assert!(
+            fn_decl.contains("\x1b[1;36m"),
+            "fn name should be bold cyan"
+        );
+
+        let class_decl = highlight_token(
+            TokenKind::Ident("Point".to_string()),
+            "Point",
+            true,
+            Some(&TokenKind::Class),
+            None,
+        );
+        assert!(
+            class_decl.contains("\x1b[1;33m"),
+            "class name should be bold yellow"
+        );
+
+        let call = highlight_token(
+            TokenKind::Ident("foo".to_string()),
+            "foo",
+            true,
+            None,
+            Some(&TokenKind::LParen),
+        );
+        assert!(
+            call.contains("\x1b[1;34m"),
+            "function call should be bold blue"
+        );
+
+        let builtin = highlight_token(
+            TokenKind::Ident("print".to_string()),
+            "print",
+            true,
+            None,
+            None,
+        );
+        assert!(
+            builtin.contains("\x1b[1;36m"),
+            "builtin function should be bold cyan"
+        );
+    }
+
+    #[test]
+    fn validator_detects_incomplete_expressions() {
+        assert!(is_input_incomplete("1 +"));
+        assert!(is_input_incomplete("fn foo() {"));
+        assert!(is_input_incomplete("print([1, 2,"));
+        assert!(is_input_incomplete("\"unterminated string"));
+        assert!(!is_input_incomplete("1 + 2"));
+        assert!(!is_input_incomplete("let x = 10"));
+    }
+
+    #[test]
+    fn context_aware_method_completion_filters_by_type() {
+        let custom_map = HashMap::from([(
+            "Point".to_string(),
+            vec!["distance".to_string(), "move".to_string()],
+        )]);
+
+        let string_methods = method_names_for_type("string", &HashMap::new());
+        assert!(string_methods.contains(&"upper".to_string()));
+        assert!(string_methods.contains(&"lower".to_string()));
+        assert!(!string_methods.contains(&"push".to_string()));
+        assert!(!string_methods.contains(&"keys".to_string()));
+
+        let list_methods = method_names_for_type("list", &HashMap::new());
+        assert!(list_methods.contains(&"push".to_string()));
+        assert!(!list_methods.contains(&"upper".to_string()));
+
+        let point_methods = method_names_for_type("Point", &custom_map);
+        assert_eq!(
+            point_methods,
+            vec!["distance".to_string(), "move".to_string()]
+        );
+    }
+
+    #[test]
+    fn subclass_methods_and_variables_are_completed_and_hinted() {
+        let mut interp = Interp::new();
+        let code = r#"
+            class Animal {
+                fn speak() { return "..." }
+            }
+            class Dog extends Animal {
+                op init() {
+                    self.breed = "collie"
+                }
+                fn bark() { return "woof" }
+            }
+            let d = Dog()
+        "#;
+        let program = quince::compile(code).unwrap();
+        interp.run_repl(&program).unwrap();
+
+        let globals_store = Arc::new(Mutex::new(Vec::new()));
+        let custom_methods_store = Arc::new(Mutex::new(HashMap::new()));
+        let var_fields_store = Arc::new(Mutex::new(HashMap::new()));
+
+        let mut vars = Vec::new();
+        let mut custom_map: HashMap<String, Vec<String>> = HashMap::new();
+        let mut fields_map: HashMap<String, Vec<String>> = HashMap::new();
+
+        for (k, v) in interp.get_globals() {
+            match &v {
+                Value::Class(id) => {
+                    let class_obj = interp.heap.class(*id);
+                    vars.push((k.clone(), class_obj.name.clone()));
+                    let mut methods = Vec::new();
+                    let mut current_id = Some(*id);
+                    while let Some(cls_id) = current_id {
+                        let cls = interp.heap.class(cls_id);
+                        for m in cls.methods.keys() {
+                            methods.push(m.clone());
+                        }
+                        current_id = cls.parent;
+                    }
+                    methods.sort();
+                    methods.dedup();
+                    custom_map.insert(class_obj.name.clone(), methods);
+                }
+                Value::Instance(id) => {
+                    let type_name = v.type_name(&interp.heap).to_string();
+                    vars.push((k.clone(), type_name.clone()));
+                    let inst = interp.heap.instance(*id);
+                    let fields: Vec<String> = inst
+                        .fields
+                        .iter()
+                        .filter_map(|(key, _)| match key.to_value() {
+                            Value::Str(s) => Some(s.to_string()),
+                            _ => None,
+                        })
+                        .collect();
+                    fields_map.insert(k.clone(), fields);
+
+                    if let std::collections::hash_map::Entry::Vacant(e) = custom_map.entry(type_name) {
+                        let mut methods = Vec::new();
+                        let mut current_id = Some(inst.class);
+                        while let Some(cls_id) = current_id {
+                            let cls = interp.heap.class(cls_id);
+                            for m in cls.methods.keys() {
+                                methods.push(m.clone());
+                            }
+                            current_id = cls.parent;
+                        }
+                        methods.sort();
+                        methods.dedup();
+                        e.insert(methods);
+                    }
+                }
+                _ => {
+                    let type_name = v.type_name(&interp.heap).to_string();
+                    vars.push((k.clone(), type_name));
+                }
+            }
+        }
+        *globals_store.lock().unwrap() = vars;
+        *custom_methods_store.lock().unwrap() = custom_map;
+        *var_fields_store.lock().unwrap() = fields_map;
+
+        let helper = QuinceHelper {
+            use_color: false,
+            globals: globals_store,
+            custom_methods: custom_methods_store,
+            var_fields: var_fields_store,
+        };
+
+        let history = rustyline::history::MemHistory::new();
+        let dummy_ctx = rustyline::Context::new(&history);
+
+        // Test completion on instance variable `d.`
+        let (start, matches) = helper.complete("d.", 2, &dummy_ctx).unwrap();
+        assert_eq!(start, 2);
+        let match_displays: Vec<String> = matches.into_iter().map(|p| p.display).collect();
+        assert!(match_displays.contains(&"bark".to_string()), "should offer subclass method bark");
+        assert!(match_displays.contains(&"speak".to_string()), "should offer superclass method speak");
+        assert!(match_displays.contains(&"breed".to_string()), "should offer instance variable breed");
+
+        // Test hinter on `d.b`
+        let hint_b = helper.hint("d.b", 3, &dummy_ctx);
+        assert_eq!(hint_b, Some("ark".to_string()));
+
+        // Test hinter on `d.s`
+        let hint_s = helper.hint("d.s", 3, &dummy_ctx);
+        assert_eq!(hint_s, Some("peak".to_string()));
+
+        // Test hinter on `d.br`
+        let hint_br = helper.hint("d.br", 4, &dummy_ctx);
+        assert_eq!(hint_br, Some("eed".to_string()));
+
+        // Test completion directly on Class object `Dog.`
+        let (_, dog_matches) = helper.complete("Dog.", 4, &dummy_ctx).unwrap();
+        let dog_displays: Vec<String> = dog_matches.into_iter().map(|p| p.display).collect();
+        assert!(dog_displays.contains(&"bark".to_string()));
+        assert!(dog_displays.contains(&"speak".to_string()));
+    }
+
+    #[test]
+    fn repl_binds_last_value_to_underscore() {
+        let mut interp = Interp::new();
+        let program = quince::compile("10 + 20").unwrap();
+        if let Ok(Some(val)) = interp.run_repl(&program) {
+            interp.set_global("_", val);
+        }
+        let check_pgm = quince::compile("_ * 2").unwrap();
+        let res = interp.run_repl(&check_pgm).unwrap();
+        assert_eq!(res, Some(Value::Int(60)));
+    }
+
+    #[test]
+    fn a_repl_entry_may_redefine_what_an_earlier_one_declared() {
+        // Declaring a name twice in one program is refused. This is why that
+        // refusal is per-compile and not per-process: at a prompt, writing the
+        // function again *is* how you fix it, and a REPL that made you restart
+        // over a typo would be the worse tool.
+        let mut interp = Interp::new();
+        for source in ["fn a() { return 1 }", "fn a() { return 2 }"] {
+            let program = quince::compile(source).expect("each entry compiles on its own");
+            interp.run_repl(&program).expect("and runs");
+        }
+        let call = quince::compile("a()").unwrap();
+        assert_eq!(interp.run_repl(&call).unwrap(), Some(Value::Int(2)));
     }
 }

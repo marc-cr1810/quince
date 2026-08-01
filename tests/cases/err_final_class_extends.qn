@@ -1,0 +1,11 @@
+# `final` closes one of the two doors: no class may descend from this one. The
+# refusal is at run time and not in the resolver, because `extends` names an
+# ordinary variable read in the enclosing scope — a parameter can hold a class,
+# so there is no static answer to give.
+final class Money {
+    op init(cents) { self.cents = cents }
+}
+
+class Debt extends Money {
+    fn owed() { return self.cents }
+}

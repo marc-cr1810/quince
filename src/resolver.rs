@@ -327,6 +327,7 @@ impl Resolver {
                 parent,
                 methods,
                 slot,
+                ..
             } => {
                 // The parent is read in the enclosing scope, before the class's
                 // own name is bound, which is what makes `class A extends A` an

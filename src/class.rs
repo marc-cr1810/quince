@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{OPS, Op};
+use crate::ast::{OPS, Op, Openness};
 use crate::dict::Dict;
 use crate::heap::{Heap, ObjId};
 use crate::interp::{
@@ -192,6 +192,20 @@ pub struct Class {
     /// fields. So `int("42")` is a conversion and `Point(1, 2)` is a
     /// constructor, through one code path.
     pub builtin: Option<Builtin>,
+    /// Which of the two doors the declaration closed: `final`, `complete`,
+    /// `sealed`, or neither.
+    ///
+    /// Kept as the word the program wrote rather than as two bools, so a refusal
+    /// can quote the modifier back. Neither check lives here — each belongs where
+    /// the attaching happens, which is two different files away from this one.
+    ///
+    /// Not inherited. `inherit_slots` copies a parent's slots down and this is
+    /// not one: a class is open until its own declaration says otherwise.
+    ///
+    /// Always [`Openness::Open`] for a builtin. `extend int` is the feature the
+    /// whole class representation was collapsed for, and `class MyStr extends
+    /// string` works — see DESIGN.md.
+    pub openness: Openness,
 }
 
 impl Class {
@@ -213,6 +227,7 @@ impl Class {
             parent: None,
             slots,
             builtin: Some(builtin),
+            openness: Openness::Open,
         }
     }
 
@@ -408,7 +423,6 @@ mod tests {
         func: |_interp, _args, _span| Ok(Value::Nil),
     };
 
-    #[test]
     /// A type that can be made from a value is exactly a type a class can say it
     /// converts to.
     ///
@@ -467,6 +481,7 @@ mod tests {
                 parent: None,
                 slots: Class::empty_slots(),
                 builtin: None,
+                openness: Openness::Open,
             }))),
         ];
 

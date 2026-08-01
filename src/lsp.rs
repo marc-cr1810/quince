@@ -105,10 +105,10 @@ fn parse_ast_lenient(source: &str) -> Option<Vec<Stmt>> {
     if let Ok(stmts) = quince::compile(source) {
         return Some(stmts);
     }
-    if let Ok(tokens) = quince::lexer::Lexer::new(source).tokenize() {
-        if let Ok(stmts) = quince::parser::Parser::new(tokens).parse() {
-            return Some(stmts);
-        }
+    if let Ok(tokens) = quince::lexer::Lexer::new(source).tokenize()
+        && let Ok(stmts) = quince::parser::Parser::new(tokens).parse()
+    {
+        return Some(stmts);
     }
     None
 }
@@ -353,10 +353,10 @@ fn get_receiver_before_dot(source: &str, pos: Position) -> Option<String> {
     }
 
     let mut cleaned = before_dot;
-    if cleaned.ends_with(')') {
-        if let Some(open_paren) = cleaned.rfind('(') {
-            cleaned = cleaned[..open_paren].trim_end();
-        }
+    if cleaned.ends_with(')')
+        && let Some(open_paren) = cleaned.rfind('(')
+    {
+        cleaned = cleaned[..open_paren].trim_end();
     }
 
     if cleaned.ends_with('"') || cleaned.ends_with(']') || cleaned.ends_with('}') {
@@ -399,7 +399,7 @@ fn infer_receiver_class(source: &str, receiver: &str, pos: Position) -> Option<S
     }
 
     // Direct Class Constructor Call e.g. `Shadow().` or `Point(3, 4).`
-    if clean_recv.chars().next().map_or(false, |c| c.is_uppercase()) {
+    if clean_recv.chars().next().is_some_and(|c| c.is_uppercase()) {
         return Some(clean_recv.to_string());
     }
 
@@ -450,15 +450,14 @@ fn infer_receiver_class(source: &str, receiver: &str, pos: Position) -> Option<S
             let trimmed = line.trim();
             if trimmed.starts_with("class ") {
                 let parts: Vec<_> = trimmed.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    if let Some(extends_idx) = parts.iter().position(|&p| p == "extends") {
-                        if extends_idx + 1 < parts.len() {
-                            let pname = parts[extends_idx + 1].split('{').next().unwrap_or("").trim();
-                            if !pname.is_empty() {
-                                current_parent = Some(pname.to_string());
-                                class_brace_depth = brace_depth;
-                            }
-                        }
+                if parts.len() >= 2
+                    && let Some(extends_idx) = parts.iter().position(|&p| p == "extends")
+                    && extends_idx + 1 < parts.len()
+                {
+                    let pname = parts[extends_idx + 1].split('{').next().unwrap_or("").trim();
+                    if !pname.is_empty() {
+                        current_parent = Some(pname.to_string());
+                        class_brace_depth = brace_depth;
                     }
                 }
             }
@@ -498,7 +497,7 @@ fn infer_receiver_class(source: &str, receiver: &str, pos: Position) -> Option<S
                     let rhs = trimmed[eq_idx + 1..].trim();
                     let first_word = rhs.split(&['(', ' ', ';'][..]).next().unwrap_or("").trim();
                     if !first_word.is_empty()
-                        && first_word.chars().next().map_or(false, |c| c.is_uppercase())
+                        && first_word.chars().next().is_some_and(|c| c.is_uppercase())
                     {
                         return Some(first_word.to_string());
                     }
@@ -555,22 +554,22 @@ fn infer_method_return_class(source: &str, class_name: &str, method_name: &str) 
                 }
             }
 
-            if inside_target_method && trimmed.contains("return ") {
-                if let Some(ret_idx) = trimmed.find("return ") {
-                    let expr = trimmed[ret_idx + "return ".len()..].trim();
-                    let first_word = expr.split('(').next().unwrap_or("").trim();
-                    if !first_word.is_empty() && first_word.chars().next().map_or(false, |c| c.is_uppercase()) {
-                        return Some(first_word.to_string());
-                    }
-                    if expr.starts_with('"') {
-                        return Some("string".to_string());
-                    }
-                    if expr.starts_with('[') {
-                        return Some("list".to_string());
-                    }
-                    if expr.starts_with('{') {
-                        return Some("dict".to_string());
-                    }
+            if inside_target_method && trimmed.contains("return ")
+                && let Some(ret_idx) = trimmed.find("return ")
+            {
+                let expr = trimmed[ret_idx + "return ".len()..].trim();
+                let first_word = expr.split('(').next().unwrap_or("").trim();
+                if !first_word.is_empty() && first_word.chars().next().is_some_and(|c| c.is_uppercase()) {
+                    return Some(first_word.to_string());
+                }
+                if expr.starts_with('"') {
+                    return Some("string".to_string());
+                }
+                if expr.starts_with('[') {
+                    return Some("list".to_string());
+                }
+                if expr.starts_with('{') {
+                    return Some("dict".to_string());
                 }
             }
 
@@ -589,22 +588,22 @@ fn collect_ast_dot_completions_for_class(
     items: &mut Vec<CompletionItem>,
 ) {
     for stmt in stmts {
-        if let StmtKind::Class { name, parent, methods, .. } = &stmt.kind {
-            if name == target_class {
-                for m in methods {
-                    if !seen.contains(&m.name) {
-                        seen.insert(m.name.clone());
-                        items.push(CompletionItem {
-                            label: m.name.clone(),
-                            kind: Some(CompletionItemKind::METHOD),
-                            detail: Some(format!("method {name}.{}()", m.name)),
-                            ..Default::default()
-                        });
-                    }
+        if let StmtKind::Class { name, parent, methods, .. } = &stmt.kind
+            && name == target_class
+        {
+            for m in methods {
+                if !seen.contains(&m.name) {
+                    seen.insert(m.name.clone());
+                    items.push(CompletionItem {
+                        label: m.name.clone(),
+                        kind: Some(CompletionItemKind::METHOD),
+                        detail: Some(format!("method {name}.{}()", m.name)),
+                        ..Default::default()
+                    });
                 }
-                if let Some(pvar) = parent {
-                    collect_ast_dot_completions_for_class(stmts, &pvar.name, seen, items);
-                }
+            }
+            if let Some(pvar) = parent {
+                collect_ast_dot_completions_for_class(stmts, &pvar.name, seen, items);
             }
         }
     }
@@ -687,7 +686,7 @@ fn collect_dot_completions_for_class(
             }
         }
 
-        let is_matching_class = target_class.map_or(true, |tc| current_class_name == tc);
+        let is_matching_class = target_class.is_none_or(|tc| current_class_name == tc);
 
         if inside_class && is_matching_class {
             // Class methods
@@ -715,16 +714,15 @@ fn collect_dot_completions_for_class(
                     if (recv == "self" || recv == receiver)
                         && !field.is_empty()
                         && field.chars().all(|c| c == '_' || c.is_alphanumeric())
+                        && !seen.contains(field) && !KEYWORDS.contains(&field)
                     {
-                        if !seen.contains(field) && !KEYWORDS.contains(&field) {
-                            seen.insert(field.to_string());
-                            items.push(CompletionItem {
-                                label: field.to_string(),
-                                kind: Some(CompletionItemKind::FIELD),
-                                detail: Some(format!("property {current_class_name}.{field}")),
-                                ..Default::default()
-                            });
-                        }
+                        seen.insert(field.to_string());
+                        items.push(CompletionItem {
+                            label: field.to_string(),
+                            kind: Some(CompletionItemKind::FIELD),
+                            detail: Some(format!("property {current_class_name}.{field}")),
+                            ..Default::default()
+                        });
                     }
                 }
             }
@@ -738,16 +736,15 @@ fn collect_dot_completions_for_class(
                 if recv == receiver
                     && !field.is_empty()
                     && field.chars().all(|c| c == '_' || c.is_alphanumeric())
+                    && !seen.contains(field) && !KEYWORDS.contains(&field)
                 {
-                    if !seen.contains(field) && !KEYWORDS.contains(&field) {
-                        seen.insert(field.to_string());
-                        items.push(CompletionItem {
-                            label: field.to_string(),
-                            kind: Some(CompletionItemKind::FIELD),
-                            detail: Some(format!("property {field}")),
-                            ..Default::default()
-                        });
-                    }
+                    seen.insert(field.to_string());
+                    items.push(CompletionItem {
+                        label: field.to_string(),
+                        kind: Some(CompletionItemKind::FIELD),
+                        detail: Some(format!("property {field}")),
+                        ..Default::default()
+                    });
                 }
             }
         }
@@ -792,11 +789,19 @@ fn collect_ast_completions(source: &str, stmts: &[Stmt], pos: Position, items: &
                 }
                 collect_ast_completions(source, &decl.body.stmts, pos, items);
             }
-            StmtKind::Class { name, methods, .. } => {
+            StmtKind::Class {
+                name,
+                methods,
+                openness,
+                ..
+            } => {
+                // Worth showing: what a type is open to is the first thing a
+                // reader wants from a class they are about to reach for.
+                let modifier = openness.word().map(|w| format!("{w} ")).unwrap_or_default();
                 items.push(CompletionItem {
                     label: name.clone(),
                     kind: Some(CompletionItemKind::CLASS),
-                    detail: Some(format!("class {name}")),
+                    detail: Some(format!("{modifier}class {name}")),
                     ..Default::default()
                 });
                 for m in methods {
@@ -915,16 +920,16 @@ fn get_hover(state: Option<&DocumentState>, pos: Position) -> Option<Hover> {
     }
 
     // Check user declarations in AST
-    if let Some(ast) = &state.ast {
-        if let Some(info) = find_decl_hover(ast, &word) {
-            return Some(Hover {
-                contents: HoverContents::Scalar(MarkedString::LanguageString(LanguageString {
-                    language: "quince".to_string(),
-                    value: info,
-                })),
-                range: None,
-            });
-        }
+    if let Some(ast) = &state.ast
+        && let Some(info) = find_decl_hover(ast, &word)
+    {
+        return Some(Hover {
+            contents: HoverContents::Scalar(MarkedString::LanguageString(LanguageString {
+                language: "quince".to_string(),
+                value: info,
+            })),
+            range: None,
+        });
     }
 
     None
@@ -1364,10 +1369,9 @@ fn get_signature_help(state: Option<&DocumentState>, pos: Position) -> Option<Si
         });
     }
 
-
     let target_class = if let Some(recv) = &receiver {
         infer_receiver_class(&state.text, recv, pos)
-    } else if callee.chars().next().map_or(false, |c| c.is_uppercase()) {
+    } else if callee.chars().next().is_some_and(|c| c.is_uppercase()) {
         Some(callee.clone())
     } else {
         None
@@ -1429,14 +1433,14 @@ fn find_call_context(source: &str, pos: Position) -> Option<(String, Option<Stri
 
     let mut receiver = None;
     let before_ident = text_before_paren[..start_ident].trim_end();
-    if before_ident.ends_with('.') {
-        let recv_part = before_ident[..before_ident.len() - 1].trim_end();
+    if let Some(recv_part) = before_ident.strip_suffix('.') {
+        let recv_part = recv_part.trim_end();
         if !recv_part.is_empty() {
             let mut cleaned = recv_part;
-            if cleaned.ends_with(')') {
-                if let Some(open_paren) = cleaned.rfind('(') {
-                    cleaned = cleaned[..open_paren].trim_end();
-                }
+            if cleaned.ends_with(')')
+                && let Some(open_paren) = cleaned.rfind('(')
+            {
+                cleaned = cleaned[..open_paren].trim_end();
             }
 
             if cleaned.ends_with('"') || cleaned.ends_with(']') || cleaned.ends_with('}') {
@@ -1496,10 +1500,10 @@ fn find_function_signature(
         }
     }
 
-    if let Some(stmts) = ast {
-        if let Some(sig) = find_ast_signature(stmts, callee, target_class) {
-            return Some(sig);
-        }
+    if let Some(stmts) = ast
+        && let Some(sig) = find_ast_signature(stmts, callee, target_class)
+    {
+        return Some(sig);
     }
 
     find_text_signature(source, callee, target_class)
@@ -1556,12 +1560,12 @@ fn find_ast_signature(
                             });
                         }
                     }
-                    if let Some(pvar) = parent {
-                        if let Some(mut parent_sig) = find_ast_signature(stmts, &pvar.name, Some(&pvar.name)) {
-                            let params_str = parent_sig.label.split('(').nth(1).unwrap_or(")");
-                            parent_sig.label = format!("{name}({params_str}");
-                            return Some(parent_sig);
-                        }
+                    if let Some(pvar) = parent
+                        && let Some(mut parent_sig) = find_ast_signature(stmts, &pvar.name, Some(&pvar.name))
+                    {
+                        let params_str = parent_sig.label.split('(').nth(1).unwrap_or(")");
+                        parent_sig.label = format!("{name}({params_str}");
+                        return Some(parent_sig);
                     }
                     return Some(SignatureInformation {
                         label: format!("{}()", name),
@@ -1571,7 +1575,7 @@ fn find_ast_signature(
                     });
                 }
 
-                if target_class.map_or(true, |tc| tc == name.as_str()) {
+                if target_class.is_none_or(|tc| tc == name.as_str()) {
                     for m in methods {
                         if m.name == callee {
                             let params: Vec<String> = m.params.iter().filter(|p| !p.receiver && p.name != "self").map(|p| p.name.clone()).collect();
@@ -1591,10 +1595,10 @@ fn find_ast_signature(
                             });
                         }
                     }
-                    if let Some(pvar) = parent {
-                        if let Some(parent_sig) = find_ast_signature(stmts, callee, Some(&pvar.name)) {
-                            return Some(parent_sig);
-                        }
+                    if let Some(pvar) = parent
+                        && let Some(parent_sig) = find_ast_signature(stmts, callee, Some(&pvar.name))
+                    {
+                        return Some(parent_sig);
                     }
                 }
             }
@@ -1649,7 +1653,7 @@ fn find_text_signature(
                 let name = parts[1].split('(').next().unwrap_or("").trim();
                 if name == callee {
                     let is_matching = if inside_class {
-                        target_class.map_or(true, |tc| tc == current_class)
+                        target_class.is_none_or(|tc| tc == current_class)
                     } else {
                         target_class.is_none()
                     };
@@ -1686,29 +1690,31 @@ fn find_text_signature(
             let trimmed = line.trim();
             if trimmed.starts_with("class ") {
                 let parts: Vec<_> = trimmed.split_whitespace().collect();
-                if parts.len() >= 2 && parts[1].split('{').next().unwrap_or("").trim() == tc {
-                    if let Some(ext_idx) = parts.iter().position(|&p| p == "extends") {
-                        if ext_idx + 1 < parts.len() {
-                            let parent_name = parts[ext_idx + 1].split('{').next().unwrap_or("").trim();
-                            if callee == tc {
-                                if let Some(mut parent_sig) = find_text_signature(source, parent_name, Some(parent_name)) {
-                                    let params_str = parent_sig.label.split('(').nth(1).unwrap_or(")");
-                                    parent_sig.label = format!("{tc}({params_str}");
-                                    return Some(parent_sig);
-                                }
-                            } else {
-                                if let Some(parent_sig) = find_text_signature(source, callee, Some(parent_name)) {
-                                    return Some(parent_sig);
-                                }
-                            }
+                if parts.len() >= 2
+                    && parts[1].split('{').next().unwrap_or("").trim() == tc
+                    && let Some(ext_idx) = parts.iter().position(|&p| p == "extends")
+                    && ext_idx + 1 < parts.len()
+                {
+                    let parent_name = parts[ext_idx + 1].split('{').next().unwrap_or("").trim();
+                    if callee == tc {
+                        if let Some(mut parent_sig) =
+                            find_text_signature(source, parent_name, Some(parent_name))
+                        {
+                            let params_str = parent_sig.label.split('(').nth(1).unwrap_or(")");
+                            parent_sig.label = format!("{tc}({params_str}");
+                            return Some(parent_sig);
                         }
+                    } else if let Some(parent_sig) =
+                        find_text_signature(source, callee, Some(parent_name))
+                    {
+                        return Some(parent_sig);
                     }
                 }
             }
         }
     }
 
-    if callee.chars().next().map_or(false, |c| c.is_uppercase()) {
+    if callee.chars().next().is_some_and(|c| c.is_uppercase()) {
         return Some(SignatureInformation {
             label: format!("{}()", callee),
             documentation: None,

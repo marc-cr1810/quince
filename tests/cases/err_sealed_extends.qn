@@ -1,0 +1,8 @@
+# `sealed` is `final` and `complete` at once, so it answers for the hierarchy
+# door with the same message `final` gives — quoting back the word the program
+# actually wrote.
+sealed class Uuid {
+    op init(text) { self.text = text }
+}
+
+class Guid extends Uuid {}

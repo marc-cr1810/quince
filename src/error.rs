@@ -372,20 +372,26 @@ impl QuinceError {
             let pointer_char = '┬';
             let bar_char = '─';
 
-            for c in span.start_col..span.end_col {
-                if c <= max_col {
-                    if c == span.target_col {
-                        underline_chars[c] = pointer_char;
-                    } else if underline_chars[c] == ' ' {
-                        underline_chars[c] = bar_char;
-                    }
+            // `take` bounds the span above and the vector's own length bounds it
+            // at `max_col`, which is what the range loop needed a guard for.
+            for (c, slot) in underline_chars
+                .iter_mut()
+                .enumerate()
+                .take(span.end_col)
+                .skip(span.start_col)
+            {
+                if c == span.target_col {
+                    *slot = pointer_char;
+                } else if *slot == ' ' {
+                    *slot = bar_char;
                 }
             }
         }
 
         let mut underline_line = format!(" {blank:>gutter$}{dot} ", blank = "");
-        for c in 1..=max_col {
-            let ch = underline_chars[c];
+        // Column 0 is not a column: the vector is `max_col + 1` long so that a
+        // column number indexes it directly, which is what `skip(1)` steps over.
+        for (c, &ch) in underline_chars.iter().enumerate().skip(1) {
             if ch != ' ' {
                 let style = eval_spans
                     .iter()
@@ -462,11 +468,13 @@ pub fn lev_distance(a: &str, b: &str) -> usize {
     let b_chars: Vec<char> = b.chars().collect();
     let mut d = vec![vec![0; b_chars.len() + 1]; a_chars.len() + 1];
 
-    for i in 0..=a_chars.len() {
-        d[i][0] = i;
+    // Each dimension is one longer than its string, so `enumerate` walks exactly
+    // the range the edit distance is defined over.
+    for (i, row) in d.iter_mut().enumerate() {
+        row[0] = i;
     }
-    for j in 0..=b_chars.len() {
-        d[0][j] = j;
+    for (j, cell) in d[0].iter_mut().enumerate() {
+        *cell = j;
     }
 
     for i in 1..=a_chars.len() {

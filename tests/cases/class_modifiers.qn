@@ -1,0 +1,44 @@
+# There are two ways to attach behaviour to a type from outside — a subclass and
+# an `extend` block — so a class declaration has four states, and each has its
+# own word rather than being spelled by stacking modifiers.
+#
+# This case is the half a corpus file can show: what each word still allows. The
+# refusals are four `err_` cases beside it.
+class Animal {
+    op init(name) { self.name = name }
+    fn speak() { return self.name + " makes a sound" }
+}
+
+# `final`: no subclass, but the vocabulary may still grow.
+final class Money extends Animal {
+    fn worth() { return 100 }
+}
+extend Money {
+    fn currency() { return "gbp" }
+}
+let m = Money("penny")
+print(m.worth(), m.currency())
+
+# `complete`: the method table is done, but a subclass is welcome — a subclass
+# adds nothing to the class it descends from, it makes a new one.
+complete class Parser {
+    op init(source) { self.source = source }
+    fn peek() { return self.source }
+}
+class Lexer extends Parser {
+    fn tokens() { return [self.peek()] }
+}
+print(Lexer("let").tokens())
+
+# A modifier says nothing about what its class may descend from, so all three
+# take an `extends`, and instances stay ordinary objects that still take fields.
+sealed class Uuid extends Animal {}
+let u = Uuid("nil-uuid")
+u.version = 4
+print(u.speak(), u.version)
+
+# And the builtins are never closed, which is what keeps `extend` a feature.
+extend int {
+    fn double() { return self * 2 }
+}
+print(7.double())

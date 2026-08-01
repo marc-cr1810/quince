@@ -431,47 +431,74 @@ impl Interp {
             StmtKind::Class {
                 name,
                 parent,
+                parent_span,
                 methods,
+                openness,
                 slot,
             } => {
                 // Read before the class's own name is bound, so `class A extends
                 // A` is an undefined variable rather than a cycle in the chain
                 // that `Class::method` walks.
                 let parent = match parent {
-                    Some(parent) => match self.read(parent, env, stmt.span)? {
-                        // A builtin with no `init` is the one parent that cannot
-                        // work, and for a reason that needs no second list to
-                        // record: extending a builtin means `super.init` writes
-                        // the value the subclass *is*, and where there is no
-                        // conversion there is nothing for it to call. That rules
-                        // out `function` and `class`, exactly the two that refuse
-                        // to be constructed on their own.
-                        Value::Class(id)
-                            if self.heap.class(id).builtin.is_some()
-                                && self.heap.class(id).slot(Op::Init).is_none() =>
-                        {
-                            let builtin = self.heap.class(id).name.clone();
-                            return Err(QuinceError::new(
-                                format!("`{name}` cannot extend `{builtin}`"),
-                                stmt.span,
-                            )
-                            .with_kind(ErrorKind::Type)
-                            .with_help(format!(
-                                "there is no value a {builtin} could be made from, so `super.init` would have nothing to call"
-                            )));
+                    Some(parent) => {
+                        // Every refusal below is about the parent, so it is
+                        // reported at the word that names it: the statement's own
+                        // span reaches to the closing brace, and a caret under
+                        // twenty lines names nothing.
+                        let at = parent_span.expect("a parent is parsed with its span");
+                        match self.read(parent, env, at)? {
+                            // A builtin with no `init` is the one parent that cannot
+                            // work, and for a reason that needs no second list to
+                            // record: extending a builtin means `super.init` writes
+                            // the value the subclass *is*, and where there is no
+                            // conversion there is nothing for it to call. That rules
+                            // out `function` and `class`, exactly the two that refuse
+                            // to be constructed on their own.
+                            Value::Class(id)
+                                if self.heap.class(id).builtin.is_some()
+                                    && self.heap.class(id).slot(Op::Init).is_none() =>
+                            {
+                                let builtin = self.heap.class(id).name.clone();
+                                return Err(QuinceError::new(
+                                    format!("`{name}` cannot extend `{builtin}`"),
+                                    at,
+                                )
+                                .with_kind(ErrorKind::Type)
+                                .with_help(format!(
+                                    "there is no value a {builtin} could be made from, so `super.init` would have nothing to call"
+                                )));
+                            }
+                            // One of the two doors. The other is `extend`, refused
+                            // in `may_extend` — and the modifier is quoted back
+                            // rather than named, since `final` and `sealed` both
+                            // reach here and the program wrote one of them.
+                            Value::Class(id)
+                                if self.heap.class(id).openness.closes_inheritance() =>
+                            {
+                                let closed = self.heap.class(id).name.clone();
+                                let word = self.heap.class(id).openness.word().unwrap_or_default();
+                                return Err(QuinceError::new(
+                                    format!("`{name}` cannot extend `{closed}`"),
+                                    at,
+                                )
+                                .with_kind(ErrorKind::Type)
+                                .with_help(format!(
+                                    "`{closed}` is declared `{word}`, so it has no subclasses — `{name}` can hold a `{closed}`, but it cannot be one"
+                                )));
+                            }
+                            Value::Class(id) => Some(id),
+                            other => {
+                                return Err(QuinceError::new(
+                                    format!(
+                                        "a class can only extend a class, but `{}` is {}",
+                                        parent.name,
+                                        other.type_name(&self.heap)
+                                    ),
+                                    at,
+                                ));
+                            }
                         }
-                        Value::Class(id) => Some(id),
-                        other => {
-                            return Err(QuinceError::new(
-                                format!(
-                                    "a class can only extend a class, but `{}` is {}",
-                                    parent.name,
-                                    other.type_name(&self.heap)
-                                ),
-                                stmt.span,
-                            ));
-                        }
-                    },
+                    }
                     None => None,
                 };
 
@@ -513,6 +540,7 @@ impl Interp {
                     parent,
                     slots,
                     builtin: None,
+                    openness: *openness,
                 };
 
                 // Inherited rather than searched for: a class that declares no
@@ -1952,6 +1980,22 @@ impl Interp {
     /// affordable here and would not be there.
     fn may_extend(&self, id: ObjId, name: &str, span: Span) -> Result<(), QuinceError> {
         let type_name = || self.heap.class(id).name.clone();
+        // First, because it is the only one of the three that is about the type
+        // rather than about the name being added: a closed type refuses the block,
+        // and which method it happens to start with is beside the point.
+        if self.heap.class(id).openness.closes_extension() {
+            let word = self.heap.class(id).openness.word().unwrap_or_default();
+            return Err(QuinceError::new(
+                format!("{} cannot be extended", type_name()),
+                span,
+            )
+            .with_kind(ErrorKind::Type)
+            .with_help(format!(
+                "`{}` is declared `{word}`, and a method added from outside is exactly what \
+                 that closes — declare this one in the class body",
+                type_name()
+            )));
+        }
         if self.heap.class(id).method(name, &self.heap).is_some() {
             return Err(QuinceError::new(
                 format!("{} already has a method `{name}`", type_name()),
@@ -4039,6 +4083,55 @@ mod tests {
             panic!("`Animal().name()` should have answered");
         };
         assert_eq!(&*animal, "animal", "and the extension still answers for it");
+    }
+
+    #[test]
+    fn a_modifier_closes_one_class_and_not_its_ancestors() {
+        // Openness belongs to the declaration that said the word, and no walk of
+        // the chain goes looking for it. `Dog` closing itself leaves `Animal` open
+        // to both routes — which is what the two statements after `Dog` running at
+        // all prove — and `Cat` is open because it said nothing.
+        let interp = run("class Animal { fn speak() { return \"...\" } }\n\
+             sealed class Dog extends Animal {}\n\
+             class Cat extends Animal {}\n\
+             extend Animal { fn legs() { return 4 } }");
+
+        let openness = |name: &str| match global(&interp, name) {
+            Some(Value::Class(id)) => interp.heap.class(id).openness,
+            other => panic!("`{name}` should be a class, got {other:?}"),
+        };
+        assert!(openness("Dog").closes_inheritance());
+        assert!(openness("Dog").closes_extension());
+        for open in ["Animal", "Cat"] {
+            assert!(
+                !openness(open).closes_inheritance() && !openness(open).closes_extension(),
+                "`{open}` should have stayed open"
+            );
+        }
+    }
+
+    #[test]
+    fn each_modifier_closes_only_its_own_door() {
+        // The table in `Openness`, measured on real class objects rather than on
+        // the enum: `final` leaves `extend` alone, and `complete` leaves the
+        // hierarchy alone. Both halves are invisible to a corpus case, which can
+        // only ever show the refusals.
+        let interp = run("final class F {}\n\
+             complete class C {}\n\
+             extend F { fn tag() { return 1 } }\n\
+             class Sub extends C {}");
+
+        let openness = |name: &str| match global(&interp, name) {
+            Some(Value::Class(id)) => interp.heap.class(id).openness,
+            other => panic!("`{name}` should be a class, got {other:?}"),
+        };
+        assert!(openness("F").closes_inheritance());
+        assert!(!openness("F").closes_extension(), "`final` is not `sealed`");
+        assert!(openness("C").closes_extension());
+        assert!(
+            !openness("C").closes_inheritance(),
+            "`complete` is not `sealed`"
+        );
     }
 
     #[test]

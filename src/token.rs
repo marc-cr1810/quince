@@ -44,6 +44,11 @@ pub enum TokenKind {
     /// that word already means inheritance in a class header, and a block which
     /// declares no new type would be a pun on it.
     Extend,
+    /// The three class modifiers, one per state a declaration can be in. See
+    /// [`crate::ast::Openness`] for which door each one closes — [`Self::Final`]
+    /// is the fourth, and is shared with the binding forms.
+    Complete,
+    Sealed,
     /// Keywords rather than identifiers so that using one where it has no
     /// meaning is caught by the resolver, with a message that says why.
     SelfKw,
@@ -97,9 +102,16 @@ pub enum TokenKind {
     Eof,
 }
 
+/// Every reserved word, for the completer and the highlighter to read.
+///
+/// The one to keep in step with [`TokenKind::keyword`] below: a word mapped
+/// there and missing here is a keyword the completer never offers and the
+/// highlighter's own test never checks, which is what `extend` was until the
+/// class modifiers arrived and the omission was noticed beside them.
 pub const KEYWORDS: &[&str] = &[
-    "fn", "op", "class", "extends", "self", "super", "let", "final", "const", "if", "else",
-    "while", "for", "in", "return", "try", "catch", "throw", "true", "false", "nil",
+    "fn", "op", "class", "extends", "extend", "self", "super", "let", "final", "complete",
+    "sealed", "const", "if", "else", "while", "for", "in", "return", "try", "catch", "throw",
+    "true", "false", "nil",
 ];
 
 impl TokenKind {
@@ -115,6 +127,8 @@ impl TokenKind {
             "super" => TokenKind::Super,
             "let" => TokenKind::Let,
             "final" => TokenKind::Final,
+            "complete" => TokenKind::Complete,
+            "sealed" => TokenKind::Sealed,
             "const" => TokenKind::Const,
             "if" => TokenKind::If,
             "else" => TokenKind::Else,
@@ -151,6 +165,8 @@ impl fmt::Display for TokenKind {
             TokenKind::Super => write!(f, "super"),
             TokenKind::Let => write!(f, "let"),
             TokenKind::Final => write!(f, "final"),
+            TokenKind::Complete => write!(f, "complete"),
+            TokenKind::Sealed => write!(f, "sealed"),
             TokenKind::Const => write!(f, "const"),
             TokenKind::If => write!(f, "if"),
             TokenKind::Else => write!(f, "else"),

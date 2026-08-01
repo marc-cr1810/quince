@@ -530,6 +530,61 @@ impl BindKind {
     }
 }
 
+/// What a class declaration leaves open.
+///
+/// There are exactly two ways to attach behaviour to a type from outside — a
+/// subclass, and an `extend` block — so there are four states, and each has its
+/// own word rather than being spelled by stacking modifiers. See DESIGN.md.
+///
+/// | | inherit | `extend` |
+/// |---|---|---|
+/// | [`Openness::Open`] | yes | yes |
+/// | [`Openness::Final`] | no | yes |
+/// | [`Openness::Complete`] | yes | no |
+/// | [`Openness::Sealed`] | no | no |
+///
+/// The two predicates below are exhaustive matches on purpose: a fifth variant
+/// cannot be added without answering for both doors, which is the only way the
+/// table above and the code can be made to stay in step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Openness {
+    /// `class Point { … }`.
+    Open,
+    /// `final class Point { … }` — no subclass, but its vocabulary may grow.
+    Final,
+    /// `complete class Point { … }` — the method table is done; subclasses are
+    /// still welcome, since a subclass adds nothing to the class it descends
+    /// from.
+    Complete,
+    /// `sealed class Point { … }` — neither door. A composite rather than a
+    /// third door: `sealed` is `final` and `complete` at once, given its own
+    /// word so the common case reads as one.
+    Sealed,
+}
+
+impl Openness {
+    /// Whether a class may name this one after `extends`.
+    pub fn closes_inheritance(self) -> bool {
+        matches!(self, Openness::Final | Openness::Sealed)
+    }
+
+    /// Whether an `extend` block may add a method to this one.
+    pub fn closes_extension(self) -> bool {
+        matches!(self, Openness::Complete | Openness::Sealed)
+    }
+
+    /// The keyword as written, for a report that quotes it back. `None` is the
+    /// declaration that used no modifier and so has nothing to quote.
+    pub fn word(self) -> Option<&'static str> {
+        match self {
+            Openness::Open => None,
+            Openness::Final => Some("final"),
+            Openness::Complete => Some("complete"),
+            Openness::Sealed => Some("sealed"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum StmtKind {
     Expr(Expr),
@@ -556,7 +611,14 @@ pub enum StmtKind {
         /// The class this one extends, resolved in the enclosing scope like any
         /// other name — a superclass is an ordinary value, not a static label.
         parent: Option<Var>,
+        /// Where the parent was named, kept for the same reason `Extend` keeps
+        /// `target_span`: the statement's own span covers the whole body, and a
+        /// report about the *parent* should underline the word naming it rather
+        /// than the twenty lines that follow. [`Var`] carries no span of its own.
+        parent_span: Option<Span>,
         methods: Vec<Rc<FnDecl>>,
+        /// Which of the two doors the declaration closed, if either.
+        openness: Openness,
         /// Where the class's own name is bound, as for `Let`.
         slot: Option<Slot>,
     },
@@ -629,6 +691,48 @@ pub enum StmtKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_four_states_are_the_four_combinations() {
+        // The table in `Openness`'s docs, written once more where a change to
+        // either predicate has to disagree with it. `Sealed` being exactly the
+        // other two at once is the claim worth pinning: it is a spelling of the
+        // pair, not a third door.
+        let table = [
+            (Openness::Open, false, false, None),
+            (Openness::Final, true, false, Some("final")),
+            (Openness::Complete, false, true, Some("complete")),
+            (Openness::Sealed, true, true, Some("sealed")),
+        ];
+        for (openness, inheritance, extension, word) in table {
+            assert_eq!(openness.closes_inheritance(), inheritance, "{openness:?}");
+            assert_eq!(openness.closes_extension(), extension, "{openness:?}");
+            assert_eq!(openness.word(), word, "{openness:?}");
+        }
+
+        // Every state reached, so the four rows above are the whole table and not
+        // four of five.
+        let states: Vec<_> = table
+            .iter()
+            .map(|(o, ..)| (o.closes_inheritance(), o.closes_extension()))
+            .collect();
+        for combination in [(false, false), (true, false), (false, true), (true, true)] {
+            assert!(states.contains(&combination), "{combination:?} unreachable");
+        }
+    }
+
+    #[test]
+    fn a_modifier_is_spelled_the_way_it_is_written() {
+        // The words the parser matches and the words a report quotes back are the
+        // same list, so a rename cannot land in one and not the other.
+        for openness in [Openness::Final, Openness::Complete, Openness::Sealed] {
+            let word = openness.word().expect("a modifier has a word");
+            assert!(
+                crate::token::KEYWORDS.contains(&word),
+                "`{word}` is not a reserved word, so it cannot be a modifier"
+            );
+        }
+    }
 
     #[test]
     fn every_listed_op_round_trips_through_its_name() {

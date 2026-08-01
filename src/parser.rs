@@ -1,6 +1,6 @@
 use crate::ast::{
-    self, BinaryOp, BindKind, Block, Expr, ExprKind, FnDecl, LogicalOp, Op, Param, Stmt, StmtKind,
-    UnaryOp, Var,
+    self, BinaryOp, BindKind, Block, Expr, ExprKind, FnDecl, LogicalOp, Op, Openness, Param, Stmt,
+    StmtKind, UnaryOp, Var,
 };
 use crate::error::QuinceError;
 use crate::token::{Span, Token, TokenKind};
@@ -64,7 +64,13 @@ impl Parser {
 
     fn statement(&mut self) -> Result<Stmt, QuinceError> {
         match self.peek().kind {
+            // One token of lookahead, and only here: `final` is the one modifier
+            // that is also a binding form, so the class case has to be recognised
+            // before `let_stmt` consumes the keyword and demands a name.
+            // `complete` and `sealed` need none — they introduce nothing else.
+            TokenKind::Final if self.next_is(&TokenKind::Class) => self.class_stmt(),
             TokenKind::Let | TokenKind::Final | TokenKind::Const => self.let_stmt(),
+            TokenKind::Complete | TokenKind::Sealed => self.class_stmt(),
             TokenKind::Fn => self.fn_stmt(),
             // An `op` is a method the language calls on an instance, so there is
             // nothing for one to belong to out here.
@@ -251,15 +257,38 @@ impl Parser {
         ))
     }
 
+    /// `class Point { … }`, with an optional modifier in front of it.
+    ///
+    /// The span starts at the modifier when there is one, so a report about the
+    /// declaration underlines the header the program wrote rather than the half
+    /// of it after the word.
     fn class_stmt(&mut self) -> Result<Stmt, QuinceError> {
-        let start = self.advance().span;
+        let start = self.peek().span;
+        let openness = match self.peek().kind {
+            TokenKind::Final => Openness::Final,
+            TokenKind::Complete => Openness::Complete,
+            TokenKind::Sealed => Openness::Sealed,
+            _ => Openness::Open,
+        };
+        // `class` is the current token when there was no modifier, and the next
+        // one when there was — so the two cases differ only in what has to be
+        // eaten first, and only the second can fail.
+        match openness.word() {
+            Some(word) => {
+                self.advance();
+                self.expect(TokenKind::Class, &format!("after `{word}`"))?;
+            }
+            None => {
+                self.advance();
+            }
+        }
         let (name, _) = self.expect_ident("after `class`")?;
 
-        let parent = if self.eat(&TokenKind::Extends) {
-            let (parent, _) = self.expect_ident("after `extends`")?;
-            Some(Var::new(parent))
+        let (parent, parent_span) = if self.eat(&TokenKind::Extends) {
+            let (parent, span) = self.expect_ident("after `extends`")?;
+            (Some(Var::new(parent)), Some(span))
         } else {
-            None
+            (None, None)
         };
 
         self.expect(TokenKind::LBrace, "after the class name")?;
@@ -282,7 +311,9 @@ impl Parser {
             kind: StmtKind::Class {
                 name,
                 parent,
+                parent_span,
                 methods,
+                openness,
                 slot: None,
             },
             span: start.to(end),
@@ -727,6 +758,17 @@ impl Parser {
 
     fn at_end(&self) -> bool {
         self.peek().kind == TokenKind::Eof
+    }
+
+    /// Whether the token *after* the current one is `kind`.
+    ///
+    /// The only lookahead in the parser, and it exists for one word: `final`
+    /// introduces a binding unless a `class` follows it. Past the end is `false`
+    /// rather than a panic, since the token after `Eof` is nothing at all.
+    fn next_is(&self, kind: &TokenKind) -> bool {
+        self.tokens
+            .get(self.pos + 1)
+            .is_some_and(|token| std::mem::discriminant(&token.kind) == std::mem::discriminant(kind))
     }
 
     /// Consumes and returns the current token, parking on `Eof` at the end.
@@ -1386,6 +1428,67 @@ mod tests {
         assert_eq!(
             parse_err("class B extends A {\n fn m() { return super }\n}").message,
             "expected `.` after `super`, found `}`"
+        );
+    }
+
+    #[test]
+    fn every_modifier_marks_a_class_and_none_forbids_a_parent() {
+        // A modifier says what may attach to the class from below and beside it,
+        // never what it may descend from — so all three allow `extends`.
+        for (src, expected) in [
+            ("class Dog extends Animal {}", Openness::Open),
+            ("final class Dog extends Animal {}", Openness::Final),
+            ("complete class Dog extends Animal {}", Openness::Complete),
+            ("sealed class Dog extends Animal {}", Openness::Sealed),
+        ] {
+            let stmts = parse_ok(src);
+            let StmtKind::Class {
+                name,
+                parent,
+                openness,
+                ..
+            } = &stmts[0].kind
+            else {
+                panic!("expected a class from `{src}`");
+            };
+            assert_eq!(name, "Dog");
+            assert_eq!(*openness, expected, "`{src}`");
+            assert_eq!(parent.as_ref().map(|p| p.name.as_str()), Some("Animal"));
+        }
+    }
+
+    #[test]
+    fn final_still_introduces_a_binding() {
+        // `final` is the one modifier that is also a binding form, so it is the
+        // one the parser has to look past `class` to tell apart. The lookahead is
+        // a single token, and every other `final` goes where it always did.
+        let stmts = parse_ok("final x = 1");
+        let StmtKind::Let { name, bind, .. } = &stmts[0].kind else {
+            panic!("expected a binding");
+        };
+        assert_eq!(name, "x");
+        assert_eq!(*bind, BindKind::Final);
+
+        // And a `final` in front of anything else is still a binding missing its
+        // name, rather than a modifier the parser invented a meaning for.
+        assert_eq!(
+            parse_err("final extend int {}").message,
+            "expected a name after `final`, found `extend`"
+        );
+    }
+
+    #[test]
+    fn a_modifier_has_nothing_to_say_without_a_class() {
+        // `complete` and `sealed` introduce nothing else, so they need no
+        // lookahead — and the error lands on what is missing rather than on a
+        // binding the program never wrote.
+        assert_eq!(
+            parse_err("sealed x = 1").message,
+            "expected `class` after `sealed`, found `x`"
+        );
+        assert_eq!(
+            parse_err("complete fn f() {}").message,
+            "expected `class` after `complete`, found `fn`"
         );
     }
 

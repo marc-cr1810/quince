@@ -1,0 +1,10 @@
+# `complete` closes the other door: the class's own methods are all of them.
+# An extension cannot shadow, cannot define an `op`, and cannot add storage —
+# but it still adds vocabulary from outside, which is what the word refuses.
+complete class Parser {
+    op init(source) { self.source = source }
+}
+
+extend Parser {
+    fn peek() { return self.source }
+}

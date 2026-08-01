@@ -948,6 +948,93 @@ keyword and its span are in hand before a body is parsed, so the error points at
 itself. It is also the one refusal that cannot be reached at run time — an `op` never gets
 as far as the table.
 
+### The two doors, and the four words
+
+Every type above is open, and there are exactly two ways to attach behaviour to one from
+outside: a subclass, and an `extend` block. Two doors is four states, and each gets its own
+word.
+
+| | inherit | `extend` |
+|---|---|---|
+| `class Point` | yes | yes |
+| `final class Point` | no | yes |
+| `complete class Point` | yes | no |
+| `sealed class Point` | no | no |
+
+The alternative was two orthogonal modifiers that stack — `final complete class Point` for
+the last row — which is one fewer word for the same expressiveness and was rejected on how
+it reads. A composite word costs a redundancy that has to be admitted rather than hidden:
+`sealed` **is** `final` and `complete` at once, so a reader has three words to learn where
+two would do. What it buys is that every common case is one word, and the three sit on a
+scale — each of `final` and `complete` closes a door, `sealed` closes both — rather than
+being an unordered set of flags.
+
+`Openness` carries the state as the word the program wrote, not as two bools, so a refusal
+can quote the modifier back: `sealed` and `final` both close the hierarchy, and a report
+that said `final` to a program that wrote `sealed` would be naming a keyword the author
+never typed. The two predicates are exhaustive matches, so a fifth variant cannot be added
+without answering for both doors — which is the only thing keeping the table above and the
+code in step, along with the test that walks it.
+
+**On `final`.** It is a second meaning for a word that already has a job: `final xs = [1, 2]`
+pins a name and leaves the list mutable. That is the objection raised against spelling
+extension blocks `extends` a section ago, and it has to be answered rather than waved at.
+Two things answer it. The meanings are one idea at two levels — **`final` fixes the shape of
+a declaration, and `const` freezes data** — and neither `final` says anything about contents:
+a `final` binding's list still grows, and a `final` class's instances still take fields. And
+it is the pun Java already made, for these two meanings exactly, which is the difference
+between a word carrying two senses and a word carrying a surprise.
+
+**On `sealed`.** C# uses it for the hierarchy door alone, so using it for both is a widening
+rather than an inversion — nobody reads `sealed` and expects a subclass to work. Java 17 and
+Kotlin use it for a *permitted-subclass list*, which is a different feature wearing the same
+word; that is a cost, and it is the reason the row it names here is the one where both
+answers are no, which is the reading every use of the word shares.
+
+**On what it cost.** One token of lookahead, the only lookahead in the parser, and only for
+`final` — it is the one modifier that is also a binding form, so `final class` has to be
+told from `final xs = …` before `let_stmt` eats the keyword. `complete` and `sealed`
+introduce nothing else and need none. Two new reserved words, which is four edits in
+`token.rs`: everything downstream — the REPL completer, the highlighter, the LSP token map
+— reads `KEYWORDS`. Adding them is what turned up that `extend` had never been in that list,
+so it was highlighted but never offered, and the test that would have caught it iterates the
+same list it was missing from.
+
+**Both doors are worth closing, but not equally, and not forever.** A subclass can break an
+invariant a class holds about itself — `op eq`, ordering, arithmetic. An extension cannot:
+it may not shadow a method, define an `op`, or add storage. So `complete` is the weaker of
+the two, and it gets weaker still: when modules land, the extension table becomes
+per-module and `extend` stops being a program-wide change. `final` will be wanted regardless;
+`complete` may turn out to be the word nobody reaches for. That is the honest reading, and
+it is why `final` — not `sealed` — is the one spelled with the word every other language
+already uses for it.
+
+Where each refusal lives follows from what it is about. The hierarchy one joins the parent
+`match`, beside the one that turns back `class Callable extends function`; the extension one
+goes *first* in `may_extend`, ahead of the shadowing and double-extension checks, because it
+is the only one of the three about the type rather than about the name being added. A block
+whose first method collides with nothing is still refused, and refused for the type's reason.
+
+Both are checked at run time, and not because it was easier. `extends` names an ordinary
+variable read in the enclosing scope — a parameter can hold a class — so the resolver has no
+answer to give. That the parser demands an identifier there makes a static check look
+available; it is not.
+
+Three things a modifier deliberately is not:
+
+- **Not inherited, and not about ancestors.** `inherit_slots` copies a parent's slots down
+  and this is not one. All three modifiers allow `extends`: they say what may attach to a
+  class from below and beside it, never what it may descend from. The direction that could
+  go wrong is upward — `sealed class Dog extends Animal {}` must leave `Animal` open — which
+  is what `a_modifier_closes_one_class_and_not_its_ancestors` measures.
+- **Never true of a builtin.** `extend int` is the feature the whole class representation was
+  collapsed for, and `class MyStr extends string` works. A program cannot redeclare `int`, so
+  no syntax reaches one; `Class::builtin` writes `Open` and that is the whole story.
+- **Not on `Error`.** The prelude generates `class TypeError extends Error {}` and a program
+  is documented to write `class ParseError extends Error`. Closing the error hierarchy for
+  tidiness would break both — the second loudly, the first before any program ran at all.
+  `try_catch.qn` is what stands in the way.
+
 ## Calling a type converts
 
 `int(5)` works, and it needed no new vocabulary. The refusal above was a placeholder, and
@@ -1533,6 +1620,10 @@ of `assign`, which is the only op that *writes*, and the only one whose ordering
 Three keywords answering two questions: may the name be pointed somewhere else, and may
 the object it names be changed. `let` allows both, `final` allows only the second,
 `const` allows neither.
+
+`final` has a second use, on a class declaration, and it is the same idea rather than a
+reused word: it fixes the shape of a declaration where `const` freezes data. See The two
+doors, and the four words above.
 
 The keyword that used to mean `final` was called `const`, and the rename came out of
 noticing that it promised something it never delivered:
