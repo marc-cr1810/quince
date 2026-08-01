@@ -403,6 +403,7 @@ impl Parser {
 
         if !from {
             let (module, module_span) = self.expect_ident("after `import`")?;
+            self.refuse_path(&module)?;
             self.end_of_statement()?;
             return Ok(Stmt {
                 kind: StmtKind::Import {
@@ -415,6 +416,7 @@ impl Parser {
         }
 
         let (module, module_span) = self.expect_ident("after `from`")?;
+        self.refuse_path(&module)?;
         self.expect(TokenKind::Import, "after the module being imported from")?;
 
         let mut names = Vec::new();
@@ -438,6 +440,31 @@ impl Parser {
             },
             span: start.to(end),
         })
+    }
+
+    /// Refuses `import utils/strings` and `import utils.strings`.
+    ///
+    /// Caught here because here is where the `/` or the `.` still exists: by the
+    /// time the evaluator has a module name it has only the identifier, and the
+    /// generic "expected a newline after this statement" that the statement
+    /// terminator would otherwise produce sends someone looking at their line
+    /// endings rather than at the shape of what they asked for.
+    ///
+    /// The rule it enforces is that an import names a file beside the importer.
+    /// A path syntax has to answer what it is relative to, what a package is,
+    /// and how a search order works — all decisions that want a language with
+    /// modules already in use.
+    fn refuse_path(&mut self, module: &str) -> Result<(), QuinceError> {
+        if !self.check(&TokenKind::Slash) && !self.check(&TokenKind::Dot) {
+            return Ok(());
+        }
+        Err(syntax(
+            format!("`{module}` is a module name, and cannot be part of a path"),
+            self.peek().span,
+        )
+        .with_help(
+            "an import names a file beside this one, written without a directory or an extension",
+        ))
     }
 
     fn if_stmt(&mut self) -> Result<Stmt, QuinceError> {
@@ -849,11 +876,24 @@ impl Parser {
     /// mean taking the word, and `op init(from, to)` is how anyone writes a
     /// range.
     fn at_from_import(&self) -> bool {
-        matches!(&self.peek().kind, TokenKind::Ident(name) if name == "from")
-            && self
-                .tokens
-                .get(self.pos + 2)
-                .is_some_and(|token| token.kind == TokenKind::Import)
+        if !matches!(&self.peek().kind, TokenKind::Ident(name) if name == "from") {
+            return false;
+        }
+        if !matches!(
+            self.tokens.get(self.pos + 1).map(|token| &token.kind),
+            Some(TokenKind::Ident(_))
+        ) {
+            return false;
+        }
+        // A `.` or `/` counts as well as the `import` itself, so that
+        // `from a.b import c` is recognised as the import it was meant to be and
+        // refused by `refuse_path` — which says what is wrong with it — rather
+        // than falling through to be parsed as an expression and reported as a
+        // missing newline. Neither can be anything else after `from <name>`.
+        matches!(
+            self.tokens.get(self.pos + 2).map(|token| &token.kind),
+            Some(TokenKind::Import | TokenKind::Dot | TokenKind::Slash)
+        )
     }
 
     /// Consumes and returns the current token, parking on `Eof` at the end.

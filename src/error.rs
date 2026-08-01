@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt;
+use std::rc::Rc;
 
 use crate::color::Style;
 use crate::heap::ObjId;
@@ -39,6 +40,15 @@ pub enum ErrorKind {
     Recursion,
     ZeroDivision,
     Overflow,
+    /// A module that could not be loaded: one that is not there, one that cannot
+    /// be read, one that imports itself.
+    ///
+    /// One kind for all three because they are one thing to whoever hit it — the
+    /// import did not work — and because the fix is in the same place every
+    /// time. Not [`ErrorKind::Name`], which was the first answer and the wrong
+    /// one: a cycle reported as a name error says nothing true, and the three
+    /// belong together more than any of them belongs with an undefined variable.
+    Import,
     /// Raised by `throw`. The class comes from the instance in
     /// [`QuinceError::payload`], so this variant names none of its own.
     Thrown,
@@ -92,6 +102,7 @@ impl ErrorKind {
             ErrorKind::Recursion => Some("RecursionError"),
             ErrorKind::ZeroDivision => Some("ZeroDivisionError"),
             ErrorKind::Overflow => Some("OverflowError"),
+            ErrorKind::Import => Some("ImportError"),
         }
     }
 
@@ -133,6 +144,7 @@ pub static ERROR_KINDS: &[ErrorKind] = &[
     ErrorKind::Recursion,
     ErrorKind::ZeroDivision,
     ErrorKind::Overflow,
+    ErrorKind::Import,
 ];
 
 #[derive(Clone, Debug, PartialEq)]
@@ -208,6 +220,33 @@ pub struct QuinceError {
     pub help: Option<String>,
     /// Labeled sub-spans for rich multi-token diagnostic annotations.
     pub labels: Vec<LabeledSpan>,
+    /// The module this error's spans are measured against, when that is not the
+    /// file the program was started from.
+    ///
+    /// A span is an offset into one text, and once a program is more than one
+    /// file there is more than one text it could be an offset into. Without this
+    /// an error raised inside an imported module would be drawn against the
+    /// importer's source: the right numbers, the wrong file, a caret under
+    /// whatever happened to be at that offset. That is precisely the defect the
+    /// v0.5 diagnostics sweep existed to remove, so imports had to carry the
+    /// answer with them rather than reintroduce it.
+    ///
+    /// `None` means the starting module, which the caller of [`report`] already
+    /// holds the text of. Only the imported ones need saying.
+    ///
+    /// [`report`]: QuinceError::report
+    pub origin: Option<Rc<ModuleSource>>,
+}
+
+/// The text of one module, and what to call it in a report.
+///
+/// Shared rather than copied per error: one module is imported once and may
+/// raise many times, and an `Rc` here is what keeps a report from being a reason
+/// to hold every source file twice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleSource {
+    pub path: String,
+    pub text: Rc<str>,
 }
 
 impl QuinceError {
@@ -220,7 +259,23 @@ impl QuinceError {
             label: None,
             help: None,
             labels: Vec::new(),
+            origin: None,
         }
+    }
+
+    /// Records which module's text this error's spans belong to.
+    ///
+    /// Set on the way *out* — when an error escapes the execution of an imported
+    /// module, or a call to a function that module declared — rather than at the
+    /// raise. A raise site knows what went wrong and has no idea what file it is
+    /// in; the frame it unwinds through knows exactly. The first one to set it
+    /// wins, and that is the innermost, so an error crossing three modules is
+    /// reported against the one that actually raised it.
+    pub fn in_module(mut self, source: Rc<ModuleSource>) -> Self {
+        if self.origin.is_none() {
+            self.origin = Some(source);
+        }
+        self
     }
 
     /// Classifies an error, as a builder so a raise site adds one line.
@@ -267,6 +322,7 @@ impl QuinceError {
             label: Some(class.into()),
             help: None,
             labels: Vec::new(),
+            origin: None,
         }
     }
 

@@ -1,0 +1,8 @@
+Error: quince::ImportError
+
+ × `alpha.qn` is imported before it has finished loading: alpha.qn → beta.qn → alpha.qn
+  ╭─[beta.qn:1:8]
+1 │ import alpha
+  ·        ─────
+  ╰────
+  help: a module is loaded once, and a cycle has no order that could do that — move what both files need into a third

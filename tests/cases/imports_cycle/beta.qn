@@ -1,0 +1,3 @@
+import alpha
+
+fn b() { return alpha.a() }

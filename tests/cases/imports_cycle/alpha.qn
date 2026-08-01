@@ -1,0 +1,5 @@
+# `alpha` needs `beta`, which needs `alpha` back. There is no order that loads
+# each once, which is why this is refused rather than half-resolved.
+import beta
+
+fn a() { return beta.b() }

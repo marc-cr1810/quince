@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use crate::ast::Slot;
@@ -10,7 +11,7 @@ use crate::ast::{
 use crate::class::{BUILTINS as BUILTIN_TYPES, Builtin, Class, Instance};
 use crate::dict::{Dict, Key, NotAKey};
 use crate::env::{self, AssignError, Env, Globals};
-use crate::error::{ERROR_KINDS, ErrorKind, QuinceError};
+use crate::error::{ERROR_KINDS, ErrorKind, ModuleSource, QuinceError};
 use crate::heap::{Heap, ObjId, Object};
 use crate::token::{Span, TokenKind};
 use crate::show::Ask;
@@ -168,6 +169,40 @@ impl Attr {
     }
 }
 
+/// Where a file is in its loading.
+///
+/// Two states and not three: a module that failed to load is *removed*, so a
+/// later import of it tries again and fails the same way rather than being told
+/// it is part of a cycle.
+///
+/// Both carry the scope, and `Loading` carries it for a reason worth naming: a
+/// module's top-level statements run through `exec`, which is the collector's
+/// safe point, and nothing else refers to that scope while it is being filled.
+/// A `Loading` state without a handle would be a scope collected out from under
+/// the file still executing into it.
+enum ModuleState {
+    Loading(ObjId),
+    Loaded(ObjId),
+}
+
+impl ModuleState {
+    fn scope(&self) -> ObjId {
+        match self {
+            ModuleState::Loading(id) | ModuleState::Loaded(id) => *id,
+        }
+    }
+}
+
+/// What to call a file in a report — its name, not the path it was found at.
+///
+/// A report that named the full path would be different on every machine, which
+/// is the property the corpus already depends on for the starting file.
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
 pub struct Interp {
     pub heap: Heap,
     globals: ObjId,
@@ -209,6 +244,25 @@ pub struct Interp {
     /// held only by whichever modules imported it, which is not the same as
     /// being held forever.
     stdlib_modules: HashMap<&'static str, ObjId>,
+    /// Every file loaded as a module, keyed by its path as the filesystem
+    /// resolved it.
+    ///
+    /// `Loading` while its statements are running, which is the whole of cycle
+    /// detection: reaching an entry that is still `Loading` means the import
+    /// chain came back to a file it had not finished.
+    ///
+    /// Rooted like `stdlib_modules`, and for the same reason.
+    files: HashMap<PathBuf, ModuleState>,
+    /// The chain of files currently being loaded, outermost first, so a cycle
+    /// can be reported as the path it took rather than as the one file that
+    /// closed it.
+    loading: Vec<PathBuf>,
+    /// The text of each loaded module, for the reports raised inside it.
+    ///
+    /// Keyed by the module's scope rather than its path, because the frame that
+    /// tags an error has a scope in hand and would have to walk back to a path.
+    /// See [`QuinceError::in_module`].
+    module_sources: HashMap<ObjId, Rc<ModuleSource>>,
     /// The class each [`ErrorKind`] reifies into, captured once at startup.
     ///
     /// Held here rather than looked up in globals at `catch` time because `Error`
@@ -259,6 +313,9 @@ impl Interp {
             out,
             extensions: HashMap::new(),
             stdlib_modules: HashMap::new(),
+            files: HashMap::new(),
+            loading: Vec::new(),
+            module_sources: HashMap::new(),
             error_classes: Vec::new(),
         };
         interp.install_error_classes();
@@ -367,6 +424,17 @@ impl Interp {
             .collect()
     }
 
+    /// Tells the starting module which file it was read from, which is what its
+    /// imports resolve against.
+    ///
+    /// Set by the caller rather than taken by `new`, because the REPL has no
+    /// file and reads a program that was typed. Its imports resolve against the
+    /// working directory, which is the only answer that means anything for input
+    /// from a terminal.
+    pub fn set_path(&mut self, path: PathBuf) {
+        self.heap.globals_mut(self.globals).set_path(path);
+    }
+
     pub fn set_global(&mut self, name: impl Into<String>, value: Value) {
         self.heap
             .globals_mut(self.globals)
@@ -411,6 +479,12 @@ impl Interp {
         // function without binding the module it came from, which leaves the
         // scope holding it reachable from here and nowhere else.
         roots.extend(self.stdlib_modules.values());
+        // A loaded file is reachable from whoever imported it, but only while
+        // something still holds the module value — `from util import helper`
+        // binds the function and not the scope it came from, and the registry is
+        // what keeps that scope alive so a second import gets the same one. A
+        // file still loading is reachable from nothing at all.
+        roots.extend(self.files.values().map(ModuleState::scope));
         self.heap.collect(&roots);
     }
 
@@ -630,7 +704,7 @@ impl Interp {
                 module_span,
                 names,
             } => {
-                let loaded = self.load_module(module, *module_span)?;
+                let loaded = self.load_module(module, env, *module_span)?;
                 let into = env::module_of(&self.heap, env);
 
                 match names {
@@ -976,30 +1050,230 @@ impl Interp {
         false
     }
 
-    /// The scope of the module called `name`, building it if this is the first
+    /// The scope of the module called `name`, loading it if this is the first
     /// time it has been asked for.
     ///
-    /// Only the stdlib for now. A file beside the importer is the other half and
-    /// is what the message below promises nothing about.
-    fn load_module(&mut self, name: &str, span: Span) -> Result<ObjId, QuinceError> {
+    /// The stdlib is searched first and a file second, which is the rule that
+    /// keeps `import math` meaning one thing: a file appearing in a directory
+    /// must not quietly take over a name the language ships. The reserved set is
+    /// small, fixed, and listed in `stdlib::MODULES`, which is what makes that a
+    /// rule someone can hold in their head rather than a trap.
+    fn load_module(&mut self, name: &str, env: ObjId, span: Span) -> Result<ObjId, QuinceError> {
         if let Some(id) = self.stdlib_modules.get(name) {
             return Ok(*id);
         }
+        if let Some(module) = stdlib::module_named(name) {
+            let id = stdlib::build(module, &mut self.heap);
+            self.stdlib_modules.insert(module.name, id);
+            return Ok(id);
+        }
 
-        let Some(module) = stdlib::module_named(name) else {
+        // A name reaching for anywhere but the importer's own directory is
+        // refused by the parser, which sees the `/` or the `.` that this never
+        // gets handed. Subdirectories, a search path, and packages are each a
+        // decision that wants a language with modules already in use.
+        let path = self.resolve_import(name, env, span)?;
+        match self.files.get(&path) {
+            Some(ModuleState::Loaded(id)) => return Ok(*id),
+            Some(ModuleState::Loading(_)) => return Err(self.import_cycle(&path, span)),
+            None => {}
+        }
+
+        let text = std::fs::read_to_string(&path).map_err(|err| {
+            QuinceError::new(
+                format!("could not read `{}`: {err}", path.display()),
+                span,
+            )
+            .with_kind(ErrorKind::Import)
+        })?;
+        self.run_module(name, path, text)
+    }
+
+    /// Where `import name` should look, which is beside the file doing the
+    /// importing.
+    ///
+    /// Relative to the importer and not to the working directory, so a program
+    /// runs the same from anywhere. The REPL has no file, so it resolves against
+    /// the working directory — the only sensible answer for input that came from
+    /// a terminal.
+    fn resolve_import(&self, name: &str, env: ObjId, span: Span) -> Result<PathBuf, QuinceError> {
+        let importer = env::module_of(&self.heap, env);
+        let base = match self.heap.globals(importer).path() {
+            Some(path) => path.parent().map(Path::to_path_buf).unwrap_or_default(),
+            None => PathBuf::new(),
+        };
+        let candidate = base.join(format!("{name}.qn"));
+        if !candidate.is_file() {
             let mut err = QuinceError::new(format!("there is no module called `{name}`"), span)
-                .with_kind(ErrorKind::Name);
+                .with_kind(ErrorKind::Import);
             let names: Vec<&str> = stdlib::MODULES.iter().map(|m| m.name).collect();
-            err = match crate::error::did_you_mean(name, names.clone()) {
+            err = match crate::error::did_you_mean(name, names) {
                 Some(suggestion) => err.with_help(format!("did you mean `{suggestion}`?")),
-                None => err.with_help(format!("the modules that exist are {}", names.join(", "))),
+                None => err.with_help(format!(
+                    "no module the language ships is called `{name}`, and there is no \
+                     `{name}.qn` beside this file"
+                )),
             };
             return Err(err);
-        };
+        }
+        // Canonicalised so two spellings of one file are one module. Without it
+        // `import util` from two directories that resolve to the same file would
+        // run it twice and produce two of everything it declares.
+        candidate.canonicalize().map_err(|err| {
+            QuinceError::new(
+                format!("could not read `{}`: {err}", candidate.display()),
+                span,
+            )
+            .with_kind(ErrorKind::Import)
+        })
+    }
 
-        let id = stdlib::build(module, &mut self.heap);
-        self.stdlib_modules.insert(module.name, id);
-        Ok(id)
+    /// Compiles and runs a file as a module, and hands back its scope.
+    fn run_module(&mut self, name: &str, path: PathBuf, text: String) -> Result<ObjId, QuinceError> {
+        let source = Rc::new(ModuleSource {
+            // The file's name and not the path it was found at, so a report is
+            // the same on every machine. The starting file already has this
+            // property and the corpus depends on it.
+            path: file_name(&path),
+            text: Rc::from(text.as_str()),
+        });
+
+        // Compiled before anything is registered, so a module that does not
+        // parse leaves no half-built entry for a later import to find.
+        let program = crate::compile(&text).map_err(|err| {
+            // Named as imported when the diagnostic has nothing else to say,
+            // because a syntax error in a file the reader did not know was being
+            // loaded is otherwise a report about a file they did not open. Never
+            // over advice the diagnostic already carries — what to write instead
+            // is worth more than where it came from.
+            let err = match err.help.is_none() {
+                true => err.with_help(format!("this file was reached by `import {name}`")),
+                false => err,
+            };
+            err.in_module(Rc::clone(&source))
+        })?;
+
+        let globals = self.new_module_globals(name, Some(path.clone()));
+        self.module_sources.insert(globals, Rc::clone(&source));
+        self.files
+            .insert(path.clone(), ModuleState::Loading(globals));
+        self.loading.push(path.clone());
+
+        // Its statements run in its own scope, which is what makes every name it
+        // declares its own — and what makes `module_of` answer with this scope
+        // for every function it declares, for as long as those functions live.
+        let mut result = Ok(());
+        for stmt in &program {
+            if let Err(err) = self.exec(stmt, globals) {
+                result = Err(err.in_module(Rc::clone(&source)));
+                break;
+            }
+        }
+
+        self.loading.pop();
+        match result {
+            Ok(()) => {
+                self.files.insert(path, ModuleState::Loaded(globals));
+                Ok(globals)
+            }
+            Err(err) => {
+                // Removed rather than left `Loading`: the import failed, and a
+                // second attempt should fail the same way rather than be told it
+                // is a cycle.
+                self.files.remove(&path);
+                Err(err)
+            }
+        }
+    }
+
+    /// A scope holding everything a module starts with.
+    ///
+    /// The error classes are the *same* objects the starting module holds, not
+    /// fresh ones. A `catch TypeError` in one file has to catch a `TypeError`
+    /// raised in another, and `catch` compares the class it was given against
+    /// the one the error reified into — so two modules with two `TypeError`
+    /// classes would give a handler that silently never fires. Re-running the
+    /// prelude per module would have done exactly that, and cost a compile each
+    /// time to do it.
+    fn new_module_globals(&mut self, name: &str, path: Option<PathBuf>) -> ObjId {
+        let mut globals = Globals::module(name, path);
+        for native in BUILTINS {
+            globals.declare(native.name, Value::Native(native), false);
+        }
+        for builtin in BUILTIN_TYPES {
+            let type_name = builtin.name();
+            if TokenKind::keyword(type_name).is_some() {
+                continue;
+            }
+            globals.declare(
+                type_name,
+                Value::Class(self.heap.builtin_class(*builtin)),
+                false,
+            );
+        }
+        // Taken from the starting module rather than from `error_classes`, so
+        // that a name and the class under it cannot disagree.
+        for (class_name, value) in self.error_class_bindings() {
+            globals.declare(class_name, value, false);
+        }
+        self.heap.alloc(Object::Globals(globals))
+    }
+
+    /// The `Error` classes as name/value pairs, read off the starting module.
+    fn error_class_bindings(&self) -> Vec<(String, Value)> {
+        let mut bindings = vec![(
+            "Error".to_string(),
+            self.heap
+                .globals(self.globals)
+                .get("Error")
+                .expect("the prelude declares `Error`")
+                .clone(),
+        )];
+        for (kind, id) in &self.error_classes {
+            if let Some(class_name) = kind.class_name() {
+                bindings.push((class_name.to_string(), Value::Class(*id)));
+            }
+        }
+        bindings
+    }
+
+    /// The text of the module `env` bottoms out in, if it is one that was loaded
+    /// from a file.
+    fn module_source(&self, env: ObjId) -> Option<Rc<ModuleSource>> {
+        self.module_sources
+            .get(&env::module_of(&self.heap, env))
+            .cloned()
+    }
+
+    /// `a.qn` imports `b.qn` imports `a.qn`, reported as the path it took.
+    fn import_cycle(&self, path: &Path, span: Span) -> QuinceError {
+        let start = self
+            .loading
+            .iter()
+            .position(|loading| loading == path)
+            .unwrap_or(0);
+        let mut chain: Vec<String> = self.loading[start..]
+            .iter()
+            .map(|path| file_name(path))
+            .collect();
+        chain.push(file_name(path));
+
+        // True of a file that imports itself and of one reached the long way
+        // round, which "imports itself" is not — the chain below is what says
+        // which of the two happened.
+        QuinceError::new(
+            format!(
+                "`{}` is imported before it has finished loading: {}",
+                file_name(path),
+                chain.join(" → ")
+            ),
+            span,
+        )
+        .with_kind(ErrorKind::Import)
+        .with_help(
+            "a module is loaded once, and a cycle has no order that could do that — move what \
+             both files need into a third",
+        )
     }
 
     /// A name a module does not declare, reached either way it can be asked for.
@@ -1685,6 +1959,16 @@ impl Interp {
                 self.depth += 1;
                 let result = self.exec_scoped(&func.decl.body.stmts, scope);
                 self.depth -= 1;
+
+                // The one place a call into another module's code comes back
+                // out, and so the one place that can say whose text the spans in
+                // an error belong to. A function carries the scope it was
+                // defined in, so this is right however far the value travelled
+                // before it was called.
+                let result = result.map_err(|err| match self.module_source(func.env) {
+                    Some(source) => err.in_module(source),
+                    None => err,
+                });
 
                 match result? {
                     Flow::Return(value) => Ok(value),

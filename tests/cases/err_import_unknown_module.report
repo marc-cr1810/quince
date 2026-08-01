@@ -1,4 +1,4 @@
-Error: quince::NameError
+Error: quince::ImportError
 
  × there is no module called `maths`
   ╭─[err_import_unknown_module.qn:1:8]

@@ -3,6 +3,12 @@
 //! A `.out` file holds the expected stdout; a `.err` file holds the expected
 //! error message. Adding a case is dropping in two files — no Rust changes.
 //!
+//! A case is one `.qn` file, or a directory holding a `main.qn` and the modules
+//! it imports. The companion files are named for the case and sit beside it
+//! either way, so a case growing a second file changes nothing about how it is
+//! checked. A directory case runs its `main.qn`, and its report names whichever
+//! file actually raised — which is usually one of the imported ones.
+//!
 //! A `.report` file holds the whole rendered diagnostic — the header, the
 //! caret, every label, the help line. It is optional and the other two are not,
 //! because the three assert different contracts: `.out` is what the program
@@ -51,10 +57,13 @@ impl Write for Captured {
 ///
 /// The whole error rather than its message, because `.report` needs the spans
 /// and labels that `message` throws away.
-fn run(source: &str) -> Result<String, QuinceError> {
+fn run(source: &str, path: &Path) -> Result<String, QuinceError> {
     let program = quince::compile(source)?;
     let captured = Captured::default();
     let mut interp = Interp::with_output(Box::new(captured.clone()));
+    // What the case's imports resolve against. A single-file case never uses it;
+    // a directory case is entirely about it.
+    interp.set_path(path.to_path_buf());
     match interp.run(&program) {
         Ok(()) => Ok(captured.contents()),
         Err(err) => Err(err),
@@ -113,18 +122,30 @@ fn check_cases() {
     let mut checked = 0;
     let mut failures = Vec::new();
 
+    // A case is either a `.qn` file or a directory holding a `main.qn` and the
+    // modules it imports. The companions sit beside the one or beside the other,
+    // named for the case either way, so nothing about `.out`/`.err`/`.report`
+    // changes when a case grows a second file.
     let mut entries: Vec<_> = std::fs::read_dir(&dir)
         .expect("tests/cases should exist")
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "qn"))
+        .filter(|path| {
+            path.extension().is_some_and(|ext| ext == "qn") || path.join("main.qn").is_file()
+        })
         .collect();
     entries.sort();
 
     for path in entries {
         let name = path.file_stem().unwrap().to_string_lossy().to_string();
-        let source = std::fs::read_to_string(&path).expect("case should be readable");
-        let result = run(&source);
+        // A directory case runs its `main.qn`, and its reports name whichever
+        // file raised — which for these cases is usually not that one.
+        let (entry, reported_as) = match path.is_dir() {
+            true => (path.join("main.qn"), "main.qn".to_string()),
+            false => (path.clone(), format!("{name}.qn")),
+        };
+        let source = std::fs::read_to_string(&entry).expect("case should be readable");
+        let result = run(&source, &entry);
 
         let out_path = path.with_extension("out");
         let err_path = path.with_extension("err");
@@ -163,8 +184,15 @@ fn check_cases() {
                 }
                 if let Some(expected) = expected_report {
                     // The case's own file name rather than its path, so a report
-                    // does not bake in where the repository happens to live.
-                    let rendered = err.report(&source, &format!("{name}.qn"));
+                    // does not bake in where the repository happens to live. An
+                    // error raised inside an imported module carries that
+                    // module's text and is drawn against it — the same choice
+                    // `main.rs` makes, and the reason a directory case can pin a
+                    // caret in a file it did not start in.
+                    let rendered = match &err.origin {
+                        Some(origin) => err.report(&origin.text, &origin.path),
+                        None => err.report(&source, &reported_as),
+                    };
                     compare(&mut failures, &report_path, "report", &expected, &rendered);
                 }
             }

@@ -1,0 +1,9 @@
+import shapes
+
+# A name this module declares that its importer also declares, to show the two
+# scopes are separate: `sides` is 4 here and 3 in main.
+let sides = 6
+
+fn volume(w, h, d) { return shapes.area(w, h) * d }
+
+fn corner() { return shapes.Point(sides, sides) }

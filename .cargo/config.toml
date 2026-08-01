@@ -1,0 +1,16 @@
+# The tests get the stack the interpreter gives itself.
+#
+# `interp::with_stack` runs a program on a 16 MB thread, because a dozen native
+# frames per Quince call means the platform's default is nowhere near enough —
+# and `MAX_DEPTH` and `out_of_stack` are both calibrated against that number.
+# The test harness spawns its own threads and knows nothing about any of it, so
+# until this file existed the unit tests ran deeply recursive programs on the
+# 2 MB libtest default: a suite passing with an eighth of the headroom the real
+# thing has, and passing by a margin nobody was watching.
+#
+# What made that visible was eight bytes. Adding one `Option<Rc<…>>` to
+# `QuinceError` — which every `Result` in a recursive evaluator carries by value
+# — overflowed `a_thrown_payload_survives_the_unwind`, a test whose program
+# recurses fifty deep and had been fine the commit before.
+[env]
+RUST_MIN_STACK = "16777216"

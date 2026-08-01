@@ -1,0 +1,30 @@
+import shapes
+import boxes
+from shapes import Point, area
+
+# Every name reaches the same function, whichever way it was imported.
+print(area(3, 4), shapes.area(3, 4))
+print(boxes.volume(2, 3, 4))
+
+# A class crosses a module boundary intact: its methods, its `op string`, and
+# its `op eq` all still work, and an instance built in one file equals one built
+# in another.
+print(Point(1, 2))
+print(boxes.corner())
+print(shapes.origin() == Point(0, 0))
+
+# Each module has its own top-level scope, so a name means what its own file
+# said it meant. This is what `Slot::Global` walking to the chain root buys.
+let sides = 3
+print(sides, shapes.sides, boxes.sides)
+
+# A module is a value.
+print(shapes, type(shapes), shapes == shapes)
+
+# The error classes are shared across modules, not rebuilt per module, so a
+# handler in this file catches what another file raised.
+try {
+    boxes.volume(1, 2)
+} catch e {
+    print(type(e), e.message)
+}

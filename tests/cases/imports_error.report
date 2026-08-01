@@ -1,0 +1,8 @@
+Error: quince::IndexError
+
+ × index 2 is out of range for a list of length 2
+  ╭─[helper.qn:2:12]
+2 │     return xs[2]
+  ·            ─────
+  ╰────
+  help: valid range is 0..1

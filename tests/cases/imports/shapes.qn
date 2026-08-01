@@ -1,0 +1,18 @@
+# Runs once, however many files import it. The line below is the proof: two
+# modules import this one and it appears in the output a single time.
+print("shapes loaded")
+
+let sides = 4
+
+fn area(w, h) { return w * h }
+
+class Point {
+    op init(x, y) {
+        self.x = x
+        self.y = y
+    }
+    op string() { return "(" + string(self.x) + ", " + string(self.y) + ")" }
+    op eq(other) { return self.x == other.x && self.y == other.y }
+}
+
+fn origin() { return Point(0, 0) }

@@ -2,6 +2,8 @@ mod cli;
 mod lsp;
 mod repl;
 
+use std::path::PathBuf;
+
 use anyhow::{Context, Result};
 use clap::Parser as _;
 
@@ -78,18 +80,29 @@ fn run(
         return;
     }
 
-    report(Interp::new().run(&program), source, path, use_color_stderr);
+    let mut interp = Interp::new();
+    interp.set_path(PathBuf::from(path));
+    report(interp.run(&program), source, path, use_color_stderr);
 }
 
 /// Renders a compile or runtime error against its source and exits.
 ///
 /// These diagnostics already carry a location and caret, so they bypass anyhow
 /// rather than picking up a second "Error:" prefix.
+///
+/// An error that came from an imported module carries that module's text, and it
+/// is rendered against that instead. A span is an offset into one file, and
+/// drawing one file's offsets against another's text is how a caret ends up
+/// under something that is not there.
 fn report<T>(result: Result<T, QuinceError>, source: &str, path: &str, color: bool) -> T {
     match result {
         Ok(value) => value,
         Err(err) => {
-            eprintln!("{}", err.report_styled(source, path, color));
+            let rendered = match &err.origin {
+                Some(origin) => err.report_styled(&origin.text, &origin.path, color),
+                None => err.report_styled(source, path, color),
+            };
+            eprintln!("{rendered}");
             std::process::exit(1);
         }
     }

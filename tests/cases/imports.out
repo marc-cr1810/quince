@@ -1,0 +1,9 @@
+shapes loaded
+12 12
+24
+(1, 2)
+(6, 6)
+true
+3 4 6
+<module shapes> module true
+TypeError `volume` takes 3 arguments, but 2 were given

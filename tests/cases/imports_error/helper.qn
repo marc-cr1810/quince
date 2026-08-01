@@ -1,0 +1,3 @@
+fn third(xs) {
+    return xs[2]
+}
