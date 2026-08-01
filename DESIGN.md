@@ -2361,6 +2361,43 @@ which is also the true answer, since the recursive arm carries no information. A
 `extends` cycle is refused at run time and not by the resolver, so the pass can be handed
 one of those too; every walk up a parent chain carries a visited set for it.
 
+### The heuristics are gone
+
+They were kept as a floor when the pass landed, on the argument that an editor going
+blank between two valid states is worse than one that guesses. Measurement settled it.
+`"a,b".split(",")` is a list, the heuristic read the literal at the front of the line and
+called it a string, and the editor offered `.lower()` on a list while hiding `.push()`.
+A wrong completion is not a weaker right one — it is indexed, scrolled, and believed.
+
+All of it went: `infer_receiver_class`, `infer_method_return_class`, the text scan for
+variables, the line-reading signature finder, and the ten-entry hover table. `lsp.rs` lost
+a third of its length and every sentence it used to know about the language.
+
+What replaced the floor is that the pass keeps its last good tree, which covers the case
+the floor was written for. What is left uncovered is a buffer that has never parsed at
+all, and there the editor offers keywords and globals — both always known — and nothing
+after a dot. An empty list is the honest answer to a receiver nobody can identify.
+
+Two cases needed real work rather than deletion. A literal receiver — `"abc".`, `[1, 2].`
+— is now typed by *lexing* the text and reading the tokens, so `xs[0]` is no longer a list
+because it happens to end in a bracket; the token in front of the opening bracket is what
+tells an index from a literal. And the error classes are read by inferring over
+`BASE_ERROR`, the Quince source the interpreter itself runs, so `TypeError(message)` is
+what the editor shows because that is what the prelude says.
+
+### Everything is read off the language
+
+`Native` carries `params`, so signature help says `fn split(separator): list` where it
+used to say `fn split(arg1, arg2)`. `TokenKind::doc` explains every keyword, as an
+exhaustive match beside `KEYWORDS` — the old table covered ten of twenty-five and had no
+way to notice. A `##` block reaches hover, completion, and per-parameter signature
+documentation through one `Symbol` type that `infer.rs` hands out and `lsp.rs` only draws.
+
+The rule the milestone kept arriving back at: point at the list where you can, and where
+you cannot, fail loudly when the copy is wrong. Three guards came out of this tranche —
+every keyword explains itself, every native names the parameters its arity implies, and
+every declared return is what the native actually returns.
+
 ### The editor keeps the last thing it understood
 
 The pass needs a tree and typing a `.` is what stops a document having one — which would

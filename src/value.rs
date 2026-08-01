@@ -47,6 +47,18 @@ pub struct Native {
     pub name: &'static str,
     /// `None` for variadic builtins such as `print`.
     pub arity: Option<usize>,
+    /// What a caller writes in the parentheses.
+    ///
+    /// The receiver is not among them. A method seeded onto a type takes it as
+    /// `args[0]` and so counts toward `arity`, while a module's member takes no
+    /// receiver at all — an asymmetry `stdlib.rs` explains and this field is
+    /// deliberately on the other side of: these are the names someone typing
+    /// the call is looking at, so `"a,b".split(",")` has one parameter and it
+    /// is called `separator`.
+    ///
+    /// `every_native_names_the_parameters_it_takes` holds the two counts in
+    /// step. Without it the editor would confidently label the wrong argument.
+    pub params: &'static [&'static str],
     /// The type this always produces, or `None` for one whose answer depends on
     /// what it was given.
     ///
@@ -349,6 +361,7 @@ mod tests {
     static DUMMY: Native = Native {
         name: "dummy",
         arity: None,
+        params: &[],
         returns: None,
         doc: "A stand-in for a test, which needs a native and not what it does.",
         func: |_interp, _args, _span| Ok(Value::Nil),

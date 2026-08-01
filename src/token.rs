@@ -156,6 +156,80 @@ impl TokenKind {
         };
         Some(kind)
     }
+
+    /// What the keyword means, for an editor asked to explain one.
+    ///
+    /// Here rather than in `lsp.rs`, which is where it used to live as ten
+    /// entries covering a quarter of the list. A keyword is the language's, so
+    /// its description is too — and the exhaustive match means a word cannot be
+    /// reserved without being explained, which the ten-entry table had no way
+    /// to notice it was failing to do. `every_keyword_explains_itself` walks
+    /// [`KEYWORDS`] to hold the two together.
+    ///
+    /// `None` for everything that is not a keyword: an operator explains itself
+    /// and a literal is its own answer.
+    pub fn doc(&self) -> Option<&'static str> {
+        let text = match self {
+            TokenKind::Fn => "Declares a function. It captures the scope it was written in, so a function returned from another keeps what that one bound.",
+            TokenKind::Op => "Declares a method the language calls on the program's behalf — `op add` answers `+`, `op string` answers `print`. Being one is stated rather than inferred from the name, so a misspelling is an error instead of a method nothing calls.",
+            TokenKind::Class => "Declares a type. Its methods take the receiver as `self`, and it may say what it is open to with `final`, `complete`, or `sealed`.",
+            TokenKind::Extends => "Names the class this one descends from. The parent is an ordinary value looked up in the enclosing scope, not a static label.",
+            TokenKind::Extend => "Adds methods to a type that already exists, including a builtin. It may not add an `op`: an extension grows a type's vocabulary, it does not change how the language dispatches on it.",
+            TokenKind::SelfKw => "The receiver, inside a method. Bound as an ordinary first parameter the parser inserts, so a closure nested in a method captures it like any other name.",
+            TokenKind::Super => "The parent class, inside a method of a class that extends one. Looks a method up starting at the parent while binding it to the current receiver.",
+            TokenKind::Let => "Binds a name that may be reassigned.",
+            TokenKind::Final => "Binds a name once. The object it names is untouched, so a `final` list still grows. Before `class`, it means no other class may extend this one.",
+            TokenKind::Complete => "Before `class`: the method table is finished, so no `extend` block may add to it. Subclasses are still welcome, since a subclass adds nothing to the class it descends from.",
+            TokenKind::Sealed => "Before `class`: `final` and `complete` at once — neither a subclass nor an `extend` block.",
+            TokenKind::Const => "Binds a name once and freezes the value, deeply, and through every other name that already reaches it.",
+            TokenKind::Import => "Loads a module — one the language ships, or a file beside this one. `import math` binds the module; `from math import floor` binds the names.",
+            TokenKind::If => "Runs a block when a condition is truthy. A class decides its own truthiness with `op bool`.",
+            TokenKind::Else => "The block to run when the `if` before it did not.",
+            TokenKind::While => "Repeats a block for as long as a condition is truthy.",
+            TokenKind::For => "Walks a string, a list, a dict's keys, or a class that declares `op iter`. The loop variable is fresh each time round.",
+            TokenKind::In => "Between a `for` loop's variable and what it walks; on its own, whether a collection holds a value.",
+            TokenKind::Return => "Hands a value back from a function. Written with nothing after it, it hands back `nil`.",
+            TokenKind::Try => "Runs a block, handing control to its `catch` if anything in it raises.",
+            TokenKind::Catch => "Binds the raised error and handles it. The `try` block's own bindings are not visible here, because a `let` inside it may never have run.",
+            TokenKind::Throw => "Raises an error, which must be an instance of `Error`. Checked at the `throw` so the report names the mistake rather than surfacing later.",
+            TokenKind::True => "The true boolean.",
+            TokenKind::False => "The false boolean.",
+            TokenKind::Nil => "The absence of a value.",
+
+            TokenKind::Int(_)
+            | TokenKind::Float(_)
+            | TokenKind::Str(_)
+            | TokenKind::Ident(_)
+            | TokenKind::Plus
+            | TokenKind::Minus
+            | TokenKind::Star
+            | TokenKind::Slash
+            | TokenKind::SlashSlash
+            | TokenKind::Percent
+            | TokenKind::Assign
+            | TokenKind::Eq
+            | TokenKind::Ne
+            | TokenKind::Lt
+            | TokenKind::Le
+            | TokenKind::Gt
+            | TokenKind::Ge
+            | TokenKind::Not
+            | TokenKind::AndAnd
+            | TokenKind::OrOr
+            | TokenKind::LParen
+            | TokenKind::RParen
+            | TokenKind::LBrace
+            | TokenKind::RBrace
+            | TokenKind::LBracket
+            | TokenKind::RBracket
+            | TokenKind::Comma
+            | TokenKind::Dot
+            | TokenKind::Colon
+            | TokenKind::Semi
+            | TokenKind::Eof => return None,
+        };
+        Some(text)
+    }
 }
 
 impl fmt::Display for TokenKind {
@@ -330,6 +404,41 @@ mod tests {
                 }
             }
             _ => {}
+        }
+    }
+
+    #[test]
+    fn every_keyword_explains_itself() {
+        // The guard the ten-entry table in `lsp.rs` could not have: it covered
+        // a quarter of the list and had no way to say so. Reserving a word now
+        // means explaining it, and the exhaustive match in `doc` means the
+        // compiler asks first.
+        for keyword in KEYWORDS {
+            let kind = TokenKind::keyword(keyword)
+                .unwrap_or_else(|| panic!("`{keyword}` is listed and does not lex"));
+            let doc = kind
+                .doc()
+                .unwrap_or_else(|| panic!("`{keyword}` is reserved and undocumented"));
+            // Non-empty and nothing more. `true` is answered by "The true
+            // boolean." and a rule about length would only be a worse guess
+            // than the writer's about how much a word needs saying.
+            assert!(!doc.is_empty(), "`{keyword}` is documented with nothing");
+        }
+    }
+
+    #[test]
+    fn only_a_keyword_explains_itself() {
+        // The other direction, for the same reason the grammar is checked both
+        // ways: a word that stops being reserved and keeps its explanation goes
+        // on reading as part of the language.
+        for kind in [
+            TokenKind::Plus,
+            TokenKind::LParen,
+            TokenKind::Eof,
+            TokenKind::Int(1),
+            TokenKind::Ident("total".into()),
+        ] {
+            assert_eq!(kind.doc(), None, "{kind:?} is not a keyword");
         }
     }
 

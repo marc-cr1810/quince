@@ -18,8 +18,9 @@ use lsp_types::{
 
 use quince::ast::{Expr, ExprKind, Stmt, StmtKind};
 use quince::error::QuinceError;
-use quince::infer::{self, Type, Types};
-use quince::token::{Span, KEYWORDS};
+use quince::doc::Doc;
+use quince::infer::{self, Kind, Symbol, Type, Types};
+use quince::token::{Span, TokenKind, KEYWORDS};
 
 struct DocumentState {
     text: String,
@@ -52,19 +53,33 @@ impl DocumentState {
         DocumentState { text, ast, types }
     }
 
-    /// What the pass made of the dotted path the cursor sits after.
+    /// Everything reachable through a dot on whatever `before` evaluates to.
+    fn members_before(&self, before: &str, offset: u32) -> Vec<Symbol> {
+        match self.type_of(before, offset) {
+            Type::Class(class) => match &self.types {
+                Some(types) => types.members_of(&class),
+                None => Vec::new(),
+            },
+            Type::Module(module) => quince::infer::module_symbols(&module),
+            Type::Unknown => Vec::new(),
+        }
+    }
+
+    /// What the text ending at `before` evaluates to.
     ///
-    /// `Unknown` covers three cases that are one case to a caller: the document
-    /// did not parse, the path was not a path, or nothing about it was
-    /// decidable. All three mean the same thing — ask the heuristics.
-    fn inferred(&self, pos: Position) -> Type {
-        let Some(types) = &self.types else {
-            return Type::Unknown;
-        };
-        let Some(path) = receiver_path(&self.text, pos) else {
-            return Type::Unknown;
-        };
-        types.of_path(&path, position_to_offset(&self.text, pos))
+    /// A dotted path first, since a name needs the scope it was written in;
+    /// then a literal, which needs only the lexer. Both are answers the
+    /// language gives, and neither is a guess about what a line looks like.
+    fn type_of(&self, before: &str, offset: u32) -> Type {
+        if let Some(path) = path_ending_at(before)
+            && let Some(types) = &self.types
+        {
+            let found = types.of_path(&path, offset);
+            if found.is_known() {
+                return found;
+            }
+        }
+        trailing_literal_type(before)
     }
 }
 
@@ -303,24 +318,84 @@ fn quince_error_to_diagnostic(source: &str, err: &QuinceError) -> Diagnostic {
 
 // --- LSP IDE Capabilities ---
 
+/// How a symbol is drawn in a completion list.
+fn kind_of(kind: Kind) -> CompletionItemKind {
+    match kind {
+        Kind::Class => CompletionItemKind::CLASS,
+        Kind::Function => CompletionItemKind::FUNCTION,
+        Kind::Method => CompletionItemKind::METHOD,
+        Kind::Field => CompletionItemKind::FIELD,
+        Kind::Variable => CompletionItemKind::VARIABLE,
+        Kind::Parameter => CompletionItemKind::VARIABLE,
+        Kind::Module => CompletionItemKind::MODULE,
+    }
+}
+
+/// One completion, built from what the pass and the tables know.
+///
+/// The detail line is the symbol's own signature and the documentation is its
+/// own `##` block. Neither is written here, which is the point: this file used
+/// to carry sentences about `print` and a guess about everything else.
+fn item_of(symbol: &Symbol) -> CompletionItem {
+    CompletionItem {
+        label: symbol.name.clone(),
+        kind: Some(kind_of(symbol.kind)),
+        detail: Some(symbol.signature()),
+        documentation: symbol.doc.as_ref().map(|doc| {
+            lsp_types::Documentation::MarkupContent(lsp_types::MarkupContent {
+                kind: lsp_types::MarkupKind::Markdown,
+                value: rendered_doc(doc),
+            })
+        }),
+        ..Default::default()
+    }
+}
+
+/// A doc block as markdown: the summary, then what it says about each part.
+fn rendered_doc(doc: &Doc) -> String {
+    let mut out = doc.summary.clone();
+    for param in &doc.params {
+        out.push_str(&format!("\n\n`{}` — {}", param.name, param.text));
+    }
+    if let Some(returns) = &doc.returns {
+        out.push_str(&format!("\n\nReturns {}", returns.text));
+    }
+    for thrown in &doc.throws {
+        out.push_str(&format!("\n\nRaises `{}` {}", thrown.name, thrown.text));
+    }
+    out.trim().to_string()
+}
+
 fn get_completions(state: Option<&DocumentState>, pos: Position) -> Vec<CompletionItem> {
-    let mut items = Vec::new();
-    let state = match state {
-        Some(s) => s,
-        None => return items,
+    let Some(state) = state else {
+        return Vec::new();
     };
 
-    // Check if user is typing a dot (e.g. `self.` or `p.`)
-    let is_dot_trigger = is_preceded_by_dot(&state.text, pos);
+    // After a dot, the receiver decides the whole list. What the pass does not
+    // know, nobody offers: the text heuristics that used to answer here read
+    // the first character of the line and told a list it was a string, and an
+    // empty list is a better answer than a confident wrong one.
+    if is_preceded_by_dot(&state.text, pos) {
+        let Some(before) = text_before_dot(&state.text, pos) else {
+            return Vec::new();
+        };
+        let offset = position_to_offset(&state.text, pos);
+        return state
+            .members_before(&before, offset)
+            .iter()
+            .map(item_of)
+            .collect();
+    }
 
     // After `import` or `from`, the only thing that can follow is a module, so
     // that is the only thing offered. Offering the stdlib names everywhere would
     // suggest `math` to a file that never imported it, where the name means
     // nothing — the point of `import` is that a module is not there until asked
     // for, and a completion list that forgets it undoes exactly that.
-    if !is_dot_trigger && at_import(&state.text, pos) {
-        for module in quince::stdlib::MODULES {
-            items.push(CompletionItem {
+    if at_import(&state.text, pos) {
+        return quince::stdlib::MODULES
+            .iter()
+            .map(|module| CompletionItem {
                 label: module.name.to_string(),
                 kind: Some(CompletionItemKind::MODULE),
                 detail: Some(format!(
@@ -334,117 +409,31 @@ fn get_completions(state: Option<&DocumentState>, pos: Position) -> Vec<Completi
                         .join(", ")
                 )),
                 ..Default::default()
-            });
-        }
-        return items;
+            })
+            .collect();
     }
 
-    // 1. User-defined classes and type constructors
-    if !is_dot_trigger {
-        // Language Keywords
-        for &kw in KEYWORDS {
-            items.push(CompletionItem {
-                label: kw.to_string(),
-                kind: Some(CompletionItemKind::KEYWORD),
-                detail: Some("Quince keyword".to_string()),
-                ..Default::default()
-            });
-        }
-
-        // The globals a program starts with, and the types it can name, read off
-        // the same tables the interpreter binds them from.
-        //
-        // This was a hand-written list until the modules landed, and it had
-        // drifted exactly the way the VS Code grammar had: `bool` was missing,
-        // so the one builtin type nobody thinks to type was also the one the
-        // editor never offered. The same lesson as `KEYWORDS`, in the one place
-        // it can be fixed by pointing at the list rather than guarded by a test.
-        for native in quince::interp::BUILTINS {
-            items.push(CompletionItem {
-                label: native.name.to_string(),
-                kind: Some(CompletionItemKind::FUNCTION),
-                detail: Some(signature_of(native)),
-                ..Default::default()
-            });
-        }
-
-        // A name the lexer has claimed is skipped, for the reason `Interp::new`
-        // skips it: `nil` and `class` are keywords, so no program can read a
-        // global under those names and completing to one would be a lie.
-        for builtin in quince::class::BUILTINS {
-            let name = builtin.name();
-            if quince::token::TokenKind::keyword(name).is_some() {
-                continue;
-            }
-            items.push(CompletionItem {
-                label: name.to_string(),
-                kind: Some(CompletionItemKind::CLASS),
-                detail: Some(format!("the built-in type `{name}`")),
-                ..Default::default()
-            });
-        }
-
-        // Builtin Error Classes. Offering only what `ERROR_KINDS` lists is the
-        // point: a kind with no class is a kind no program can name, so it has
-        // nothing to complete to.
-        for class_name in quince::error::ERROR_KINDS
-            .iter()
-            .filter_map(|kind| kind.class_name())
-        {
-            items.push(CompletionItem {
-                label: class_name.to_string(),
-                kind: Some(CompletionItemKind::CLASS),
-                detail: Some(format!("Built-in error class {class_name}")),
-                ..Default::default()
-            });
-        }
+    // The keywords, the globals, and everything the pass found in scope here.
+    // All three are read off the language rather than written down: a keyword
+    // comes with its own explanation, a global with its own signature, and a
+    // name in scope with whatever the program said about it.
+    let mut items: Vec<CompletionItem> = KEYWORDS
+        .iter()
+        .map(|keyword| CompletionItem {
+            label: (*keyword).to_string(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: quince::token::TokenKind::keyword(keyword)
+                .and_then(|kind| kind.doc())
+                .map(str::to_string),
+            ..Default::default()
+        })
+        .collect();
+    items.extend(quince::infer::globals().iter().map(item_of));
+    if let Some(types) = &state.types {
+        let offset = position_to_offset(&state.text, pos);
+        items.extend(types.in_scope(offset).iter().map(item_of));
     }
-
-    // 2. Traversal for AST & Text Symbols (Classes, Methods, Functions, Variables)
-    if is_dot_trigger {
-        // The pass first, and the text heuristics only where it declines to
-        // answer. That ordering is the whole of the arrangement: what the pass
-        // says it knows, it knows, and `Unknown` is not a weak answer that a
-        // guess can outrank — it is the pass saying the guess is all there is.
-        match state.inferred(pos) {
-            Type::Module(module) => collect_module_completions(&module, &mut items),
-            Type::Class(class) => {
-                if let Some(receiver) = get_receiver_before_dot(&state.text, pos) {
-                    collect_dot_completions_for_class(&state.text, state.ast.as_deref(), &receiver, Some(&class), &mut items);
-                }
-            }
-            Type::Unknown => {
-                if let Some(receiver) = get_receiver_before_dot(&state.text, pos) {
-                    let target_class = infer_receiver_class(&state.text, &receiver, pos);
-                    collect_dot_completions_for_class(&state.text, state.ast.as_deref(), &receiver, target_class.as_deref(), &mut items);
-                }
-            }
-        }
-    } else {
-        if let Some(ast) = &state.ast {
-            collect_ast_completions(&state.text, ast, pos, &mut items);
-        }
-        collect_text_variable_completions(&state.text, pos, &mut items);
-    }
-
     items
-}
-
-
-/// A one-line signature for a builtin, built from what the table records.
-///
-/// Which is its name and how many arguments it takes, and nothing else — a
-/// native carries no parameter names. Better than the sentence a hand-written
-/// list used to carry, because it cannot say something the function does not do.
-fn signature_of(native: &quince::value::Native) -> String {
-    match native.arity {
-        None => format!("fn {}(…)", native.name),
-        Some(0) => format!("fn {}()", native.name),
-        Some(n) => {
-            let params = (1..=n).map(|_| "_").collect::<Vec<_>>().join(", ");
-            format!("fn {}({params})", native.name)
-        }
-    }
 }
 
 /// Whether the cursor sits where a module name goes.
@@ -475,67 +464,25 @@ fn is_preceded_by_dot(source: &str, pos: Position) -> bool {
     line[..col].trim_end().ends_with('.')
 }
 
-fn get_receiver_before_dot(source: &str, pos: Position) -> Option<String> {
-    let line = source.lines().nth(pos.line as usize)?;
-    let col = (pos.character as usize).min(line.len());
-    let trimmed = line[..col].trim_end();
-    if !trimmed.ends_with('.') {
-        return None;
-    }
-    let before_dot = trimmed[..trimmed.len() - 1].trim_end();
-    if before_dot.is_empty() {
-        return None;
-    }
-
-    let mut cleaned = before_dot;
-    if cleaned.ends_with(')')
-        && let Some(open_paren) = cleaned.rfind('(')
-    {
-        cleaned = cleaned[..open_paren].trim_end();
-    }
-
-    if cleaned.ends_with('"') || cleaned.ends_with(']') || cleaned.ends_with('}') {
-        return Some(cleaned.to_string());
-    }
-
-    let start = cleaned
-        .rfind(|c: char| !(c == '_' || c == '.' || c.is_alphanumeric()))
-        .map_or(0, |i| i + 1);
-
-    if start < cleaned.len() {
-        Some(cleaned[start..].to_string())
-    } else {
-        Some(cleaned.to_string())
-    }
-}
-
-/// The dotted path the cursor sits at the end of, ready for the inference pass.
+/// The dotted path `text` ends with, with every argument list normalised to `()`.
 ///
-/// `o.inner.`, `math.`, `b.twin().` — read backwards from the dot, one segment
-/// at a time, with every argument list normalised to `()` because the arguments
-/// change nothing about what a call produces.
+/// `o.inner`, `math`, `b.twin()` — read backwards, one segment at a time. The
+/// arguments are dropped because they change nothing about what a call
+/// produces, and the parentheses are kept because they change everything:
+/// `Point` is a class and `Point()` is a `Point`.
 ///
-/// The parentheses are kept, unlike in [`get_receiver_before_dot`], and that is
-/// the point of having a second function rather than changing that one: `Point`
-/// is a class and `Point()` is a `Point`, and the heuristics cannot tell those
-/// apart because they decide by spelling. This can, so it must not throw away
-/// the evidence on the way.
-///
-/// A path that does not start at a name — `"abc".`, `xs[0].` — is `None`
-/// rather than an approximation. The heuristics already read literals, and this
-/// is not a parser.
-fn receiver_path(source: &str, pos: Position) -> Option<String> {
-    let line = source.lines().nth(pos.line as usize)?;
-    let col = (pos.character as usize).min(line.len());
-    let before: Vec<char> = line[..col].trim_end().strip_suffix('.')?.trim_end().chars().collect();
-
+/// `None` for anything that does not end at a name — `"abc"`, `xs[0]`. This is
+/// not a parser, and an approximation here is the guess the whole tranche was
+/// written to remove.
+fn path_ending_at(text: &str) -> Option<String> {
+    let before: Vec<char> = text.trim_end().chars().collect();
     let is_name_char = |c: char| c == '_' || c.is_alphanumeric();
     let mut segments: Vec<String> = Vec::new();
     let mut cursor = before.len();
 
     loop {
         // An argument list, skipped over as a whole so that a call on something
-        // nested — `f(g(x)).` — still finds the name in front of it.
+        // nested — `f(g(x))` — still finds the name in front of it.
         let call = cursor > 0 && before[cursor - 1] == ')';
         if call {
             let mut depth = 0;
@@ -581,639 +528,190 @@ fn receiver_path(source: &str, pos: Position) -> Option<String> {
     Some(segments.join("."))
 }
 
-fn infer_receiver_class(source: &str, receiver: &str, pos: Position) -> Option<String> {
-    let clean_recv = receiver.split('(').next().unwrap_or(receiver).trim();
-
-    // String literal e.g. `"test".`
-    if clean_recv.starts_with('"') || clean_recv.ends_with('"') {
-        return Some("string".to_string());
-    }
-    // List literal e.g. `[1, 2, 3, 4].`
-    if clean_recv.starts_with('[') || clean_recv.ends_with(']') {
-        return Some("list".to_string());
-    }
-    // Dict literal e.g. `{"a": 1}.`
-    if clean_recv.starts_with('{') || clean_recv.ends_with('}') {
-        return Some("dict".to_string());
-    }
-    // Int or Float literal e.g. `5.` or `5.0.`
-    if !clean_recv.is_empty() && clean_recv.chars().all(|c| c.is_ascii_digit() || c == '.') {
-        if clean_recv.contains('.') {
-            return Some("float".to_string());
-        } else {
-            return Some("int".to_string());
-        }
-    }
-
-    // Direct Class Constructor Call e.g. `Shadow().` or `Point(3, 4).`
-    if clean_recv.chars().next().is_some_and(|c| c.is_uppercase()) {
-        return Some(clean_recv.to_string());
-    }
-
-    if clean_recv == "self" {
-        let mut current_class = None;
-        let mut brace_depth = 0;
-        let mut class_brace_depth = 0;
-
-        for (line_idx, line) in source.lines().enumerate() {
-            let trimmed = line.trim();
-            if trimmed.starts_with("class ") {
-                let parts: Vec<_> = trimmed.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    let name = parts[1].split('{').next().unwrap_or("").trim();
-                    if !name.is_empty() {
-                        current_class = Some(name.to_string());
-                        class_brace_depth = brace_depth;
-                    }
-                }
-            }
-
-            if line_idx == pos.line as usize {
-                return current_class;
-            }
-
-            for c in line.chars() {
-                if c == '{' {
-                    brace_depth += 1;
-                } else if c == '}' {
-                    if brace_depth > 0 {
-                        brace_depth -= 1;
-                    }
-                    if current_class.is_some() && brace_depth <= class_brace_depth {
-                        current_class = None;
-                    }
-                }
-            }
-        }
-        return current_class;
-    }
-
-    if clean_recv == "super" {
-        let mut current_parent = None;
-        let mut brace_depth = 0;
-        let mut class_brace_depth = 0;
-
-        for (line_idx, line) in source.lines().enumerate() {
-            let trimmed = line.trim();
-            if trimmed.starts_with("class ") {
-                let parts: Vec<_> = trimmed.split_whitespace().collect();
-                if parts.len() >= 2
-                    && let Some(extends_idx) = parts.iter().position(|&p| p == "extends")
-                    && extends_idx + 1 < parts.len()
-                {
-                    let pname = parts[extends_idx + 1].split('{').next().unwrap_or("").trim();
-                    if !pname.is_empty() {
-                        current_parent = Some(pname.to_string());
-                        class_brace_depth = brace_depth;
-                    }
-                }
-            }
-
-            if line_idx == pos.line as usize {
-                return current_parent;
-            }
-
-            for c in line.chars() {
-                if c == '{' {
-                    brace_depth += 1;
-                } else if c == '}' {
-                    if brace_depth > 0 {
-                        brace_depth -= 1;
-                    }
-                    if current_parent.is_some() && brace_depth <= class_brace_depth {
-                        current_parent = None;
-                    }
-                }
-            }
-        }
-        return current_parent;
-    }
-
-
-    let max_line = (pos.line as usize).min(source.lines().count().saturating_sub(1));
-    for line_idx in (0..=max_line).rev() {
-        if let Some(line) = source.lines().nth(line_idx) {
-            let trimmed = line.trim();
-            if trimmed.starts_with('#') {
-                continue;
-            }
-            if let Some(eq_idx) = trimmed.find('=') {
-                let lhs = trimmed[..eq_idx].trim();
-                let var_name = lhs.split_whitespace().last().unwrap_or("");
-                if var_name == receiver {
-                    let rhs = trimmed[eq_idx + 1..].trim();
-                    let first_word = rhs.split(&['(', ' ', ';'][..]).next().unwrap_or("").trim();
-                    if !first_word.is_empty()
-                        && first_word.chars().next().is_some_and(|c| c.is_uppercase())
-                    {
-                        return Some(first_word.to_string());
-                    }
-
-                    if rhs.starts_with('"') {
-                        return Some("string".to_string());
-                    }
-                    if rhs.starts_with('[') {
-                        return Some("list".to_string());
-                    }
-                    if rhs.starts_with('{') {
-                        return Some("dict".to_string());
-                    }
-
-                    if let Some(dot_idx) = rhs.find('.') {
-                        let obj_name = rhs[..dot_idx].trim();
-                        let rest = rhs[dot_idx + 1..].trim();
-                        let method_name = rest.split('(').next().unwrap_or("").trim();
-                        if let Some(parent_class) = infer_receiver_class(source, obj_name, Position { line: line_idx as u32, character: 0 }) {
-                            if let Some(ret_class) = infer_method_return_class(source, &parent_class, method_name) {
-                                return Some(ret_class);
-                            }
-                            return Some(parent_class);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    None
-}
-
-fn infer_method_return_class(source: &str, class_name: &str, method_name: &str) -> Option<String> {
-    let mut inside_target_class = false;
-    let mut inside_target_method = false;
-
-    for line in source.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("class ") {
-            let parts: Vec<_> = trimmed.split_whitespace().collect();
-            if parts.len() >= 2 {
-                let name = parts[1].split('{').next().unwrap_or("").trim();
-                inside_target_class = name == class_name;
-            }
-        }
-
-        if inside_target_class {
-            if trimmed.starts_with("fn ") || trimmed.starts_with("op ") {
-                let parts: Vec<_> = trimmed.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    let mname = parts[1].split('(').next().unwrap_or("").trim();
-                    inside_target_method = mname == method_name;
-                }
-            }
-
-            if inside_target_method && trimmed.contains("return ")
-                && let Some(ret_idx) = trimmed.find("return ")
-            {
-                let expr = trimmed[ret_idx + "return ".len()..].trim();
-                let first_word = expr.split('(').next().unwrap_or("").trim();
-                if !first_word.is_empty() && first_word.chars().next().is_some_and(|c| c.is_uppercase()) {
-                    return Some(first_word.to_string());
-                }
-                if expr.starts_with('"') {
-                    return Some("string".to_string());
-                }
-                if expr.starts_with('[') {
-                    return Some("list".to_string());
-                }
-                if expr.starts_with('{') {
-                    return Some("dict".to_string());
-                }
-            }
-
-            if trimmed.starts_with('}') {
-                inside_target_method = false;
-            }
-        }
-    }
-    None
-}
-
-fn collect_ast_dot_completions_for_class(
-    stmts: &[Stmt],
-    target_class: &str,
-    seen: &mut std::collections::HashSet<String>,
-    items: &mut Vec<CompletionItem>,
-) {
-    for stmt in stmts {
-        if let StmtKind::Class { name, parent, methods, .. } = &stmt.kind
-            && name == target_class
-        {
-            for m in methods {
-                if !seen.contains(&m.name) {
-                    seen.insert(m.name.clone());
-                    items.push(CompletionItem {
-                        label: m.name.clone(),
-                        kind: Some(CompletionItemKind::METHOD),
-                        detail: Some(format!("method {name}.{}()", m.name)),
-                        ..Default::default()
-                    });
-                }
-            }
-            if let Some(pvar) = parent {
-                collect_ast_dot_completions_for_class(stmts, &pvar.name, seen, items);
-            }
-        }
-    }
-}
-
-fn collect_dot_completions_for_class(
-    source: &str,
-    ast: Option<&[Stmt]>,
-    receiver: &str,
-    target_class: Option<&str>,
-    items: &mut Vec<CompletionItem>,
-) {
-
-    let mut seen = std::collections::HashSet::new();
-
-    // 0. Dynamically populate built-in type methods directly from engine runtime tables (crate::class::BUILTINS)
-    if let Some(tc) = target_class {
-        let tc_lower = tc.to_lowercase();
-        for &builtin in quince::class::BUILTINS {
-            let seed = builtin.seed();
-            if seed.name == tc_lower || (tc_lower == "str" && seed.name == "string") {
-                for &(m_name, _) in seed.methods {
-                    if !seen.contains(m_name) {
-                        seen.insert(m_name.to_string());
-                        items.push(CompletionItem {
-                            label: m_name.to_string(),
-                            kind: Some(CompletionItemKind::METHOD),
-                            detail: Some(format!("builtin method {}.{}()", seed.name, m_name)),
-                            ..Default::default()
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    // 1. Try AST-based class methods if AST is present
-    if let Some(stmts) = ast {
-        if let Some(tc) = target_class {
-            collect_ast_dot_completions_for_class(stmts, tc, &mut seen, items);
-        } else {
-            for stmt in stmts {
-                if let StmtKind::Class { name, methods, .. } = &stmt.kind {
-                    for m in methods {
-                        if !seen.contains(&m.name) {
-                            seen.insert(m.name.clone());
-                            items.push(CompletionItem {
-                                label: m.name.clone(),
-                                kind: Some(CompletionItemKind::METHOD),
-                                detail: Some(format!("method {name}.{}()", m.name)),
-                                ..Default::default()
-                            });
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-
-    // 2. Text-based scan for class methods & fields matching target_class
-    let mut inside_class = false;
-    let mut current_class_name = String::new();
-    let mut brace_depth = 0;
-    let mut class_brace_depth = 0;
-
-    for line in source.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('#') {
-            continue;
-        }
-
-        if trimmed.starts_with("class ") {
-            let parts: Vec<_> = trimmed.split_whitespace().collect();
-            if parts.len() >= 2 {
-                let name = parts[1].split('{').next().unwrap_or("").trim().to_string();
-                current_class_name = name;
-                inside_class = true;
-                class_brace_depth = brace_depth;
-            }
-        }
-
-        let is_matching_class = target_class.is_none_or(|tc| current_class_name == tc);
-
-        if inside_class && is_matching_class {
-            // Class methods
-            if trimmed.starts_with("fn ") || trimmed.starts_with("op ") {
-                let parts: Vec<_> = trimmed.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    let mname = parts[1].split('(').next().unwrap_or("").trim();
-                    if !mname.is_empty() && !seen.contains(mname) && !KEYWORDS.contains(&mname) {
-                        seen.insert(mname.to_string());
-                        items.push(CompletionItem {
-                            label: mname.to_string(),
-                            kind: Some(CompletionItemKind::METHOD),
-                            detail: Some(format!("method {current_class_name}.{mname}()")),
-                            ..Default::default()
-                        });
-                    }
-                }
-            }
-
-            // Fields inside class body (e.g. self.x = x)
-            for part in line.split(|c: char| !(c == '.' || c == '_' || c.is_alphanumeric())) {
-                if let Some(idx) = part.find('.') {
-                    let recv = part[..idx].trim();
-                    let field = part[idx + 1..].trim();
-                    if (recv == "self" || recv == receiver)
-                        && !field.is_empty()
-                        && field.chars().all(|c| c == '_' || c.is_alphanumeric())
-                        && !seen.contains(field) && !KEYWORDS.contains(&field)
-                    {
-                        seen.insert(field.to_string());
-                        items.push(CompletionItem {
-                            label: field.to_string(),
-                            kind: Some(CompletionItemKind::FIELD),
-                            detail: Some(format!("property {current_class_name}.{field}")),
-                            ..Default::default()
-                        });
-                    }
-                }
-            }
-        }
-
-        // Fields assigned on receiver explicitly (e.g. p.z = 99)
-        for part in line.split(|c: char| !(c == '.' || c == '_' || c.is_alphanumeric())) {
-            if let Some(idx) = part.find('.') {
-                let recv = part[..idx].trim();
-                let field = part[idx + 1..].trim();
-                if recv == receiver
-                    && !field.is_empty()
-                    && field.chars().all(|c| c == '_' || c.is_alphanumeric())
-                    && !seen.contains(field) && !KEYWORDS.contains(&field)
-                {
-                    seen.insert(field.to_string());
-                    items.push(CompletionItem {
-                        label: field.to_string(),
-                        kind: Some(CompletionItemKind::FIELD),
-                        detail: Some(format!("property {field}")),
-                        ..Default::default()
-                    });
-                }
-            }
-        }
-
-        for c in line.chars() {
-            if c == '{' {
-                brace_depth += 1;
-            } else if c == '}' {
-                if brace_depth > 0 {
-                    brace_depth -= 1;
-                }
-                if inside_class && brace_depth <= class_brace_depth {
-                    inside_class = false;
-                }
-            }
-        }
-    }
-}
-
-/// What a module offers after its dot.
+/// The type of a literal written immediately before a dot.
 ///
-/// Read off the module's own member list, which is the same list `import`
-/// binds from — so a member added to the library is offered without this file
-/// being touched, and one removed stops being offered for the same reason.
-fn collect_module_completions(module: &str, items: &mut Vec<CompletionItem>) {
-    let Some(module) = quince::stdlib::module_named(module) else {
-        return;
+/// `"abc".`, `[1, 2].`, `5.`. Decided by lexing the text and looking at the
+/// tokens, not by checking whether it ends in a quote — the old heuristic did
+/// the latter and so read `xs[0]` as a list, because both end in a bracket.
+///
+/// A closing bracket is a collection literal only when what precedes its
+/// opening one cannot be indexed. `[1, 2]` is a list; `xs[0]` is an item out of
+/// one, and the token in front of the `[` is what tells them apart.
+fn trailing_literal_type(text: &str) -> Type {
+    let Ok(tokens) = quince::lexer::Lexer::new(text).tokenize() else {
+        return Type::Unknown;
     };
-    for (name, member) in module.members {
-        let (kind, detail) = match member {
-            quince::stdlib::Member::Fn(native) => {
-                (CompletionItemKind::FUNCTION, signature_of(native))
+    let kinds: Vec<&TokenKind> = tokens
+        .iter()
+        .map(|token| &token.kind)
+        .filter(|kind| **kind != TokenKind::Eof)
+        .collect();
+    let Some(last) = kinds.last() else {
+        return Type::Unknown;
+    };
+
+    let closing = match last {
+        TokenKind::Str(_) => return Type::class("string"),
+        TokenKind::Int(_) => return Type::class("int"),
+        TokenKind::Float(_) => return Type::class("float"),
+        TokenKind::True | TokenKind::False => return Type::class("bool"),
+        TokenKind::Nil => return Type::class("nil"),
+        TokenKind::RBracket => (TokenKind::LBracket, TokenKind::RBracket, "list"),
+        TokenKind::RBrace => (TokenKind::LBrace, TokenKind::RBrace, "dict"),
+        _ => return Type::Unknown,
+    };
+
+    let (open, close, class) = closing;
+    let mut depth = 0;
+    for index in (0..kinds.len()).rev() {
+        if *kinds[index] == close {
+            depth += 1;
+        } else if *kinds[index] == open {
+            depth -= 1;
+            if depth == 0 {
+                // Indexing, if a value sits in front of the bracket.
+                let indexable = matches!(
+                    index.checked_sub(1).map(|before| kinds[before]),
+                    Some(TokenKind::Ident(_))
+                        | Some(TokenKind::RParen)
+                        | Some(TokenKind::RBracket)
+                        | Some(TokenKind::Str(_))
+                );
+                return if indexable {
+                    Type::Unknown
+                } else {
+                    Type::class(class)
+                };
             }
-            quince::stdlib::Member::Const(_) => (
-                CompletionItemKind::CONSTANT,
-                format!("{}.{name}", module.name),
-            ),
-        };
-        items.push(CompletionItem {
-            label: name.to_string(),
-            kind: Some(kind),
-            detail: Some(detail),
-            ..Default::default()
-        });
+        }
     }
+    Type::Unknown
 }
 
-fn collect_ast_completions(source: &str, stmts: &[Stmt], pos: Position, items: &mut Vec<CompletionItem>) {
-    for stmt in stmts {
-        let stmt_pos = offset_to_position(source, stmt.span.start as usize);
-        if stmt_pos.line > pos.line {
-            continue;
-        }
+/// The text the cursor sits immediately after the dot of.
+fn text_before_dot(source: &str, pos: Position) -> Option<String> {
+    let line = source.lines().nth(pos.line as usize)?;
+    let col = (pos.character as usize).min(line.len());
+    Some(line[..col].trim_end().strip_suffix('.')?.to_string())
+}
 
-        match &stmt.kind {
-            StmtKind::Fn { decl, .. } => {
-                items.push(CompletionItem {
-                    label: decl.name.clone(),
-                    kind: Some(CompletionItemKind::FUNCTION),
-                    detail: Some(format!("fn {}(...)", decl.name)),
-                    ..Default::default()
-                });
-                for p in &decl.params {
-                    items.push(CompletionItem {
-                        label: p.name.clone(),
-                        kind: Some(CompletionItemKind::VARIABLE),
-                        detail: Some("parameter".to_string()),
-                        ..Default::default()
-                    });
-                }
-                collect_ast_completions(source, &decl.body.stmts, pos, items);
+/// The text a member access sits after, if the word under the cursor is one.
+///
+/// Hovering the `magnitude` in `p.magnitude()` asks about a method, and which
+/// method depends on what `p` is. The word itself is not enough.
+fn text_before_word(source: &str, pos: Position) -> Option<String> {
+    let line = source.lines().nth(pos.line as usize)?;
+    let col = (pos.character as usize).min(line.len());
+    let start = line[..col]
+        .rfind(|c: char| !(c == '_' || c.is_alphanumeric()))
+        .map_or(0, |index| index + 1);
+    Some(line[..start].trim_end().strip_suffix('.')?.to_string())
+}
+
+/// What is being called at `pos`, and which argument the cursor is in.
+///
+/// Text, and unavoidably so: the call has not been written yet, so there is no
+/// node in any tree to ask. What it reads is bracket depth and commas — where
+/// the cursor *is*, never what anything *means*. Deciding the callee's type is
+/// the pass's, and this hands the name over for it to answer.
+fn find_call_context(source: &str, pos: Position) -> Option<(String, Option<String>, u32)> {
+    let before = &source[..(position_to_offset(source, pos) as usize).min(source.len())];
+
+    let chars: Vec<(usize, char)> = before.char_indices().collect();
+    let mut depth = 0;
+    let mut commas = 0;
+    let mut open = None;
+    for index in (0..chars.len()).rev() {
+        match chars[index].1 {
+            ')' => depth += 1,
+            '(' if depth == 0 => {
+                open = Some(chars[index].0);
+                break;
             }
-            StmtKind::Class {
-                name,
-                methods,
-                openness,
-                ..
-            } => {
-                // Worth showing: what a type is open to is the first thing a
-                // reader wants from a class they are about to reach for.
-                let modifier = openness.word().map(|w| format!("{w} ")).unwrap_or_default();
-                items.push(CompletionItem {
-                    label: name.clone(),
-                    kind: Some(CompletionItemKind::CLASS),
-                    detail: Some(format!("{modifier}class {name}")),
-                    ..Default::default()
-                });
-                for m in methods {
-                    items.push(CompletionItem {
-                        label: m.name.clone(),
-                        kind: Some(CompletionItemKind::METHOD),
-                        detail: Some(format!("method {}.{}()", name, m.name)),
-                        ..Default::default()
-                    });
-                    for p in &m.params {
-                        items.push(CompletionItem {
-                            label: p.name.clone(),
-                            kind: Some(CompletionItemKind::VARIABLE),
-                            detail: Some("parameter".to_string()),
-                            ..Default::default()
-                        });
-                    }
-                    collect_ast_completions(source, &m.body.stmts, pos, items);
-                }
-            }
-            StmtKind::Let { name, bind, .. } => {
-                items.push(CompletionItem {
-                    label: name.clone(),
-                    kind: Some(CompletionItemKind::VARIABLE),
-                    detail: Some(format!("{} variable", bind.word())),
-                    ..Default::default()
-                });
-            }
-            StmtKind::If { then, otherwise, .. } => {
-                collect_ast_completions(source, &then.stmts, pos, items);
-                if let Some(other) = otherwise {
-                    collect_ast_completions(source, std::slice::from_ref(other.as_ref()), pos, items);
-                }
-            }
-            StmtKind::While { body, .. } => collect_ast_completions(source, &body.stmts, pos, items),
-            StmtKind::For { var, body, .. } => {
-                items.push(CompletionItem {
-                    label: var.clone(),
-                    kind: Some(CompletionItemKind::VARIABLE),
-                    detail: Some("loop variable".to_string()),
-                    ..Default::default()
-                });
-                collect_ast_completions(source, &body.stmts, pos, items);
-            }
-            StmtKind::Try { body, handler, binding, .. } => {
-                items.push(CompletionItem {
-                    label: binding.clone(),
-                    kind: Some(CompletionItemKind::VARIABLE),
-                    detail: Some("caught error variable".to_string()),
-                    ..Default::default()
-                });
-                collect_ast_completions(source, &body.stmts, pos, items);
-                collect_ast_completions(source, &handler.stmts, pos, items);
-            }
-            StmtKind::Block(block) => collect_ast_completions(source, &block.stmts, pos, items),
+            '(' => depth -= 1,
+            ',' if depth == 0 => commas += 1,
             _ => {}
         }
     }
-}
 
-fn collect_text_variable_completions(source: &str, pos: Position, items: &mut Vec<CompletionItem>) {
-    let mut seen: std::collections::HashSet<String> = items.iter().map(|i| i.label.clone()).collect();
-    let is_ident_start = |c: char| c == '_' || c.is_alphabetic();
-
-    for (line_idx, line) in source.lines().enumerate() {
-        if line_idx > pos.line as usize {
-            break;
-        }
-        let trimmed = line.trim();
-        if trimmed.starts_with('#') {
-            continue;
-        }
-        for word in line.split(|c: char| !(c == '_' || c.is_alphanumeric())) {
-            if word.len() > 1
-                && is_ident_start(word.chars().next().unwrap())
-                && !KEYWORDS.contains(&word)
-                && !seen.contains(word)
-            {
-                seen.insert(word.to_string());
-                items.push(CompletionItem {
-                    label: word.to_string(),
-                    kind: Some(CompletionItemKind::VARIABLE),
-                    detail: Some("identifier".to_string()),
-                    ..Default::default()
-                });
-            }
-        }
+    let before_paren = before[..open?].trim_end();
+    let start = before_paren
+        .rfind(|c: char| !(c == '_' || c.is_alphanumeric()))
+        .map_or(0, |index| index + 1);
+    if start >= before_paren.len() {
+        return None;
     }
+    let callee = before_paren[start..].to_string();
+    let receiver = before_paren[..start]
+        .trim_end()
+        .strip_suffix('.')
+        .map(str::to_string);
+
+    Some((callee, receiver, commas))
 }
 
+fn symbol_at(state: &DocumentState, word: &str, pos: Position) -> Option<Symbol> {
+    let offset = position_to_offset(&state.text, pos);
+
+    // `p.magnitude` — the word is a member, and the receiver decides which one.
+    if let Some(before) = text_before_word(&state.text, pos)
+        && let Some(found) = state
+            .members_before(&before, offset)
+            .into_iter()
+            .find(|symbol| symbol.name == word)
+    {
+        return Some(found);
+    }
+
+    if let Some(types) = &state.types
+        && let Some(found) = types.symbol(word, offset)
+    {
+        return Some(found);
+    }
+
+    quince::infer::globals()
+        .into_iter()
+        .find(|symbol| symbol.name == word)
+}
 
 fn get_hover(state: Option<&DocumentState>, pos: Position) -> Option<Hover> {
     let state = state?;
     let word = get_word_at_position(&state.text, pos)?;
 
-    // Builtin Hover Docs
-    let doc = match word.as_str() {
-        "print" => Some("**print(...)**\n\nPrints one or more values to standard output."),
-        "type" => Some("**type(val)**\n\nReturns the type representation or type name of a value."),
-        "len" => Some("**len(val)**\n\nReturns the length of a string, list, or dict."),
-        "int" => Some("**int**\n\nBuilt-in integer type and converter function."),
-        "float" => Some("**float**\n\nBuilt-in floating-point number type and converter function."),
-        "string" => Some("**string**\n\nBuilt-in text string type and converter function."),
-        "list" => Some("**list**\n\nBuilt-in dynamic array type and converter function."),
-        "dict" => Some("**dict**\n\nBuilt-in key-value dictionary type."),
-        "self" => Some("**self**\n\nReference to the current class instance inside a method."),
-        "super" => Some("**super**\n\nReference to the parent class inside a method."),
-        _ => None,
-    };
-
-    if let Some(content) = doc {
+    // A keyword explains itself, from beside the list that reserves it.
+    if let Some(doc) = quince::token::TokenKind::keyword(&word).and_then(|kind| kind.doc()) {
         return Some(Hover {
-            contents: HoverContents::Scalar(MarkedString::String(content.to_string())),
+            contents: HoverContents::Array(vec![
+                MarkedString::LanguageString(LanguageString {
+                    language: "quince".to_string(),
+                    value: word,
+                }),
+                MarkedString::String(doc.to_string()),
+            ]),
             range: None,
         });
     }
 
-    // What the name was declared as, and what the pass made of what it holds.
-    // Two different questions, and a binding needs both: `let total` says which
-    // keyword bound the name and nothing whatever about the value, which is the
-    // half a reader hovering over it is usually after.
-    let declaration = state
-        .ast
-        .as_deref()
-        .and_then(|ast| find_decl_hover(ast, &word));
-    let inferred = state
-        .types
-        .as_ref()
-        .map(|types| types.of_name(&word, position_to_offset(&state.text, pos)))
-        .unwrap_or_default();
-
-    let value = match (declaration, &inferred) {
-        // A module answers for itself whatever else was found: there is no
-        // class to name, and which module it is is the whole of the answer.
-        (_, Type::Module(module)) => format!("module {module}"),
-        (Some((line, true)), _) => line,
-        (Some((line, false)), Type::Class(class)) => format!("{line}: {class}"),
-        (Some((line, false)), Type::Unknown) => line,
-        (None, Type::Class(class)) => format!("{word}: {class}"),
-        (None, Type::Unknown) => return None,
-    };
+    let symbol = symbol_at(state, &word, pos)?;
+    let signature = symbol.signature();
+    // A hover that would repeat the word under the cursor and add nothing says
+    // nothing. A parameter with no type and no `@param` is the ordinary case,
+    // and an empty tooltip is worse than none at all.
+    if symbol.doc.is_none() && signature == word {
+        return None;
+    }
+    let mut contents = vec![MarkedString::LanguageString(LanguageString {
+        language: "quince".to_string(),
+        value: signature,
+    })];
+    if let Some(doc) = &symbol.doc {
+        contents.push(MarkedString::String(rendered_doc(doc)));
+    }
 
     Some(Hover {
-        contents: HoverContents::Scalar(MarkedString::LanguageString(LanguageString {
-            language: "quince".to_string(),
-            value,
-        })),
+        contents: HoverContents::Array(contents),
         range: None,
     })
-}
-
-/// A one-line declaration for `target`, and whether that line already says what
-/// the name holds.
-///
-/// A `fn` or a `class` line does — appending `: function` to `fn scaled(k)`
-/// would be noise. A binding line does not, which is exactly where the inferred
-/// type earns its place.
-fn find_decl_hover(stmts: &[Stmt], target: &str) -> Option<(String, bool)> {
-    for stmt in stmts {
-        match &stmt.kind {
-            StmtKind::Fn { decl, .. } if decl.name == target => {
-                let params: Vec<_> = decl.params.iter().map(|p| p.name.as_str()).collect();
-                return Some((format!("fn {}({})", decl.name, params.join(", ")), true));
-            }
-            StmtKind::Class { name, parent, .. } if name == target => {
-                return match parent {
-                    Some(p) => Some((format!("class {name} extends {}", p.name), true)),
-                    None => Some((format!("class {name}"), true)),
-                };
-            }
-            StmtKind::Let { name, bind, .. } if name == target => {
-                return Some((format!("{} {name}", bind.word()), false));
-            }
-            _ => {}
-        }
-    }
-    None
 }
 
 fn get_definition(uri: &Url, state: Option<&DocumentState>, pos: Position) -> Option<GotoDefinitionResponse> {
@@ -1571,442 +1069,84 @@ fn span_to_range(source: &str, span: Span) -> Range {
 
 fn get_signature_help(state: Option<&DocumentState>, pos: Position) -> Option<SignatureHelp> {
     let state = state?;
-    let (callee, receiver, active_param) = find_call_context(&state.text, pos)?;
+    let (callee, receiver, active) = find_call_context(&state.text, pos)?;
+    let offset = position_to_offset(&state.text, pos);
 
-    if callee == "print" {
-        return Some(SignatureHelp {
-            signatures: vec![SignatureInformation {
-                label: "print(*args)".to_string(),
-                documentation: Some(lsp_types::Documentation::String(
-                    "Prints values to standard output.".to_string(),
-                )),
-                parameters: Some(vec![ParameterInformation {
-                    label: ParameterLabel::Simple("*args".to_string()),
-                    documentation: None,
-                }]),
-                active_parameter: Some(active_param),
-            }],
-            active_signature: Some(0),
-            active_parameter: Some(active_param),
-        });
+    // Where to look for the name depends on what is in front of it, exactly as
+    // it does for a completion. A method is found on its receiver's class; a
+    // bare name is found in scope, and failing that among the globals.
+    let symbol = match &receiver {
+        Some(before) => state
+            .members_before(before, offset)
+            .into_iter()
+            .find(|symbol| symbol.name == callee),
+        None => state
+            .types
+            .as_ref()
+            .and_then(|types| types.symbol(&callee, offset))
+            .or_else(|| {
+                quince::infer::globals()
+                    .into_iter()
+                    .find(|symbol| symbol.name == callee)
+            }),
+    }?;
+
+    // A name that is not callable has no signature to show. A class is: calling
+    // one runs its `init`, and the parameters worth showing are that method's.
+    let parameters: Vec<ParameterInformation> = match symbol.kind {
+        Kind::Class => match &state.types {
+            Some(types) => types
+                .members_of(&symbol.name)
+                .into_iter()
+                .find(|member| member.name == "init")
+                .map(|init| init.params)
+                .unwrap_or(symbol.params.clone()),
+            None => symbol.params.clone(),
+        },
+        _ => symbol.params.clone(),
     }
+    .into_iter()
+    .map(|name| ParameterInformation {
+        // Documented from the `@param` that named it, when there is one, which
+        // is what makes writing them worth the trouble.
+        documentation: symbol
+            .doc
+            .as_ref()
+            .and_then(|doc| doc.params.iter().find(|param| param.name == name))
+            .map(|param| lsp_types::Documentation::String(param.text.clone())),
+        label: ParameterLabel::Simple(name),
+    })
+    .collect();
 
-    if callee == "type" {
-        return Some(SignatureHelp {
-            signatures: vec![SignatureInformation {
-                label: "type(value)".to_string(),
-                documentation: Some(lsp_types::Documentation::String(
-                    "Returns the type of a value.".to_string(),
-                )),
-                parameters: Some(vec![ParameterInformation {
-                    label: ParameterLabel::Simple("value".to_string()),
-                    documentation: None,
-                }]),
-                active_parameter: Some(active_param),
-            }],
-            active_signature: Some(0),
-            active_parameter: Some(active_param),
-        });
-    }
-
-    if callee == "Error"
-        || quince::error::ERROR_KINDS
-            .iter()
-            .any(|k| k.class_name() == Some(callee.as_str()))
-    {
-        return Some(SignatureHelp {
-            signatures: vec![SignatureInformation {
-                label: format!("{callee}(message)"),
-                documentation: Some(lsp_types::Documentation::String(
-                    format!("Constructs a `{callee}` instance with a message string."),
-                )),
-                parameters: Some(vec![ParameterInformation {
-                    label: ParameterLabel::Simple("message".to_string()),
-                    documentation: None,
-                }]),
-                active_parameter: Some(active_param),
-            }],
-            active_signature: Some(0),
-            active_parameter: Some(active_param),
-        });
-    }
-
-    let target_class = if let Some(recv) = &receiver {
-        infer_receiver_class(&state.text, recv, pos)
-    } else if callee.chars().next().is_some_and(|c| c.is_uppercase()) {
-        Some(callee.clone())
-    } else {
-        None
+    let label = match symbol.kind {
+        Kind::Class => format!(
+            "{}({})",
+            symbol.name,
+            parameters
+                .iter()
+                .map(|param| match &param.label {
+                    ParameterLabel::Simple(name) => name.clone(),
+                    ParameterLabel::LabelOffsets(_) => String::new(),
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        _ => symbol.signature(),
     };
-
-    let sig_info = find_function_signature(&state.text, state.ast.as_deref(), &callee, target_class.as_deref())?;
 
     Some(SignatureHelp {
-        signatures: vec![sig_info],
+        signatures: vec![SignatureInformation {
+            label,
+            documentation: symbol
+                .doc
+                .as_ref()
+                .map(|doc| lsp_types::Documentation::String(doc.summary.clone())),
+            parameters: Some(parameters),
+            active_parameter: Some(active),
+        }],
         active_signature: Some(0),
-        active_parameter: Some(active_param),
+        active_parameter: Some(active),
     })
-}
-
-fn find_call_context(source: &str, pos: Position) -> Option<(String, Option<String>, u32)> {
-    let mut total_offset = 0;
-    for (idx, line) in source.lines().enumerate() {
-        if idx == pos.line as usize {
-            total_offset += (pos.character as usize).min(line.len());
-            break;
-        }
-        total_offset += line.len() + 1;
-    }
-    let text_before = &source[..total_offset.min(source.len())];
-
-    let mut depth = 0;
-    let mut comma_count = 0;
-    let mut open_paren_idx = None;
-
-    let chars: Vec<(usize, char)> = text_before.char_indices().collect();
-    for i in (0..chars.len()).rev() {
-        let (_, c) = chars[i];
-        if c == ')' {
-            depth += 1;
-        } else if c == '(' {
-            if depth == 0 {
-                open_paren_idx = Some(chars[i].0);
-                break;
-            } else {
-                depth -= 1;
-            }
-        } else if c == ',' && depth == 0 {
-            comma_count += 1;
-        }
-    }
-
-    let open_idx = open_paren_idx?;
-    let text_before_paren = text_before[..open_idx].trim_end();
-
-    let end_ident = text_before_paren.len();
-    let start_ident = text_before_paren
-        .rfind(|c: char| !(c == '_' || c.is_alphanumeric()))
-        .map_or(0, |i| i + 1);
-
-    if start_ident >= end_ident {
-        return None;
-    }
-    let callee = text_before_paren[start_ident..end_ident].to_string();
-
-    let mut receiver = None;
-    let before_ident = text_before_paren[..start_ident].trim_end();
-    if let Some(recv_part) = before_ident.strip_suffix('.') {
-        let recv_part = recv_part.trim_end();
-        if !recv_part.is_empty() {
-            let mut cleaned = recv_part;
-            if cleaned.ends_with(')')
-                && let Some(open_paren) = cleaned.rfind('(')
-            {
-                cleaned = cleaned[..open_paren].trim_end();
-            }
-
-            if cleaned.ends_with('"') || cleaned.ends_with(']') || cleaned.ends_with('}') {
-                receiver = Some(cleaned.to_string());
-            } else {
-                let rstart = cleaned
-                    .rfind(|c: char| !(c == '_' || c == '.' || c.is_alphanumeric()))
-                    .map_or(0, |i| i + 1);
-                receiver = Some(cleaned[rstart..].to_string());
-            }
-        }
-    }
-
-
-    Some((callee, receiver, comma_count))
-}
-
-fn find_function_signature(
-    source: &str,
-    ast: Option<&[Stmt]>,
-    callee: &str,
-    target_class: Option<&str>,
-) -> Option<SignatureInformation> {
-    // 0. Search Built-in class methods dynamically from engine runtime tables (quince::class::BUILTINS)
-    if let Some(tc) = target_class {
-        let tc_lower = tc.to_lowercase();
-        for &builtin in quince::class::BUILTINS {
-            let seed = builtin.seed();
-            if seed.name == tc_lower || (tc_lower == "str" && seed.name == "string") {
-                for &(m_name, native) in seed.methods {
-                    if m_name == callee {
-                        let params = match native.arity {
-                            Some(0) => vec![],
-                            Some(1) => vec!["arg".to_string()],
-                            Some(n) => (1..=n).map(|i| format!("arg{i}")).collect(),
-                            None => vec!["*args".to_string()],
-                        };
-                        let label = format!("fn {}({})", m_name, params.join(", "));
-                        let param_infos = params
-                            .into_iter()
-                            .map(|p| ParameterInformation {
-                                label: ParameterLabel::Simple(p),
-                                documentation: None,
-                            })
-                            .collect();
-                        return Some(SignatureInformation {
-                            label,
-                            documentation: Some(lsp_types::Documentation::String(
-                                format!("Builtin method `{}.{}()`", seed.name, m_name),
-                            )),
-                            parameters: Some(param_infos),
-                            active_parameter: None,
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    if let Some(stmts) = ast
-        && let Some(sig) = find_ast_signature(stmts, callee, target_class)
-    {
-        return Some(sig);
-    }
-
-    find_text_signature(source, callee, target_class)
-}
-
-
-
-fn find_ast_signature(
-    stmts: &[Stmt],
-    callee: &str,
-    target_class: Option<&str>,
-) -> Option<SignatureInformation> {
-    for stmt in stmts {
-        match &stmt.kind {
-            StmtKind::Fn { decl, .. } => {
-                if target_class.is_none() && decl.name == callee {
-                    let params: Vec<String> = decl.params.iter().map(|p| p.name.clone()).collect();
-                    let label = format!("fn {}({})", decl.name, params.join(", "));
-                    let param_infos = params
-                        .into_iter()
-                        .map(|p| ParameterInformation {
-                            label: ParameterLabel::Simple(p),
-                            documentation: None,
-                        })
-                        .collect();
-                    return Some(SignatureInformation {
-                        label,
-                        documentation: None,
-                        parameters: Some(param_infos),
-                        active_parameter: None,
-                    });
-                }
-            }
-            StmtKind::Class { name, parent, methods, .. } => {
-                let is_constructor_call = target_class.map_or(name == callee, |tc| tc == name && callee == name);
-
-                if is_constructor_call {
-                    for m in methods {
-                        if m.name == "init" {
-                            let params: Vec<String> = m.params.iter().filter(|p| !p.receiver && p.name != "self").map(|p| p.name.clone()).collect();
-                            let label = format!("{}({})", name, params.join(", "));
-                            let param_infos = params
-                                .into_iter()
-                                .map(|p| ParameterInformation {
-                                    label: ParameterLabel::Simple(p),
-                                    documentation: None,
-                                })
-                                .collect();
-                            return Some(SignatureInformation {
-                                label,
-                                documentation: None,
-                                parameters: Some(param_infos),
-                                active_parameter: None,
-                            });
-                        }
-                    }
-                    if let Some(pvar) = parent
-                        && let Some(mut parent_sig) = find_ast_signature(stmts, &pvar.name, Some(&pvar.name))
-                    {
-                        let params_str = parent_sig.label.split('(').nth(1).unwrap_or(")");
-                        parent_sig.label = format!("{name}({params_str}");
-                        return Some(parent_sig);
-                    }
-                    return Some(SignatureInformation {
-                        label: format!("{}()", name),
-                        documentation: None,
-                        parameters: Some(vec![]),
-                        active_parameter: None,
-                    });
-                }
-
-                if target_class.is_none_or(|tc| tc == name.as_str()) {
-                    for m in methods {
-                        if m.name == callee {
-                            let params: Vec<String> = m.params.iter().filter(|p| !p.receiver && p.name != "self").map(|p| p.name.clone()).collect();
-                            let label = format!("fn {}({})", m.name, params.join(", "));
-                            let param_infos = params
-                                .into_iter()
-                                .map(|p| ParameterInformation {
-                                    label: ParameterLabel::Simple(p),
-                                    documentation: None,
-                                })
-                                .collect();
-                            return Some(SignatureInformation {
-                                label,
-                                documentation: None,
-                                parameters: Some(param_infos),
-                                active_parameter: None,
-                            });
-                        }
-                    }
-                    if let Some(pvar) = parent
-                        && let Some(parent_sig) = find_ast_signature(stmts, callee, Some(&pvar.name))
-                    {
-                        return Some(parent_sig);
-                    }
-                }
-            }
-
-
-            _ => {}
-        }
-    }
-    None
-}
-
-fn find_text_signature(
-    source: &str,
-    callee: &str,
-    target_class: Option<&str>,
-) -> Option<SignatureInformation> {
-    let mut inside_class = false;
-    let mut current_class = String::new();
-
-    for line in source.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("class ") {
-            let parts: Vec<_> = trimmed.split_whitespace().collect();
-            if parts.len() >= 2 {
-                current_class = parts[1].split('{').next().unwrap_or("").trim().to_string();
-                inside_class = true;
-            }
-        }
-
-        if target_class.is_some() && current_class == callee && (trimmed.starts_with("op init") || trimmed.starts_with("init")) {
-            let params = extract_params_from_line(trimmed);
-            let filtered_params: Vec<String> = params.into_iter().filter(|p| p != "self").collect();
-            let label = format!("{}({})", callee, filtered_params.join(", "));
-            let param_infos = filtered_params
-                .into_iter()
-                .map(|p| ParameterInformation {
-                    label: ParameterLabel::Simple(p),
-                    documentation: None,
-                })
-                .collect();
-            return Some(SignatureInformation {
-                label,
-                documentation: None,
-                parameters: Some(param_infos),
-                active_parameter: None,
-            });
-        }
-
-        if trimmed.starts_with("fn ") || trimmed.starts_with("op ") {
-            let parts: Vec<_> = trimmed.split_whitespace().collect();
-            if parts.len() >= 2 {
-                let name = parts[1].split('(').next().unwrap_or("").trim();
-                if name == callee {
-                    let is_matching = if inside_class {
-                        target_class.is_none_or(|tc| tc == current_class)
-                    } else {
-                        target_class.is_none()
-                    };
-
-                    if is_matching {
-                        let params = extract_params_from_line(trimmed);
-                        let filtered_params: Vec<String> = params.into_iter().filter(|p| p != "self").collect();
-                        let label = format!("fn {}({})", callee, filtered_params.join(", "));
-                        let param_infos = filtered_params
-                            .into_iter()
-                            .map(|p| ParameterInformation {
-                                label: ParameterLabel::Simple(p),
-                                documentation: None,
-                            })
-                            .collect();
-                        return Some(SignatureInformation {
-                            label,
-                            documentation: None,
-                            parameters: Some(param_infos),
-                            active_parameter: None,
-                        });
-                    }
-                }
-            }
-        }
-
-        if trimmed.starts_with('}') {
-            inside_class = false;
-        }
-    }
-
-    if let Some(tc) = target_class {
-        for line in source.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with("class ") {
-                let parts: Vec<_> = trimmed.split_whitespace().collect();
-                if parts.len() >= 2
-                    && parts[1].split('{').next().unwrap_or("").trim() == tc
-                    && let Some(ext_idx) = parts.iter().position(|&p| p == "extends")
-                    && ext_idx + 1 < parts.len()
-                {
-                    let parent_name = parts[ext_idx + 1].split('{').next().unwrap_or("").trim();
-                    if callee == tc {
-                        if let Some(mut parent_sig) =
-                            find_text_signature(source, parent_name, Some(parent_name))
-                        {
-                            let params_str = parent_sig.label.split('(').nth(1).unwrap_or(")");
-                            parent_sig.label = format!("{tc}({params_str}");
-                            return Some(parent_sig);
-                        }
-                    } else if let Some(parent_sig) =
-                        find_text_signature(source, callee, Some(parent_name))
-                    {
-                        return Some(parent_sig);
-                    }
-                }
-            }
-        }
-    }
-
-    if callee.chars().next().is_some_and(|c| c.is_uppercase()) {
-        return Some(SignatureInformation {
-            label: format!("{}()", callee),
-            documentation: None,
-            parameters: Some(vec![]),
-            active_parameter: None,
-        });
-    }
-
-
-    None
-}
-
-fn extract_params_from_line(line: &str) -> Vec<String> {
-    let open = match line.find('(') {
-        Some(i) => i,
-        None => return vec![],
-    };
-    let close = match line.find(')') {
-        Some(i) => i,
-        None => line.len(),
-    };
-    if open >= close {
-        return vec![];
-    }
-    let param_str = &line[open + 1..close];
-    param_str
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
 }
 
 /// The byte offset an LSP position names, which is what a `Span` is measured in.
@@ -2042,55 +1182,54 @@ mod tests {
 
     #[test]
     fn signature_help_extracts_class_constructor_params() {
-        let code = "class Point {\n    op init(x, y) {\n        self.x = x\n        self.y = y\n    }\n}\n\nlet p = Point(3, ";
-        let state = DocumentState::new(code.to_string(), None);
-        let pos = Position { line: 7, character: 17 }; // Cursor right after `, `
-        let help = get_signature_help(Some(&state), pos).expect("Expected signature help");
-        assert_eq!(help.signatures.len(), 1);
+        let before = "class Point {\n    op init(x, y) {\n        self.x = x\n        self.y = y\n    }\n}\n";
+        let code = &format!("{before}\nlet p = Point(3, ");
+        let state = typed(&[before, code]);
+        let help = get_signature_help(Some(&state), end_of(code)).expect("a constructor helps");
         assert_eq!(help.signatures[0].label, "Point(x, y)");
         assert_eq!(help.active_parameter, Some(1));
     }
 
     #[test]
-    fn signature_help_extracts_method_params() {
-        let code = "class Point {\n    fn scaled(k) {\n        return Point(self.x * k, self.y * k)\n    }\n}\n\nlet p = Point(3, 4)\np.scaled(";
-        let state = DocumentState::new(code.to_string(), None);
-        let pos = Position { line: 7, character: 9 };
-        let help = get_signature_help(Some(&state), pos).expect("Expected signature help");
-        assert_eq!(help.signatures.len(), 1);
-        assert_eq!(help.signatures[0].label, "fn scaled(k)");
+    fn signature_help_names_what_a_method_returns() {
+        let before = "class Point {\n    op init(x, y) {\n        self.x = x\n        self.y = y\n    }\n    fn scaled(k) {\n        return Point(self.x * k, self.y * k)\n    }\n}\nlet p = Point(3, 4)\n";
+        let code = &format!("{before}p.scaled(");
+        let state = typed(&[before, code]);
+        let help = get_signature_help(Some(&state), end_of(code)).expect("a method helps");
+        // The return type comes from the pass, and the parameter name from the
+        // declaration. Neither was available when this said `fn scaled(k)`.
+        assert_eq!(help.signatures[0].label, "fn scaled(k): Point");
         assert_eq!(help.active_parameter, Some(0));
     }
 
     #[test]
-    fn signature_help_extracts_builtin_method_params() {
-        let code = "let text = \"hello world\"\ntext.split(";
-        let state = DocumentState::new(code.to_string(), None);
-        let pos = Position { line: 1, character: 11 };
-        let help = get_signature_help(Some(&state), pos).expect("Expected signature help");
-        assert_eq!(help.signatures.len(), 1);
-        assert_eq!(help.signatures[0].label, "fn split(arg1, arg2)");
+    fn signature_help_names_a_builtins_parameters() {
+        let before = "let text = \"hello world\"\n";
+        let code = &format!("{before}text.split(");
+        let state = typed(&[before, code]);
+        let help = get_signature_help(Some(&state), end_of(code)).expect("a builtin helps");
+        // `fn split(arg1, arg2)` before the natives knew their own parameters.
+        assert_eq!(help.signatures[0].label, "fn split(separator): list");
         assert_eq!(help.active_parameter, Some(0));
     }
 
     #[test]
-    fn signature_help_extracts_literal_string_method_params() {
-        let code = "\"test\".split(";
-        let state = DocumentState::new(code.to_string(), None);
-        let pos = Position { line: 0, character: 13 };
-        let help = get_signature_help(Some(&state), pos).expect("Expected signature help for literal string method");
-        assert_eq!(help.signatures.len(), 1);
-        assert_eq!(help.signatures[0].label, "fn split(arg1, arg2)");
-        assert_eq!(help.active_parameter, Some(0));
+    fn signature_help_reaches_a_method_on_a_literal() {
+        let before = "\"test\"";
+        let code = &format!("{before}.split(");
+        let state = typed(&[before, code]);
+        let help = get_signature_help(Some(&state), end_of(code)).expect("a literal helps");
+        assert_eq!(help.signatures[0].label, "fn split(separator): list");
     }
 
     #[test]
-    fn signature_help_extracts_error_class_params() {
+    fn signature_help_reads_an_error_class_from_the_prelude() {
+        // `Error` and its `op init(message)` are written in Quince, so the
+        // editor learns the parameter by inferring over the same source the
+        // interpreter runs rather than from a second copy of it.
         let code = "TypeError(";
-        let state = DocumentState::new(code.to_string(), None);
-        let pos = Position { line: 0, character: 10 };
-        let help = get_signature_help(Some(&state), pos).expect("Expected signature help for TypeError");
-        assert_eq!(help.signatures.len(), 1);
+        let state = typed(&["", code]);
+        let help = get_signature_help(Some(&state), end_of(code)).expect("an error class helps");
         assert_eq!(help.signatures[0].label, "TypeError(message)");
         assert_eq!(help.active_parameter, Some(0));
     }
@@ -2100,30 +1239,30 @@ mod tests {
         let code = "let defined_above = 1\n\nlet defined_below = 2";
         let state = DocumentState::new(code.to_string(), None);
         let pos = Position { line: 1, character: 0 };
-        let items = get_completions(Some(&state), pos);
-        let labels: Vec<String> = items.into_iter().map(|i| i.label).collect();
+        let labels: Vec<String> = get_completions(Some(&state), pos)
+            .into_iter()
+            .map(|item| item.label)
+            .collect();
         assert!(labels.contains(&"defined_above".to_string()));
         assert!(!labels.contains(&"defined_below".to_string()));
     }
 
     #[test]
     fn signature_help_extracts_inherited_constructor_params() {
-        let code = "class Animal {\n    op init(name) {\n        self.name = name\n    }\n}\nclass Cat extends Animal {}\nCat(";
-        let state = DocumentState::new(code.to_string(), None);
-        let pos = Position { line: 6, character: 4 };
-        let help = get_signature_help(Some(&state), pos).expect("Expected signature help for inherited constructor");
-        assert_eq!(help.signatures.len(), 1);
+        let before = "class Animal {\n    op init(name) {\n        self.name = name\n    }\n}\nclass Cat extends Animal {}\n";
+        let code = &format!("{before}Cat(");
+        let state = typed(&[before, code]);
+        let help = get_signature_help(Some(&state), end_of(code)).expect("an inherited init helps");
         assert_eq!(help.signatures[0].label, "Cat(name)");
         assert_eq!(help.active_parameter, Some(0));
     }
 
     #[test]
     fn signature_help_extracts_super_method_params() {
+        let before = "class Animal {\n    op init(name) {\n        self.name = name\n    }\n}\nclass Dog extends Animal {\n    op init(name, breed) {\n        self.breed = breed\n    }\n}\n";
         let code = "class Animal {\n    op init(name) {\n        self.name = name\n    }\n}\nclass Dog extends Animal {\n    op init(name, breed) {\n        super.init(";
-        let state = DocumentState::new(code.to_string(), None);
-        let pos = Position { line: 7, character: 19 };
-        let help = get_signature_help(Some(&state), pos).expect("Expected signature help for super.init");
-        assert_eq!(help.signatures.len(), 1);
+        let state = typed(&[before, code]);
+        let help = get_signature_help(Some(&state), end_of(code)).expect("`super.init` helps");
         assert_eq!(help.signatures[0].label, "fn init(name)");
         assert_eq!(help.active_parameter, Some(0));
     }
@@ -2140,7 +1279,7 @@ mod tests {
     }
 
     fn path_at(code: &str) -> Option<String> {
-        receiver_path(code, end_of(code))
+        path_ending_at(&text_before_dot(code, end_of(code))?)
     }
 
     /// A document typed rather than opened: each string is the whole text after
@@ -2224,39 +1363,89 @@ mod tests {
         assert!(!labels.contains(&"read".to_string()), "{labels:?}");
     }
 
-    #[test]
-    fn hover_over_a_binding_says_what_it_holds() {
-        let code = "let total = 1 + 2\n";
+    /// The code block a hover leads with, which is the signature.
+    fn hovered(code: &str, pos: Position) -> Option<String> {
         let state = DocumentState::new(code.to_string(), None);
-        let pos = Position { line: 0, character: 5 };
-        let hover = get_hover(Some(&state), pos).expect("a binding hovers");
-        let HoverContents::Scalar(MarkedString::LanguageString(shown)) = hover.contents else {
-            panic!("expected a quince code block");
+        let hover = get_hover(Some(&state), pos)?;
+        let HoverContents::Array(parts) = hover.contents else {
+            panic!("expected an array of hover contents");
         };
-        assert_eq!(shown.value, "let total: int");
+        match parts.first() {
+            Some(MarkedString::LanguageString(shown)) => Some(shown.value.clone()),
+            _ => panic!("expected a quince code block first"),
+        }
+    }
+
+    /// Everything a hover says after its signature.
+    fn hovered_doc(code: &str, pos: Position) -> Option<String> {
+        let state = DocumentState::new(code.to_string(), None);
+        let HoverContents::Array(parts) = get_hover(Some(&state), pos)?.contents else {
+            panic!("expected an array of hover contents");
+        };
+        match parts.get(1) {
+            Some(MarkedString::String(text)) => Some(text.clone()),
+            _ => None,
+        }
     }
 
     #[test]
-    fn hover_over_a_declaration_does_not_repeat_itself() {
-        // `fn make()` already says what the name holds, so nothing is appended.
+    fn hover_over_a_binding_says_how_it_was_bound_and_what_it_holds() {
+        let pos = Position { line: 0, character: 5 };
+        assert_eq!(
+            hovered("let total = 1 + 2\n", pos).as_deref(),
+            Some("let total: int")
+        );
+        // `final` and `const` are a real distinction and the editor shows it.
+        assert_eq!(
+            hovered("const LIMIT = 10\n", Position { line: 0, character: 7 }).as_deref(),
+            Some("const LIMIT: int")
+        );
+    }
+
+    #[test]
+    fn hover_over_a_function_names_what_it_returns() {
         let code = "fn make() {\n    return 1\n}\n";
-        let state = DocumentState::new(code.to_string(), None);
         let pos = Position { line: 0, character: 4 };
-        let hover = get_hover(Some(&state), pos).expect("a function hovers");
-        let HoverContents::Scalar(MarkedString::LanguageString(shown)) = hover.contents else {
-            panic!("expected a quince code block");
-        };
-        assert_eq!(shown.value, "fn make()");
+        assert_eq!(hovered(code, pos).as_deref(), Some("fn make(): int"));
+    }
+
+    #[test]
+    fn hover_over_a_keyword_explains_it_from_beside_the_list() {
+        let code = "let total = 1\n";
+        let doc = hovered_doc(code, Position { line: 0, character: 1 })
+            .expect("a keyword explains itself");
+        assert!(doc.contains("reassigned"), "{doc}");
+    }
+
+    #[test]
+    fn hover_over_a_builtin_reads_the_natives_own_documentation() {
+        // This used to be a sentence written in `lsp.rs` for ten builtins and
+        // nothing for the other forty-two.
+        let code = "let n = len(\"ab\")\n";
+        let pos = Position { line: 0, character: 9 };
+        assert_eq!(hovered(code, pos).as_deref(), Some("fn len(value): int"));
+        let doc = hovered_doc(code, pos).expect("`len` documents itself");
+        assert!(doc.contains("How many characters"), "{doc}");
+    }
+
+    #[test]
+    fn hover_over_a_parameter_says_what_its_function_said_about_it() {
+        // The only thing anyone can be told about a parameter until v0.7, and
+        // the reason writing an `@param` is worth the trouble.
+        let code = "## Scales it.\n## @param k how much to scale by\nfn scale(k) {\n    return k\n}\n";
+        let pos = Position { line: 3, character: 11 };
+        assert_eq!(
+            hovered_doc(code, pos).as_deref(),
+            Some("how much to scale by")
+        );
     }
 
     #[test]
     fn hover_says_nothing_where_nothing_is_known() {
-        // A parameter carries no information, and there is no declaration line
-        // for one either. Saying nothing is the honest answer.
+        // An undocumented parameter carries no type and no prose. Repeating the
+        // word under the cursor back at the reader is worse than silence.
         let code = "fn f(x) {\n    return x\n}\n";
-        let state = DocumentState::new(code.to_string(), None);
-        let pos = Position { line: 1, character: 11 };
-        assert!(get_hover(Some(&state), pos).is_none());
+        assert!(hovered(code, Position { line: 1, character: 11 }).is_none());
     }
 
     /// A native's result is what the native says it is.
@@ -2265,6 +1454,30 @@ mod tests {
     /// pass had nothing to read, the heuristics answered, and they read the
     /// literal at the front of the line and called a list a string. `words` is
     /// a list, and the editor now offers a list's methods on it.
+    #[test]
+    fn dot_completion_types_a_literal_by_lexing_it() {
+        // `[1, 2]` is a list and `xs[0]` is an item out of one. The heuristic
+        // that used to answer here read the trailing bracket and called both
+        // lists; this reads the token in front of the opening one.
+        let labels = completions_after("[1, 2]");
+        assert!(labels.contains(&"push".to_string()), "{labels:?}");
+
+        let labels = completions_after("let xs = [1, 2]\nxs[0]");
+        assert!(labels.is_empty(), "an item of unknown type offers nothing: {labels:?}");
+
+        let labels = completions_after("\"abc\"");
+        assert!(labels.contains(&"upper".to_string()), "{labels:?}");
+    }
+
+    #[test]
+    fn dot_completion_on_an_unknown_receiver_offers_nothing() {
+        // The heuristics used to fill this in by guessing. An empty list is the
+        // honest answer, and a wrong one is worse than none: it is indexed,
+        // scrolled, and believed.
+        let labels = completions_after("fn f(thing) {\n    thing");
+        assert!(labels.is_empty(), "{labels:?}");
+    }
+
     #[test]
     fn a_natives_result_is_what_the_native_says_it_is() {
         let labels = completions_after("let words = \"a,b,c\".split(\",\")\nwords");

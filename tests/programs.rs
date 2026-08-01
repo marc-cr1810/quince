@@ -534,3 +534,38 @@ fn native_named(label: &str) -> Option<&'static quince::value::Native> {
         .into_iter()
         .find_map(|(name, native)| (name == label).then_some(native))
 }
+
+/// Every native's parameter names, counted against the arity it declares.
+///
+/// Two numbers stating the same fact, so they can drift — and what a drift
+/// costs is the editor labelling the wrong argument while someone types, which
+/// looks exactly like knowledge. The counts differ by where the native lives,
+/// and that difference is real rather than an inconsistency to be smoothed
+/// over: a method seeded onto a type takes its receiver as `args[0]`, and a
+/// module's member takes no receiver at all.
+#[test]
+fn every_native_names_the_parameters_it_takes() {
+    let mut failures = Vec::new();
+    for (label, native) in every_native() {
+        // A variadic native has no count to check against. `print` takes any
+        // number and `list` takes none or one, and `arity: None` is how both
+        // say so.
+        let Some(arity) = native.arity else {
+            continue;
+        };
+        // A type's method is called on a receiver that `arity` counts and the
+        // caller does not write; everything else is written in full.
+        let receiver = usize::from(matches!(
+            label.split('.').next(),
+            Some("string" | "list" | "dict")
+        ));
+        let expected = arity - receiver;
+        if native.params.len() != expected {
+            failures.push(format!(
+                "`{label}` declares arity {arity} and names {} parameter(s), expected {expected}",
+                native.params.len()
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}

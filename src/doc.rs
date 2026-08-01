@@ -231,6 +231,24 @@ impl Doc {
         Ok(doc)
     }
 
+    /// Reads documentation that came from somewhere other than a `##` block.
+    ///
+    /// A native's doc is a Rust string literal, so it has no source to point
+    /// at — every span is empty and a report drawn against one would underline
+    /// the first byte of the program. That is why a malformed native doc is
+    /// caught by a test rather than surfaced as a diagnostic. What this buys is
+    /// one renderer: `print` and a function someone wrote are drawn by the same
+    /// code, from the same shape.
+    pub fn parse_text(text: &str) -> Result<Doc, QuinceError> {
+        let block = DocBlock {
+            lines: text
+                .lines()
+                .map(|line| (line.trim().to_string(), Span::new(0, 0)))
+                .collect(),
+        };
+        Doc::parse(&block)
+    }
+
     /// Checks the block against the parameters of what it documents.
     ///
     /// The point of the whole design. A `@param` naming something the

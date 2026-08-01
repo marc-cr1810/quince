@@ -119,6 +119,7 @@ fn number(name: &str, args: &[Value], heap: &crate::heap::Heap, span: Span) -> R
 static FLOOR: Native = Native {
     name: "floor",
     arity: Some(1),
+    params: &["n"],
     returns: Some(Builtin::Int),
     doc: "The largest integer that is not greater than `n`.",
     func: |interp, args, span| {
@@ -131,6 +132,7 @@ static FLOOR: Native = Native {
 static CEIL: Native = Native {
     name: "ceil",
     arity: Some(1),
+    params: &["n"],
     returns: Some(Builtin::Int),
     doc: "The smallest integer that is not less than `n`.",
     func: |interp, args, span| {
@@ -143,6 +145,7 @@ static CEIL: Native = Native {
 static ROUND: Native = Native {
     name: "round",
     arity: Some(1),
+    params: &["n"],
     returns: Some(Builtin::Int),
     doc: "`n` rounded to the nearest integer, halves away from zero.",
     func: |interp, args, span| {
@@ -155,6 +158,7 @@ static ROUND: Native = Native {
 static ABS: Native = Native {
     name: "abs",
     arity: Some(1),
+    params: &["n"],
     returns: None,
     doc: "The magnitude of `n`, keeping the type it was given: an int stays an int.",
     func: |interp, args, span| match args[0].base(&interp.heap) {
@@ -166,6 +170,7 @@ static ABS: Native = Native {
 static SQRT: Native = Native {
     name: "sqrt",
     arity: Some(1),
+    params: &["n"],
     returns: Some(Builtin::Float),
     doc: "The square root of `n`. Refused for a negative `n` rather than answered with a NaN.",
     func: |interp, args, span| {
@@ -196,6 +201,7 @@ static SQRT: Native = Native {
 static POW: Native = Native {
     name: "pow",
     arity: Some(2),
+    params: &["base", "exponent"],
     returns: Some(Builtin::Float),
     doc: "`base` raised to `exponent`, always as a float.",
     func: |interp, args, span| {
@@ -212,6 +218,7 @@ static POW: Native = Native {
 static MIN: Native = Native {
     name: "min",
     arity: Some(2),
+    params: &["a", "b"],
     returns: None,
     doc: "The smaller of two numbers, keeping the type of whichever won.",
     func: |interp, args, span| pick(args, &interp.heap, span, "min"),
@@ -220,6 +227,7 @@ static MIN: Native = Native {
 static MAX: Native = Native {
     name: "max",
     arity: Some(2),
+    params: &["a", "b"],
     returns: None,
     doc: "The larger of two numbers, keeping the type of whichever won.",
     func: |interp, args, span| pick(args, &interp.heap, span, "max"),
@@ -289,6 +297,7 @@ fn io_error(what: &str, path: &str, err: std::io::Error, span: Span) -> QuinceEr
 static READ: Native = Native {
     name: "read",
     arity: Some(1),
+    params: &["path"],
     returns: Some(Builtin::Str),
     doc: "The whole contents of the file at `path`, as one string.",
     func: |interp, args, span| {
@@ -303,6 +312,7 @@ static READ: Native = Native {
 static WRITE: Native = Native {
     name: "write",
     arity: Some(2),
+    params: &["path", "contents"],
     returns: Some(Builtin::Nil),
     doc: "Writes `contents` to `path`, replacing what was there.",
     func: |interp, args, span| {
@@ -318,6 +328,7 @@ static WRITE: Native = Native {
 static APPEND: Native = Native {
     name: "append",
     arity: Some(2),
+    params: &["path", "contents"],
     returns: Some(Builtin::Nil),
     doc: "Adds `contents` to the end of `path`, creating the file if it is not there.",
     func: |interp, args, span| {
@@ -340,6 +351,7 @@ static APPEND: Native = Native {
 static EXISTS: Native = Native {
     name: "exists",
     arity: Some(1),
+    params: &["path"],
     returns: Some(Builtin::Bool),
     doc: "Whether there is anything at `path`. The one member that answers rather than raising.",
     func: |interp, args, span| {
@@ -351,6 +363,7 @@ static EXISTS: Native = Native {
 static LINES: Native = Native {
     name: "lines",
     arity: Some(1),
+    params: &["path"],
     returns: Some(Builtin::List),
     doc: "The lines of the file at `path`, without their line endings.",
     func: |interp, args, span| {
@@ -380,6 +393,7 @@ static LINES: Native = Native {
 static LINE: Native = Native {
     name: "line",
     arity: Some(0),
+    params: &[],
     returns: None,
     doc: "One line from standard input, or `nil` once input has run out. A blank line is an empty string, which is why the end is `nil` and not one.",
     func: |interp, _args, span| {
@@ -412,6 +426,7 @@ static TIME: Module = Module {
 static NOW: Native = Native {
     name: "now",
     arity: Some(0),
+    params: &[],
     returns: Some(Builtin::Float),
     doc: "Seconds since the Unix epoch, as a float.",
     func: |_interp, _args, span| {
@@ -426,6 +441,7 @@ static NOW: Native = Native {
 static SLEEP: Native = Native {
     name: "sleep",
     arity: Some(1),
+    params: &["seconds"],
     returns: Some(Builtin::Nil),
     doc: "Pauses for `seconds`.",
     func: |interp, args, span| {
@@ -487,6 +503,7 @@ pub fn next_u64(state: &mut u64) -> u64 {
 static SEED: Native = Native {
     name: "seed",
     arity: Some(1),
+    params: &["n"],
     returns: Some(Builtin::Nil),
     doc: "Sets the generator's starting point, so a run can be repeated exactly.",
     func: |interp, args, span| {
@@ -501,6 +518,7 @@ static SEED: Native = Native {
 static RAND_INT: Native = Native {
     name: "int",
     arity: Some(2),
+    params: &["low", "high"],
     returns: Some(Builtin::Int),
     doc: "A random integer between `low` and `high`, including both ends.",
     func: |interp, args, span| {
@@ -528,6 +546,7 @@ static RAND_INT: Native = Native {
 static RAND_FLOAT: Native = Native {
     name: "float",
     arity: Some(0),
+    params: &[],
     returns: Some(Builtin::Float),
     doc: "A random float in `[0, 1)`.",
     func: |interp, _args, _span| {
@@ -542,6 +561,7 @@ static RAND_FLOAT: Native = Native {
 static CHOICE: Native = Native {
     name: "choice",
     arity: Some(1),
+    params: &["items"],
     returns: None,
     doc: "One item picked from `items`, so its type is whatever the list holds.",
     func: |interp, args, span| {

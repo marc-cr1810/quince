@@ -42,6 +42,7 @@ use crate::ast::{
     BinaryOp, Block, Expr, ExprKind, FnDecl, ImportNames, SELF, Stmt, StmtKind, UnaryOp,
 };
 use crate::class::BUILTINS;
+use crate::doc::Doc;
 use crate::stdlib;
 use crate::token::Span;
 use crate::value::{Native, Value};
@@ -113,10 +114,104 @@ struct ClassInfo {
     methods: HashMap<String, Rc<FnDecl>>,
 }
 
-/// One name in scope, and what it holds.
+/// What a name is, for an editor that has to say so before it can draw it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    Class,
+    Function,
+    Method,
+    Field,
+    Variable,
+    /// A name the caller filled in, which carries no type until v0.7.
+    Parameter,
+    Module,
+}
+
+/// A name, and everything an editor needs in order to offer it.
+///
+/// The one thing `lsp.rs` and the REPL both ask for. Before this existed each
+/// of them walked the source for itself and reached its own conclusions, which
+/// is how the editor came to complete a list's methods on a string.
+#[derive(Clone, Debug)]
+pub struct Symbol {
+    pub name: String,
+    pub kind: Kind,
+    /// What the name holds. A function's name holds a `function`, whatever
+    /// calling it would produce — the two are different questions and were one
+    /// field until the corpus check caught it.
+    pub ty: Type,
+    /// What calling it produces, for a function or a method. `Unknown` for
+    /// everything else, which is not callable and so has no answer.
+    pub returns: Type,
+    pub doc: Option<Doc>,
+    /// The names a caller writes, for a function or a method.
+    pub params: Vec<String>,
+    /// The word that introduced the declaration, where one did.
+    ///
+    /// `let`, `final`, `const` — a real distinction and one an editor should
+    /// show, since `final` and `const` are the difference between a name that
+    /// can be rebound and one that cannot.
+    pub keyword: Option<&'static str>,
+}
+
+impl Symbol {
+    fn new(name: impl Into<String>, kind: Kind, ty: Type) -> Symbol {
+        Symbol {
+            name: name.into(),
+            kind,
+            ty,
+            returns: Type::Unknown,
+            doc: None,
+            params: Vec::new(),
+            keyword: None,
+        }
+    }
+
+    fn declared_with(mut self, keyword: &'static str) -> Symbol {
+        self.keyword = Some(keyword);
+        self
+    }
+
+    fn returning(mut self, returns: Type) -> Symbol {
+        self.returns = returns;
+        self
+    }
+
+    fn with_doc(mut self, doc: Option<Doc>) -> Symbol {
+        self.doc = doc;
+        self
+    }
+
+    /// How the declaration reads back, for a hover or a completion's detail.
+    pub fn signature(&self) -> String {
+        let named = |ty: &Type| match ty.class_name() {
+            // `nil` is not written. A function that hands nothing back says so
+            // by having no return type, which is how every language that has
+            // them spells it — and `fn init(name): nil` reads as a claim rather
+            // than as the absence of one.
+            Some("nil") | None => String::new(),
+            Some(class) => format!(": {class}"),
+        };
+        match self.kind {
+            Kind::Function | Kind::Method => format!(
+                "fn {}({}){}",
+                self.name,
+                self.params.join(", "),
+                named(&self.returns)
+            ),
+            Kind::Class => format!("class {}", self.name),
+            Kind::Module => format!("module {}", self.name),
+            _ => match self.keyword {
+                Some(keyword) => format!("{keyword} {}{}", self.name, named(&self.ty)),
+                None => format!("{}{}", self.name, named(&self.ty)),
+            },
+        }
+    }
+}
+
+/// One name in scope, and what is known about it.
 struct Binding {
-    name: String,
-    ty: Type,
+    symbol: Symbol,
     /// The block the name lives in. Bindings are found by asking which of them
     /// covers an offset, which is how a local in one function is kept from
     /// answering for the same name in another.
@@ -154,7 +249,7 @@ fn lookup(bindings: &[Binding], name: &str, offset: u32) -> Option<usize> {
         .iter()
         .enumerate()
         .filter(|(_, binding)| {
-            binding.name == name
+            binding.symbol.name == name
                 && binding.from <= offset
                 && binding.scope.start <= offset
                 && offset <= binding.scope.end
@@ -194,7 +289,7 @@ impl Types {
     /// What `name` holds, as seen from `offset`. See [`lookup`].
     pub fn of_name(&self, name: &str, offset: u32) -> Type {
         lookup(&self.bindings, name, offset)
-            .map(|index| self.bindings[index].ty.clone())
+            .map(|index| self.bindings[index].symbol.ty.clone())
             .unwrap_or_default()
     }
 
@@ -238,6 +333,83 @@ impl Types {
     /// Whether the program declared a class by this name.
     pub fn declares(&self, class: &str) -> bool {
         self.classes.contains_key(class)
+    }
+
+    /// Every name visible at `offset`, innermost first.
+    ///
+    /// What a completion list outside a dot is made of, together with the
+    /// keywords and the globals. Shadowed names appear once: the one that
+    /// would win is the one offered, because the other cannot be reached from
+    /// here by writing its name.
+    pub fn in_scope(&self, offset: u32) -> Vec<Symbol> {
+        let mut found: Vec<Symbol> = Vec::new();
+        for binding in &self.bindings {
+            if binding.from > offset
+                || binding.scope.start > offset
+                || offset > binding.scope.end
+                || found.iter().any(|seen| seen.name == binding.symbol.name)
+            {
+                continue;
+            }
+            // The one the lookup would answer with, rather than this one — two
+            // bindings of a name in one scope are a rebinding, and the live one
+            // is the later.
+            let winner = lookup(&self.bindings, &binding.symbol.name, offset)
+                .expect("this binding covers the offset");
+            found.push(self.bindings[winner].symbol.clone());
+        }
+        found
+    }
+
+    /// One name, as seen from `offset`.
+    pub fn symbol(&self, name: &str, offset: u32) -> Option<Symbol> {
+        lookup(&self.bindings, name, offset).map(|index| self.bindings[index].symbol.clone())
+    }
+
+    /// Everything reachable through a dot on an instance of `class`.
+    ///
+    /// Its own methods and fields, then its ancestors', then the builtin table
+    /// underneath — the order dispatch uses, so a name declared twice is
+    /// offered as whichever one would actually run.
+    pub fn members_of(&self, class: &str) -> Vec<Symbol> {
+        let mut found: Vec<Symbol> = Vec::new();
+        let mut current = class.to_string();
+        let mut seen = HashSet::new();
+        loop {
+            if !seen.insert(current.clone()) {
+                break;
+            }
+            if let Some(info) = self.classes.get(&current) {
+                for (name, decl) in &info.methods {
+                    let ty = self
+                        .methods
+                        .get(&(current.clone(), name.clone()))
+                        .cloned()
+                        .unwrap_or_default();
+                    push_once(&mut found, symbol_for(decl, Kind::Method, ty));
+                }
+            }
+            if let Some(fields) = self.fields.get(&current) {
+                for (name, ty) in fields {
+                    push_once(&mut found, Symbol::new(name, Kind::Field, ty.clone()));
+                }
+            }
+            // The builtin this link *is*, if it is one: `extend list` puts a
+            // class entry under `list`, and the list's own methods sit under it
+            // rather than in that entry.
+            if let Some(builtin) = BUILTINS.iter().find(|builtin| builtin.name() == current) {
+                for (name, native) in builtin.seed().methods {
+                    let mut symbol = symbol_of_native(native, Kind::Method);
+                    symbol.name = (*name).to_string();
+                    push_once(&mut found, symbol);
+                }
+            }
+            match self.classes.get(&current).and_then(|info| info.parent.clone()) {
+                Some(parent) => current = parent,
+                None => break,
+            }
+        }
+        found
     }
 
     /// The class `class` extends, if the program said so.
@@ -353,6 +525,161 @@ fn module_member(module: &str, name: &str) -> Type {
         Some((_, stdlib::Member::Const(build))) => of_value(&build()),
         None => Type::Unknown,
     }
+}
+
+/// Adds a symbol unless a name has already answered for it.
+///
+/// First wins, and the walk goes in dispatch order — so a method a subclass
+/// overrode is offered once, as the one that would run.
+fn push_once(found: &mut Vec<Symbol>, symbol: Symbol) {
+    if !found.iter().any(|seen| seen.name == symbol.name) {
+        found.push(symbol);
+    }
+}
+
+/// A symbol for a function or method the program declared.
+///
+/// Its parameters are the ones someone wrote, so the receiver a method carries
+/// is left out — `self` is not a name a caller types.
+fn symbol_for(decl: &Rc<FnDecl>, kind: Kind, returns: Type) -> Symbol {
+    Symbol {
+        name: decl.name.clone(),
+        kind,
+        ty: Type::class("function"),
+        returns,
+        doc: decl.doc.clone(),
+        keyword: None,
+        params: decl
+            .params
+            .iter()
+            .filter(|param| !param.receiver)
+            .map(|param| param.name.clone())
+            .collect(),
+    }
+}
+
+/// What a function's documentation said about one of its parameters.
+///
+/// A parameter carries no type until v0.7, so an `@param` is the only thing
+/// anyone can be told about one — which is most of what makes writing them
+/// worth the trouble.
+fn described_by(decl: &Rc<FnDecl>, param: &str) -> Option<Doc> {
+    let doc = decl.doc.as_ref()?;
+    let described = doc.params.iter().find(|named| named.name == param)?;
+    Some(Doc {
+        summary: described.text.clone(),
+        params: Vec::new(),
+        returns: None,
+        throws: Vec::new(),
+        span: described.span,
+    })
+}
+
+/// A symbol for a native, read off the tables it is declared in.
+///
+/// Its documentation goes through the same parser a `##` block does, so `print`
+/// and a function someone wrote are rendered by one code path. A native's doc
+/// is a Rust string literal and cannot carry a span, so a malformed one is
+/// dropped rather than reported — there is no source line to underline, and
+/// `every_native_documents_only_parameters_it_takes` is what catches it instead.
+pub fn symbol_of_native(native: &'static Native, kind: Kind) -> Symbol {
+    Symbol {
+        name: native.name.to_string(),
+        kind,
+        ty: Type::class("function"),
+        returns: returned_by(native),
+        doc: Doc::parse_text(native.doc).ok().filter(|doc| !doc.is_empty()),
+        keyword: None,
+        params: native.params.iter().map(|name| name.to_string()).collect(),
+    }
+}
+
+/// Every name a program starts with: the globals, and the types it can call.
+///
+/// Read off the same tables the interpreter binds them from, so a builtin added
+/// later is offered without this function being touched — the rule the
+/// completion lists were put under when `bool` turned out to be missing from a
+/// hand-written copy of them.
+pub fn globals() -> Vec<Symbol> {
+    let mut found: Vec<Symbol> = crate::interp::BUILTINS
+        .iter()
+        .map(|native| symbol_of_native(native, Kind::Function))
+        .collect();
+    for builtin in BUILTINS {
+        let seed = builtin.seed();
+        // A type with no constructor is a type no program can name: `nil` and
+        // `class` are keywords, so completing to one would be a lie.
+        if let Some(init) = seed.init {
+            let mut symbol = symbol_of_native(init, Kind::Class);
+            symbol.name = seed.name.to_string();
+            // The name holds the class object; calling it makes one of the type.
+            symbol.ty = Type::class("class");
+            found.push(symbol);
+        }
+    }
+    found.extend(error_classes().iter().cloned());
+    found
+}
+
+/// The error classes, inferred from the prelude that declares them.
+///
+/// The prelude is Quince — `Error` and its `op init(message)` are written in
+/// the language, and the kinds extend it — so this reads it with the pass
+/// rather than restating it. `TypeError(message)` is what the editor shows
+/// because that is what the source says, and a change to `BASE_ERROR` reaches
+/// the editor without anything here being touched.
+///
+/// Built once. It is the same handful of classes on every keystroke.
+fn error_classes() -> &'static [Symbol] {
+    static CLASSES: std::sync::OnceLock<Vec<Symbol>> = std::sync::OnceLock::new();
+    CLASSES.get_or_init(|| {
+        let mut source = String::from(crate::interp::BASE_ERROR);
+        for kind in crate::error::ERROR_KINDS {
+            let Some(name) = kind.class_name() else {
+                continue;
+            };
+            if name != "Error" {
+                source.push_str(&format!("class {name} extends Error {{}}\n"));
+            }
+        }
+        let Ok(program) = crate::compile(&source) else {
+            return Vec::new();
+        };
+        let types = infer(&program);
+        types
+            .in_scope(source.len() as u32)
+            .into_iter()
+            .filter(|symbol| symbol.kind == Kind::Class)
+            .map(|mut symbol| {
+                // Calling a class runs its `init`, so those are the parameters
+                // worth showing — inherited, for every kind but `Error` itself.
+                symbol.params = types
+                    .members_of(&symbol.name)
+                    .into_iter()
+                    .find(|member| member.name == "init")
+                    .map(|init| init.params)
+                    .unwrap_or_default();
+                symbol
+            })
+            .collect()
+    })
+}
+
+/// What a stdlib module offers after its dot.
+pub fn module_symbols(module: &str) -> Vec<Symbol> {
+    let Some(module) = stdlib::module_named(module) else {
+        return Vec::new();
+    };
+    module
+        .members
+        .iter()
+        .map(|(name, member)| match member {
+            stdlib::Member::Fn(native) => symbol_of_native(native, Kind::Function),
+            stdlib::Member::Const(build) => {
+                Symbol::new(*name, Kind::Variable, of_value(&build()))
+            }
+        })
+        .collect()
 }
 
 /// The native a stdlib module declares under `name`.
@@ -609,7 +936,7 @@ impl Infer {
                 } else {
                     Type::Unknown
                 };
-                self.bind(&param.name, ty, decl.body.span.start);
+                self.bind(&param.name, Kind::Parameter, ty, decl.body.span.start);
             }
             self.assignments_to_self(&decl.body.stmts, &mut found);
             self.scopes.pop();
@@ -681,24 +1008,31 @@ impl Infer {
             StmtKind::Expr(expr) | StmtKind::Throw(expr) => {
                 self.expr(expr);
             }
-            StmtKind::Let { name, value, .. } => {
+            StmtKind::Let { name, value, bind, doc, .. } => {
                 let ty = self.expr(value);
-                self.bind(name, ty, stmt.span.start);
+                let symbol = Symbol::new(name, Kind::Variable, ty)
+                    .declared_with(bind.word())
+                    .with_doc(doc.clone());
+                self.bind_symbol(symbol, stmt.span.start);
             }
             StmtKind::Fn { decl, .. } => {
                 let scope = self.scope().start;
-                self.bind(&decl.name, Type::class("function"), scope);
-                let ty = self.function(decl, None);
-                self.function_returns.insert(decl.name.clone(), ty);
+                let returns = self.function(decl, None);
+                self.function_returns
+                    .insert(decl.name.clone(), returns.clone());
+                self.bind_symbol(symbol_for(decl, Kind::Function, returns), scope);
             }
-            StmtKind::Class { name, methods, .. } => {
+            StmtKind::Class { name, methods, doc, .. } => {
                 // The name holds the class object, not an instance of it —
                 // `Point` is a `class` and `Point()` is a `Point`. Saying
                 // otherwise would make every mention of a class name look like
                 // a value of it, which is the mistake the capital-letter
                 // heuristic makes.
                 let scope = self.scope().start;
-                self.bind(name, Type::class("class"), scope);
+                let symbol = Symbol::new(name, Kind::Class, Type::class("class"))
+                    .returning(Type::class(name.clone()))
+                    .with_doc(doc.clone());
+                self.bind_symbol(symbol, scope);
                 self.methods(name, methods);
             }
             StmtKind::Extend { target, methods, .. } => self.methods(&target.name, methods),
@@ -711,7 +1045,7 @@ impl Infer {
                         } else {
                             Type::Unknown
                         };
-                        self.bind(module, ty, stmt.span.start);
+                        self.bind(module, Kind::Module, ty, stmt.span.start);
                     }
                     ImportNames::Names(names) => {
                         for name in names {
@@ -720,7 +1054,7 @@ impl Infer {
                             } else {
                                 Type::Unknown
                             };
-                            self.bind(&name.name, ty, stmt.span.start);
+                            self.bind(&name.name, Kind::Variable, ty, stmt.span.start);
                         }
                     }
                 }
@@ -739,7 +1073,7 @@ impl Infer {
             StmtKind::For { var, iter, body, .. } => {
                 let element = self.element_of(iter);
                 self.scopes.push(body.span);
-                self.bind(var, element, body.span.start);
+                self.bind(var, Kind::Variable, element, body.span.start);
                 self.stmts(&body.stmts);
                 self.scopes.pop();
             }
@@ -754,7 +1088,7 @@ impl Infer {
                 // The caught value is an instance of some error class, and
                 // which one is the throw's business rather than the catch's.
                 // `Error` would be a guess that reads as knowledge.
-                self.bind(binding, Type::Unknown, handler.span.start);
+                self.bind(binding, Kind::Variable, Type::Unknown, handler.span.start);
                 self.stmts(&handler.stmts);
                 self.scopes.pop();
             }
@@ -791,7 +1125,22 @@ impl Infer {
                 (true, Some(class)) => Type::class(class.clone()),
                 _ => Type::Unknown,
             };
-            self.bind(&param.name, ty, decl.body.span.start);
+            let symbol = Symbol::new(&param.name, Kind::Parameter, ty)
+                .with_doc(described_by(decl, &param.name));
+            self.bind_symbol(symbol, decl.body.span.start);
+        }
+        // `super` is a name in a method of a class that extends one, bound to
+        // the parent — the resolver puts it in a scope wrapped around the
+        // methods, and this is the same fact said where a lookup can find it.
+        if let Some(parent) = class.as_ref().and_then(|class| self.classes.get(class))
+            .and_then(|info| info.parent.clone())
+        {
+            self.bind(
+                crate::ast::SUPER,
+                Kind::Variable,
+                Type::Class(parent),
+                decl.body.span.start,
+            );
         }
         self.stmts(&decl.body.stmts);
         self.scopes.pop();
@@ -887,11 +1236,14 @@ impl Infer {
     }
 
     /// Records `name` in the innermost scope, visible from `from` onward.
-    fn bind(&mut self, name: &str, ty: Type, from: u32) {
+    fn bind(&mut self, name: &str, kind: Kind, ty: Type, from: u32) {
+        self.bind_symbol(Symbol::new(name, kind, ty), from);
+    }
+
+    fn bind_symbol(&mut self, symbol: Symbol, from: u32) {
         let scope = self.scope();
         self.bindings.push(Binding {
-            name: name.to_string(),
-            ty,
+            symbol,
             scope,
             from,
         });
@@ -936,7 +1288,7 @@ impl Infer {
             }
 
             ExprKind::Var(var) => lookup(&self.bindings, &var.name, expr.span.start)
-                .map(|index| self.bindings[index].ty.clone())
+                .map(|index| self.bindings[index].symbol.ty.clone())
                 .unwrap_or_default(),
 
             ExprKind::Unary { op, rhs } => {
@@ -1031,8 +1383,8 @@ impl Infer {
     /// Narrows a binding to what it holds once it has been assigned again.
     fn reassign(&mut self, name: &str, offset: u32, ty: &Type) {
         if let Some(index) = lookup(&self.bindings, name, offset) {
-            let previous = std::mem::take(&mut self.bindings[index].ty);
-            self.bindings[index].ty = previous.join(ty.clone());
+            let previous = std::mem::take(&mut self.bindings[index].symbol.ty);
+            self.bindings[index].symbol.ty = previous.join(ty.clone());
         }
     }
 

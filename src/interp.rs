@@ -127,7 +127,13 @@ fn out_of_stack() -> bool {
 /// Written in the language it defines, `op` and all: this compiles through the
 /// same parser as user code, so the prelude cannot drift from what a program is
 /// allowed to write.
-const BASE_ERROR: &str = "\
+/// The error hierarchy's root, as Quince rather than as Rust.
+///
+/// Public so that the inference pass can read it the way it reads any other
+/// program. `Error` takes a message and every listed kind extends it, and the
+/// editor should not learn that from a second copy written somewhere else — the
+/// point of declaring it in Quince was that there is one statement of it.
+pub const BASE_ERROR: &str = "\
 class Error {
     op init(message) {
         self.message = message
@@ -3623,6 +3629,7 @@ pub static BUILTINS: &[&Native] = &[&PRINT, &LEN, &TYPE];
 static PRINT: Native = Native {
     name: "print",
     arity: None,
+    params: &["values"],
     returns: Some(Builtin::Nil),
     doc: "Writes its arguments to standard output, separated by spaces, and ends the line.",
     func: |interp, args, _span| {
@@ -3641,6 +3648,7 @@ static PRINT: Native = Native {
 static LEN: Native = Native {
     name: "len",
     arity: Some(1),
+    params: &["value"],
     returns: Some(Builtin::Int),
     doc: "How many characters are in a string, items in a list, or entries in a dict. A class may answer for itself with `op len`.",
     // Not a method, so it does not come through `call_method`'s substitution and
@@ -3683,6 +3691,7 @@ static LEN: Native = Native {
 pub static REVERSE: Native = Native {
     name: "reverse",
     arity: Some(1),
+    params: &[],
     returns: Some(Builtin::List),
     doc: "A new list with the items in the opposite order. The receiver is left alone.",
     func: |interp, args, span| {
@@ -3702,6 +3711,7 @@ pub static REVERSE: Native = Native {
 pub static FIND: Native = Native {
     name: "find",
     arity: Some(2),
+    params: &["item"],
     returns: Some(Builtin::Int),
     doc: "Where `item` first appears in the list, or `-1` if it is not there.",
     func: |interp, args, span| {
@@ -3736,6 +3746,7 @@ pub static FIND: Native = Native {
 pub static SUM: Native = Native {
     name: "sum",
     arity: Some(1),
+    params: &[],
     returns: None,
     doc: "The items added together with `+`, left to right, so its type is whatever adding them gives. An empty list sums to `0`.",
     func: |interp, args, span| {
@@ -3840,6 +3851,7 @@ fn walk_list(
 pub static MAP: Native = Native {
     name: "map",
     arity: Some(2),
+    params: &["f"],
     returns: Some(Builtin::List),
     doc: "A new list holding `f` applied to each item.",
     func: |interp, args, span| {
@@ -3862,6 +3874,7 @@ pub static MAP: Native = Native {
 pub static FILTER: Native = Native {
     name: "filter",
     arity: Some(2),
+    params: &["f"],
     returns: Some(Builtin::List),
     doc: "A new list holding the items `f` answered truthily for.",
     func: |interp, args, span| {
@@ -3894,6 +3907,7 @@ pub static FILTER: Native = Native {
 pub static SORT: Native = Native {
     name: "sort",
     arity: Some(1),
+    params: &[],
     returns: Some(Builtin::List),
     doc: "A new list with the items in ascending order. Stable, and it asks `op lt` or `op cmp` where a class defines one.",
     func: |interp, args, span| {
@@ -3952,6 +3966,7 @@ fn merge_sort(
 pub static PUSH: Native = Native {
     name: "push",
     arity: Some(2),
+    params: &["item"],
     returns: Some(Builtin::Nil),
     doc: "Adds `item` to the end of the list.",
     func: |interp, args, span| match &args[0] {
@@ -3977,6 +3992,7 @@ pub static PUSH: Native = Native {
 pub static KEYS: Native = Native {
     name: "keys",
     arity: Some(1),
+    params: &[],
     returns: Some(Builtin::List),
     doc: "The dict's keys, in insertion order.",
     func: |interp, args, span| match &args[0] {
@@ -3998,6 +4014,7 @@ pub static KEYS: Native = Native {
 pub static VALUES: Native = Native {
     name: "values",
     arity: Some(1),
+    params: &[],
     returns: Some(Builtin::List),
     doc: "The dict's values, in insertion order.",
     func: |interp, args, span| match &args[0] {
@@ -4031,6 +4048,7 @@ pub static VALUES: Native = Native {
 pub static GET: Native = Native {
     name: "get",
     arity: Some(3),
+    params: &["key", "default"],
     returns: None,
     doc: "The value stored under `key`, or `default` if there is none — so its type is whatever the dict holds.",
     func: |interp, args, span| match args[0].base(&interp.heap) {
@@ -4057,6 +4075,7 @@ pub static GET: Native = Native {
 pub static REMOVE: Native = Native {
     name: "remove",
     arity: Some(2),
+    params: &["key"],
     returns: None,
     doc: "Takes `key` out of the dict and answers with what it held. Raises if the key is not there.",
     func: |interp, args, span| match &args[0] {
@@ -4130,6 +4149,7 @@ fn text_arg(
 pub static REPEAT: Native = Native {
     name: "repeat",
     arity: Some(2),
+    params: &["times"],
     returns: Some(Builtin::Str),
     doc: "The string written `n` times, end to end.",
     func: |interp, args, span| {
@@ -4160,6 +4180,7 @@ pub static REPEAT: Native = Native {
 pub static UPPER: Native = Native {
     name: "upper",
     arity: Some(1),
+    params: &[],
     returns: Some(Builtin::Str),
     doc: "The string with every character in upper case.",
     func: |_interp, args, _span| Ok(Value::Str(Rc::from(text(args).to_uppercase()))),
@@ -4168,6 +4189,7 @@ pub static UPPER: Native = Native {
 pub static LOWER: Native = Native {
     name: "lower",
     arity: Some(1),
+    params: &[],
     returns: Some(Builtin::Str),
     doc: "The string with every character in lower case.",
     func: |_interp, args, _span| Ok(Value::Str(Rc::from(text(args).to_lowercase()))),
@@ -4176,6 +4198,7 @@ pub static LOWER: Native = Native {
 pub static TRIM: Native = Native {
     name: "trim",
     arity: Some(1),
+    params: &[],
     returns: Some(Builtin::Str),
     doc: "The string without leading or trailing whitespace.",
     func: |_interp, args, _span| Ok(Value::Str(Rc::from(text(args).trim()))),
@@ -4184,6 +4207,7 @@ pub static TRIM: Native = Native {
 pub static STARTS_WITH: Native = Native {
     name: "starts_with",
     arity: Some(2),
+    params: &["prefix"],
     returns: Some(Builtin::Bool),
     doc: "Whether the string begins with `prefix`.",
     func: |interp, args, span| {
@@ -4195,6 +4219,7 @@ pub static STARTS_WITH: Native = Native {
 pub static ENDS_WITH: Native = Native {
     name: "ends_with",
     arity: Some(2),
+    params: &["suffix"],
     returns: Some(Builtin::Bool),
     doc: "Whether the string ends with `suffix`.",
     func: |interp, args, span| {
@@ -4206,6 +4231,7 @@ pub static ENDS_WITH: Native = Native {
 pub static REPLACE: Native = Native {
     name: "replace",
     arity: Some(3),
+    params: &["from", "to"],
     returns: Some(Builtin::Str),
     doc: "The string with every `from` replaced by `to`.",
     func: |interp, args, span| {
@@ -4231,6 +4257,7 @@ pub static REPLACE: Native = Native {
 pub static SPLIT: Native = Native {
     name: "split",
     arity: Some(2),
+    params: &["separator"],
     returns: Some(Builtin::List),
     doc: "The string cut at every `separator`, as a list of strings. The separator is not kept, and it may not be empty — use `chars`.",
     func: |interp, args, span| {
@@ -4253,6 +4280,7 @@ pub static SPLIT: Native = Native {
 pub static CHARS: Native = Native {
     name: "chars",
     arity: Some(1),
+    params: &[],
     returns: Some(Builtin::List),
     doc: "The string's characters, each as a string of its own.",
     func: |interp, args, _span| {
@@ -4269,6 +4297,7 @@ pub static CHARS: Native = Native {
 pub static JOIN: Native = Native {
     name: "join",
     arity: Some(2),
+    params: &["items"],
     returns: Some(Builtin::Str),
     doc: "The list's items rendered and joined with the string between them.",
     func: |interp, args, span| {
@@ -4306,6 +4335,7 @@ pub static JOIN: Native = Native {
 static TYPE: Native = Native {
     name: "type",
     arity: Some(1),
+    params: &["value"],
     returns: Some(Builtin::Str),
     doc: "The name of the value's type, as a string.",
     func: |interp, args, _span| Ok(Value::Str(Rc::from(args[0].type_name(&interp.heap)))),
@@ -4379,6 +4409,7 @@ fn checked_trunc(f: f64, span: Span) -> Result<i64, QuinceError> {
 pub static INT_INIT: Native = Native {
     name: "int",
     arity: Some(1),
+    params: &["value"],
     returns: Some(Builtin::Int),
     doc: "An int made from `value`. A float truncates toward zero, a string is parsed, and a bool is `1` or `0`.",
     // Dispatching on the base, so a class extending `int` converts as the int it
@@ -4409,6 +4440,7 @@ pub static INT_INIT: Native = Native {
 pub static FLOAT_INIT: Native = Native {
     name: "float",
     arity: Some(1),
+    params: &["value"],
     returns: Some(Builtin::Float),
     doc: "A float made from `value`.",
     func: |interp, args, span| match &args[0].base(&interp.heap).clone() {
@@ -4431,6 +4463,7 @@ pub static FLOAT_INIT: Native = Native {
 pub static STR_INIT: Native = Native {
     name: "string",
     arity: Some(1),
+    params: &["value"],
     returns: Some(Builtin::Str),
     doc: "The value rendered as a string, the same way `print` writes it. A class may answer for itself with `op string`.",
     func: |interp, args, _span| {
@@ -4443,6 +4476,7 @@ pub static STR_INIT: Native = Native {
 pub static BOOL_INIT: Native = Native {
     name: "bool",
     arity: Some(1),
+    params: &["value"],
     returns: Some(Builtin::Bool),
     doc: "Whether `value` is truthy. A class may answer for itself with `op bool`.",
     func: |interp, args, _span| Ok(Value::Bool(interp.is_truthy(&args[0])?)),
@@ -4455,6 +4489,7 @@ pub static BOOL_INIT: Native = Native {
 pub static LIST_INIT: Native = Native {
     name: "list",
     arity: None,
+    params: &["items"],
     returns: Some(Builtin::List),
     doc: "A new list, empty or holding what `value` iterates to.",
     func: |interp, args, span| match args {
@@ -4479,6 +4514,7 @@ pub static LIST_INIT: Native = Native {
 pub static DICT_INIT: Native = Native {
     name: "dict",
     arity: None,
+    params: &["entries"],
     returns: Some(Builtin::Dict),
     doc: "A new dict, empty or built from `value`.",
     func: |interp, args, span| match args {
