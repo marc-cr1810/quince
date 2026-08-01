@@ -220,7 +220,7 @@ impl Interp {
                 .declare(native.name, Value::Native(native), false);
         }
         // The types themselves, so a program can name one: print it, reach a
-        // method through it, and in time extend it. Immutable, exactly as
+        // method through it, and name it in an `extend`. Immutable, exactly as
         // `print` is.
         //
         // A name the lexer has already claimed is skipped rather than the two

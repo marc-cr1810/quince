@@ -1,0 +1,1 @@
+only a type can be extended, but `helper` is an int

@@ -1,0 +1,6 @@
+# An extension may add methods a program calls by name. An `op` decides what the
+# language itself does with every value of the type, everywhere — `if 0` would
+# change meaning program-wide, in files that never mentioned this one.
+extend int {
+    op bool() { return false }
+}

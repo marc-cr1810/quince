@@ -1,0 +1,8 @@
+# The name is read like any other, which is what lets `extend int` and
+# `extend Money` take one path. What it holds is checked where every other "this
+# is not what you thought it was" is checked: at the point of use.
+final helper = 5
+
+extend helper {
+    fn nope() { return 1 }
+}

@@ -1,0 +1,8 @@
+# An extension adds to a type and never replaces part of it. `upper` already
+# exists, so every call written before this line would quietly start meaning
+# something else — with no line in the program left to point at.
+extend string {
+    fn upper() { return "nope" }
+}
+
+print("hi".upper())

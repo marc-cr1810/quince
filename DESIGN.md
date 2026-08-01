@@ -877,6 +877,47 @@ any file changes `int` for the whole program, with no scoping and no undo. That 
 bargain Ruby and Objective-C made. The extension table keeps the door open; it does not
 close the gap today.
 
+### What landed, and what the plan above did not say
+
+All of it holds — the keyword, the separate table, the three refusals, and every claim
+about what already worked. One sentence above is wrong, though, and it is the one that
+sounds most like a conclusion: *"the single missing piece was a method table that can
+grow"*. The collapse did deliver one, and `extend` deliberately does not use it. What was
+missing was a **second** table, kept apart from the first on purpose. A growable
+`Class::methods` is what makes the wrong implementation easy, not what makes the right one
+possible.
+
+Four decisions the plan left open, each of which had to be made to write the code:
+
+- **Both walks cover the whole chain, and the methods walk finishes first.** "Consulted
+  after the class's own methods" is ambiguous the moment inheritance exists: is an
+  extension on `int` consulted before or after a method declared on a subclass of `int`?
+  After. A declared method always wins, wherever on the chain it was declared, or adding
+  `extend int { fn name() { … } }` could quietly take over a `name` that a class three
+  levels down had declared for itself. That ordering is invisible to a corpus case — both
+  answers print something plausible — so it is a Rust test.
+- **Extending twice with the same name is refused too**, which is the first refusal read
+  honestly: an extension replacing an extension is exactly as silent as one replacing a
+  method.
+- **Every name in a block is checked before any is added.** A block whose third method
+  collides leaves the type as it found it. The alternative is a program that reports an
+  error *and* changes behaviour, which is the worst of both.
+- **No `super` in an extension body.** An extension cannot shadow, so a method it adds is
+  never an override, and there is nothing above it for `super` to mean. It falls out of not
+  pushing the scope, so there is no check to maintain.
+
+And the thing the plan did not mention at all: **the extension table is a root.** An
+extension's function is in no class's table — the whole point — so nothing reachable from
+the globals refers to it. Deleting that one line does not degrade anything gracefully; it
+panics with `handle points at a collected object` the first time a collection runs between
+the `extend` and the call. `an_extension_survives_collection` is what measures it, checked
+by deleting the line rather than by reasoning about it.
+
+The `op` refusal is in the parser, not the evaluator, for the reason `op innit` is: the
+keyword and its span are in hand before a body is parsed, so the error points at the `op`
+itself. It is also the one refusal that cannot be reached at run time — an `op` never gets
+as far as the table.
+
 ## Calling a type converts
 
 `int(5)` works, and it needed no new vocabulary. The refusal above was a placeholder, and
@@ -2005,7 +2046,13 @@ the class, then fall back to the payload, then refuse, at ten of the sites. Thre
 class in order to refuse *better*, which nothing predicted. See What a class may answer for
 above, which is also where the accounting of that prediction lives.
 
-What v0.5 still owes, in order: `extend`, then the diagnostics sweep.
+`extend` landed next, and cost less than the slots did because the hard part had already
+been decided: methods had one lookup path, so giving extensions their own table meant one
+helper and three call sites. The one thing that needed care was the part the plan had not
+written down — the table is a root, and nothing else refers to what it holds. See What
+landed, and what the plan above did not say.
+
+What v0.5 still owes: the diagnostics sweep, and nothing else.
 
 Subclassing a builtin went before the slots because it is what a user asked for, not because
 the ordering saved anything. The two touch the same functions — `is_truthy`, `equals`,

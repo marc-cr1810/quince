@@ -1,0 +1,9 @@
+# The second `extend` would replace the first as silently as it would replace a
+# declared method, so it is refused for the same reason.
+extend int {
+    fn twice() { return self * 2 }
+}
+
+extend int {
+    fn twice() { return self * 3 }
+}

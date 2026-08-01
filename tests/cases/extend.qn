@@ -1,0 +1,51 @@
+# A method added to a type the program did not write. `self` is the value, not a
+# wrapper around it, so the body is the same as one written inside a class.
+extend int {
+    fn double() { return self * 2 }
+    fn clamp(lo, hi) {
+        if self < lo { return lo }
+        if self > hi { return hi }
+        return self
+    }
+}
+print(7.double())
+print(21.clamp(0, 10), 5.clamp(0, 10))
+
+final n = 4
+print(n.double())
+
+# Unbound, through the type itself — an extension is a method, and a method is a
+# function with the receiver written out.
+print(int.double(6))
+
+# An extension may call the type's own methods, and other extensions.
+extend string {
+    fn shout() { return self.upper() + "!" }
+    fn twice() { return self.shout() + self.shout() }
+}
+print("hey".twice())
+
+# On a class the program did write, and reached through a subclass: extensions
+# are found along the same chain inheritance walks.
+class Animal {
+    op init(name) { self.name = name }
+}
+class Dog extends Animal {}
+
+extend Animal {
+    fn greet() { return "hi, " + self.name }
+}
+print(Animal("rex").greet())
+print(Dog("fido").greet())
+
+# A declared method wins, and it does not have to be declared on the same class:
+# `Cat` says its own `greet`, so the extension on `Animal` does not answer for it.
+class Cat extends Animal {
+    fn greet() { return "the cat ignores you" }
+}
+print(Cat("mog").greet())
+
+# Extending a type does not make its values print differently, compare
+# differently, or convert differently. An extension adds a method and nothing
+# else — which is why an `op` is refused rather than merely discouraged.
+print(7, string(7), 7 == 7.0)

@@ -292,7 +292,9 @@ impl Parser {
             }
             methods.push(std::rc::Rc::new(self.fn_decl(true)?));
         }
-        let end = self.expect(TokenKind::RBrace, "after the extension body")?.span;
+        let end = self
+            .expect(TokenKind::RBrace, "after the extension body")?
+            .span;
 
         Ok(Stmt {
             kind: StmtKind::Extend {
