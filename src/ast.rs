@@ -556,6 +556,26 @@ pub enum StmtKind {
         /// Where the class's own name is bound, as for `Let`.
         slot: Option<Slot>,
     },
+    /// Methods added to a type that already exists.
+    ///
+    /// The type is named by an ordinary [`Var`], not a static label, so
+    /// `extend int` and `extend Money` take the same path — and a name that turns
+    /// out to hold something other than a class is an error at run time, where
+    /// every other "this is not what you thought" is.
+    ///
+    /// No `parent` and no `slot`: an extension declares no type and binds no
+    /// name. Nothing changes about the class it names except what can be found
+    /// *beside* it — see `Interp::extensions`.
+    Extend {
+        target: Var,
+        /// Where the type was named, kept because the statement's own span covers
+        /// the whole body — and a report about the *type* should underline the
+        /// word that names it, not the twenty lines that follow.
+        target_span: Span,
+        /// Never an `op`, which the parser refuses. An extension may add to a
+        /// type; it may not change how the language dispatches on it.
+        methods: Vec<Rc<FnDecl>>,
+    },
     If {
         cond: Expr,
         then: Block,

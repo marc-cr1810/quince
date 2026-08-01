@@ -180,6 +180,22 @@ pub struct Interp {
     temps: Vec<Value>,
     depth: usize,
     out: Box<dyn Write>,
+    /// Methods `extend` added, keyed by the class they were added to and the
+    /// name they were added under.
+    ///
+    /// Deliberately *not* inserted into `Class::methods`. C# 14's extension
+    /// members resolve statically and never touch the type, so an extension is
+    /// visible only where its namespace was imported. Quince cannot copy the
+    /// mechanism — `x.example()` has no compile-time receiver type, which is what
+    /// being dynamically typed means — but the *scoping* is separable from the
+    /// resolution, and keeping it reachable costs one lookup on a miss. Writing
+    /// into `methods` is faster and shorter and forecloses it permanently: once
+    /// an extension is indistinguishable from a declared method, there is nothing
+    /// left for a module to scope.
+    ///
+    /// A root, because the functions in here are heap objects reachable from
+    /// nowhere else — the class does not hold them, which is the entire point.
+    extensions: HashMap<(ObjId, String), Value>,
     /// The class each [`ErrorKind`] reifies into, captured once at startup.
     ///
     /// Held here rather than looked up in globals at `catch` time because `Error`
@@ -228,6 +244,7 @@ impl Interp {
             temps: Vec::new(),
             depth: 0,
             out,
+            extensions: HashMap::new(),
             error_classes: Vec::new(),
         };
         interp.install_error_classes();
@@ -358,10 +375,15 @@ impl Interp {
         if !self.heap.should_collect() {
             return;
         }
-        let mut roots = Vec::with_capacity(self.scopes.len() + self.temps.len() + 1);
+        let mut roots =
+            Vec::with_capacity(self.scopes.len() + self.temps.len() + self.extensions.len() + 1);
         roots.push(self.globals);
         roots.extend(&self.scopes);
         roots.extend(self.temps.iter().filter_map(Value::handle));
+        // The one root the interpreter holds that nothing else can reach: an
+        // extension's function is not in the class's table, so the class does not
+        // keep it alive. Its captured scope comes along through the function.
+        roots.extend(self.extensions.values().filter_map(Value::handle));
         self.heap.collect(&roots);
     }
 
@@ -505,6 +527,45 @@ impl Interp {
 
                 let class = self.heap.alloc(Object::Class(class));
                 self.bind(slot, name, Value::Class(class), false, env);
+                Ok(Flow::Normal)
+            }
+
+            StmtKind::Extend {
+                target,
+                target_span,
+                methods,
+            } => {
+                let value = self.read(target, env, *target_span)?;
+                let Value::Class(id) = value else {
+                    return Err(QuinceError::new(
+                        format!(
+                            "only a type can be extended, but `{}` is {}",
+                            target.name,
+                            an(value.type_name(&self.heap))
+                        ),
+                        *target_span,
+                    )
+                    .with_kind(ErrorKind::Type));
+                };
+
+                // Every name checked before any is added, so a block whose third
+                // method collides leaves the type exactly as it found it. A
+                // half-applied extension would be the worst of both: a program
+                // that reported an error and changed behaviour anyway.
+                for decl in methods {
+                    self.may_extend(id, &decl.name, *target_span)?;
+                }
+
+                // Nothing here reaches a safe point, so the functions are safe
+                // unrooted until the table holds them — and the table is a root,
+                // which is what keeps them alive after that.
+                for decl in methods {
+                    let func = Value::Function(self.heap.alloc(Object::Function(Function {
+                        decl: Rc::clone(decl),
+                        env,
+                    })));
+                    self.extensions.insert((id, decl.name.clone()), func);
+                }
                 Ok(Flow::Normal)
             }
 
@@ -1837,17 +1898,81 @@ impl Interp {
         // A class hands back its methods unbound, so `Point.dist(p)` works and
         // a method really is a function with the receiver written out.
         if let Value::Class(id) = receiver {
-            return match self.heap.class(*id).method(name, &self.heap) {
+            return match self.find_method(*id, name) {
                 Some(method) => Ok(Attr::Field(method)),
                 None => Err(self.no_attr(receiver, name, target_span, name_span, expr_span)),
             };
         }
 
         let class = receiver.class(&self.heap);
-        match self.heap.class(class).method(name, &self.heap) {
+        match self.find_method(class, name) {
             Some(method) => Ok(Attr::Method(method)),
             None => Err(self.no_attr(receiver, name, target_span, name_span, expr_span)),
         }
+    }
+
+    /// The method `name` on class `id`, declared, inherited, or added by
+    /// `extend`.
+    ///
+    /// Both walks are over the whole chain, and the *methods* walk finishes
+    /// first: a declared method always beats an extension, including one declared
+    /// on an ancestor. That is what "consulted after the class's own methods"
+    /// has to mean once inheritance is in the picture — `extend int` adding
+    /// `double` must not take precedence over a `Wrap extends int` that declares
+    /// its own.
+    ///
+    /// The second walk happens only on a miss, which is the whole cost of keeping
+    /// extensions out of `Class::methods`.
+    fn find_method(&self, id: ObjId, name: &str) -> Option<Value> {
+        if let Some(method) = self.heap.class(id).method(name, &self.heap) {
+            return Some(method);
+        }
+        if self.extensions.is_empty() {
+            return None;
+        }
+        let mut class = Some(id);
+        while let Some(id) = class {
+            if let Some(method) = self.extensions.get(&(id, name.to_string())) {
+                return Some(method.clone());
+            }
+            class = self.heap.class(id).parent;
+        }
+        None
+    }
+
+    /// Whether `extend` may add `name` to the class `id`.
+    ///
+    /// Two refusals, and the same reason under both: an extension that replaced
+    /// something would make every existing caller silently wrong, with no line
+    /// in the program to point at. A rename is a small price and an obvious fix.
+    ///
+    /// C# prefers the real member instead, silently — a choice driven by a class
+    /// library that has to keep growing without breaking callers. Quince has nine
+    /// builtin types with single-digit method counts, so the loud answer is
+    /// affordable here and would not be there.
+    fn may_extend(&self, id: ObjId, name: &str, span: Span) -> Result<(), QuinceError> {
+        let type_name = || self.heap.class(id).name.clone();
+        if self.heap.class(id).method(name, &self.heap).is_some() {
+            return Err(QuinceError::new(
+                format!("{} already has a method `{name}`", type_name()),
+                span,
+            )
+            .with_kind(ErrorKind::Type)
+            .with_help(
+                "an extension adds to a type and never replaces part of it, because every \
+                 existing call would quietly start meaning something else — give this one \
+                 another name",
+            ));
+        }
+        if self.extensions.contains_key(&(id, name.to_string())) {
+            return Err(QuinceError::new(
+                format!("{} has already been extended with `{name}`", type_name()),
+                span,
+            )
+            .with_kind(ErrorKind::Type)
+            .with_help("the first `extend` won, and this one would replace it just as silently"));
+        }
+        Ok(())
     }
 
     /// The class `super` searches from, read through the slot the resolver
@@ -1867,7 +1992,7 @@ impl Interp {
     /// override from calling itself: `Dog.speak` reaching for `super.speak`
     /// must not find `Dog.speak` again.
     fn super_method(&mut self, id: ObjId, name: &str, span: Span) -> Result<Value, QuinceError> {
-        match self.heap.class(id).method(name, &self.heap) {
+        match self.find_method(id, name) {
             Some(method) => Ok(method),
             None => Err(QuinceError::new(
                 format!("{} has no method `{name}`", self.heap.class(id).name),
@@ -3871,6 +3996,49 @@ mod tests {
             "the payload did not survive: got {:?}",
             global(&interp, "got")
         );
+    }
+
+    #[test]
+    fn an_extension_survives_collection() {
+        // The one root the interpreter holds that no walk of the heap could
+        // reach: an extension's function is deliberately *not* in the class's
+        // method table, so `int` does not keep it alive and nothing else refers
+        // to it. Deleting the line that roots `extensions` makes this panic at
+        // `handle points at a collected object` rather than merely fail.
+        let interp = run("extend int { fn double() { return self * 2 } }\n\
+             let i = 0\n\
+             while i < 2000 {\n let junk = [0]\n i = i + 1\n }\n\
+             let n = 7.double()");
+
+        assert!(interp.heap.collections > 0, "the collector never ran");
+        assert!(
+            matches!(global(&interp, "n"), Some(Value::Int(14))),
+            "the extension did not survive: got {:?}",
+            global(&interp, "n")
+        );
+    }
+
+    #[test]
+    fn a_declared_method_beats_an_extension_on_an_ancestor() {
+        // The half of the lookup order a corpus case cannot show on its own: both
+        // walks cover the whole chain, and the *methods* walk finishes first, so
+        // a subclass's own method wins over an extension added to its parent —
+        // not merely over one added to itself.
+        let interp = run("class Animal { fn speak() { return \"...\" } }\n\
+             class Dog extends Animal { fn name() { return \"dog\" } }\n\
+             extend Animal { fn name() { return \"animal\" } }\n\
+             let through_dog = Dog().name()\n\
+             let through_animal = Animal().name()");
+
+        let Some(Value::Str(dog)) = global(&interp, "through_dog") else {
+            panic!("`Dog().name()` should have answered");
+        };
+        assert_eq!(&*dog, "dog", "the declared method has to win");
+
+        let Some(Value::Str(animal)) = global(&interp, "through_animal") else {
+            panic!("`Animal().name()` should have answered");
+        };
+        assert_eq!(&*animal, "animal", "and the extension still answers for it");
     }
 
     #[test]

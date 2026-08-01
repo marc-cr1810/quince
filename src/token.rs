@@ -40,6 +40,10 @@ pub enum TokenKind {
     Op,
     Class,
     Extends,
+    /// Adds methods to a type that already exists. Deliberately not [`Self::Extends`]:
+    /// that word already means inheritance in a class header, and a block which
+    /// declares no new type would be a pun on it.
+    Extend,
     /// Keywords rather than identifiers so that using one where it has no
     /// meaning is caught by the resolver, with a message that says why.
     SelfKw,
@@ -106,6 +110,7 @@ impl TokenKind {
             "op" => TokenKind::Op,
             "class" => TokenKind::Class,
             "extends" => TokenKind::Extends,
+            "extend" => TokenKind::Extend,
             "self" => TokenKind::SelfKw,
             "super" => TokenKind::Super,
             "let" => TokenKind::Let,
@@ -141,6 +146,7 @@ impl fmt::Display for TokenKind {
             TokenKind::Op => write!(f, "op"),
             TokenKind::Class => write!(f, "class"),
             TokenKind::Extends => write!(f, "extends"),
+            TokenKind::Extend => write!(f, "extend"),
             TokenKind::SelfKw => write!(f, "self"),
             TokenKind::Super => write!(f, "super"),
             TokenKind::Let => write!(f, "let"),

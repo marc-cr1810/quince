@@ -74,6 +74,7 @@ impl Parser {
             )
             .with_help("use `fn` for a function that is called by name")),
             TokenKind::Class => self.class_stmt(),
+            TokenKind::Extend => self.extend_stmt(),
             TokenKind::If => self.if_stmt(),
             TokenKind::While => self.while_stmt(),
             TokenKind::For => self.for_stmt(),
@@ -252,6 +253,52 @@ impl Parser {
                 parent,
                 methods,
                 slot: None,
+            },
+            span: start.to(end),
+        })
+    }
+
+    /// `extend int { fn double() { … } }`.
+    ///
+    /// Shaped like a class body with the two halves a class has and an extension
+    /// does not: no name to bind, and no `extends` clause, because an extension
+    /// declares no type for anything to descend from.
+    fn extend_stmt(&mut self) -> Result<Stmt, QuinceError> {
+        let start = self.advance().span;
+        let (target, target_span) = self.expect_ident("after `extend`")?;
+
+        self.expect(TokenKind::LBrace, "after the type being extended")?;
+
+        let mut methods = Vec::new();
+        while !self.check(&TokenKind::RBrace) && !self.at_end() {
+            // Refused here rather than at the class, because everything the check
+            // needs is in hand: the keyword and its span, before a body is parsed.
+            // The same reason `op` at the top level is caught in this file.
+            if self.check(&TokenKind::Op) {
+                return Err(QuinceError::new(
+                    format!("`{target}` cannot be given an `op` by an extension"),
+                    self.peek().span,
+                )
+                .with_help(
+                    "an extension adds methods a program calls by name — an `op` decides what \
+                     the language itself does with every value of the type, everywhere",
+                ));
+            }
+            if !self.check(&TokenKind::Fn) {
+                return Err(QuinceError::new(
+                    format!("expected a method, found {}", self.peek().kind),
+                    self.peek().span,
+                ));
+            }
+            methods.push(std::rc::Rc::new(self.fn_decl(true)?));
+        }
+        let end = self.expect(TokenKind::RBrace, "after the extension body")?.span;
+
+        Ok(Stmt {
+            kind: StmtKind::Extend {
+                target: Var::new(target),
+                target_span,
+                methods,
             },
             span: start.to(end),
         })

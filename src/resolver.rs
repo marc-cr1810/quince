@@ -281,6 +281,29 @@ impl Resolver {
                 result
             }
 
+            StmtKind::Extend {
+                target,
+                methods,
+                target_span: _,
+            } => {
+                // Read like any other name, which is what lets `extend int` and
+                // `extend Money` take one path: a builtin type is a global holding
+                // a class, and a program's class is a binding holding one.
+                target.slot = Some(self.slot_of(&target.name));
+
+                // No scope holding `super`, unlike a class with a parent. An
+                // extension cannot shadow — that is the first refusal — so a
+                // method it adds is never an override, and there is nothing above
+                // it for `super` to mean. A `super` written here is the ordinary
+                // "used outside a class" error.
+                //
+                // `None` for the base, because the `super.init` obligation belongs
+                // to a class that descends from a builtin. An extension declares no
+                // type and constructs nothing, and cannot hold an `op init` to
+                // check in the first place.
+                self.methods(methods, &target.name, None, span)
+            }
+
             StmtKind::Class {
                 name,
                 parent,
