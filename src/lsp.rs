@@ -340,28 +340,6 @@ fn is_preceded_by_dot(source: &str, pos: Position) -> bool {
     line[..col].trim_end().ends_with('.')
 }
 
-const BUILTIN_TYPE_METHODS: &[(&str, &[&str])] = &[
-    (
-        "string",
-        &[
-            "chars",
-            "ends_with",
-            "join",
-            "lower",
-            "replace",
-            "split",
-            "starts_with",
-            "trim",
-            "upper",
-        ],
-    ),
-    ("list", &["push"]),
-    ("dict", &["keys", "values", "remove"]),
-    ("int", &[]),
-    ("float", &[]),
-    ("bool", &[]),
-];
-
 fn get_receiver_before_dot(source: &str, pos: Position) -> Option<String> {
     let line = source.lines().nth(pos.line as usize)?;
     let col = (pos.character as usize).min(line.len());
@@ -564,7 +542,7 @@ fn infer_method_return_class(source: &str, class_name: &str, method_name: &str) 
             let parts: Vec<_> = trimmed.split_whitespace().collect();
             if parts.len() >= 2 {
                 let name = parts[1].split('{').next().unwrap_or("").trim();
-                inside_target_class = (name == class_name);
+                inside_target_class = name == class_name;
             }
         }
 
@@ -573,7 +551,7 @@ fn infer_method_return_class(source: &str, class_name: &str, method_name: &str) 
                 let parts: Vec<_> = trimmed.split_whitespace().collect();
                 if parts.len() >= 2 {
                     let mname = parts[1].split('(').next().unwrap_or("").trim();
-                    inside_target_method = (mname == method_name);
+                    inside_target_method = mname == method_name;
                 }
             }
 
@@ -909,73 +887,6 @@ fn collect_text_variable_completions(source: &str, pos: Position, items: &mut Ve
     }
 }
 
-
-fn collect_text_dot_completions(source: &str, items: &mut Vec<CompletionItem>) {
-    let mut seen: std::collections::HashSet<String> = items.iter().map(|i| i.label.clone()).collect();
-    let mut inside_class = false;
-    let mut brace_depth = 0;
-    let mut class_brace_depth = 0;
-
-    for line in source.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('#') {
-            continue;
-        }
-
-        if trimmed.starts_with("class ") {
-            inside_class = true;
-            class_brace_depth = brace_depth;
-        }
-
-        if inside_class {
-            if trimmed.starts_with("fn ") || trimmed.starts_with("op ") {
-                let parts: Vec<_> = trimmed.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    let name = parts[1].split('(').next().unwrap_or("").trim();
-                    if !name.is_empty() && !seen.contains(name) && !KEYWORDS.contains(&name) {
-                        seen.insert(name.to_string());
-                        items.push(CompletionItem {
-                            label: name.to_string(),
-                            kind: Some(CompletionItemKind::METHOD),
-                            detail: Some("method".to_string()),
-                            ..Default::default()
-                        });
-                    }
-                }
-            }
-        }
-
-        for c in line.chars() {
-            if c == '{' {
-                brace_depth += 1;
-            } else if c == '}' {
-                if brace_depth > 0 {
-                    brace_depth -= 1;
-                }
-                if inside_class && brace_depth <= class_brace_depth {
-                    inside_class = false;
-                }
-            }
-        }
-
-        for part in line.split(|c: char| !(c == '.' || c == '_' || c.is_alphanumeric())) {
-            if let Some(idx) = part.find('.') {
-                let field = &part[idx + 1..];
-                if !field.is_empty() && field.chars().all(|c| c == '_' || c.is_alphanumeric()) {
-                    if !seen.contains(field) && !KEYWORDS.contains(&field) {
-                        seen.insert(field.to_string());
-                        items.push(CompletionItem {
-                            label: field.to_string(),
-                            kind: Some(CompletionItemKind::FIELD),
-                            detail: Some("property".to_string()),
-                            ..Default::default()
-                        });
-                    }
-                }
-            }
-        }
-    }
-}
 
 fn get_hover(state: Option<&DocumentState>, pos: Position) -> Option<Hover> {
     let state = state?;
