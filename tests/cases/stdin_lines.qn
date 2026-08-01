@@ -1,0 +1,26 @@
+import io
+from io import line
+
+# Reading until input runs out. `nil` is what ends the loop, and it has to be
+# distinguishable from a blank line — which is why `io.line` answers `nil` at end
+# of input rather than the empty string a blank line already means.
+let count = 0
+let blanks = 0
+let widest = 0
+
+let text = line()
+while text != nil {
+    count = count + 1
+    if len(text) == 0 {
+        blanks = blanks + 1
+    }
+    if len(text) > widest {
+        widest = len(text)
+    }
+    text = line()
+}
+
+print(count, blanks, widest)
+
+# Once input is exhausted it stays exhausted.
+print(io.line(), io.line())

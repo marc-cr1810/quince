@@ -9,6 +9,12 @@
 //! checked. A directory case runs its `main.qn`, and its report names whichever
 //! file actually raised — which is usually one of the imported ones.
 //!
+//! A `.in` file is the fourth companion and the only one that is an *input*: it
+//! is what the case reads from standard input, and absent means empty. Optional
+//! like `.report` and for a related reason — a case that never reads should not
+//! have to say so, and one that does would otherwise be untestable, since
+//! `io.line` at a terminal is not something a suite can arrange.
+//!
 //! A `.report` file holds the whole rendered diagnostic — the header, the
 //! caret, every label, the help line. It is optional and the other two are not,
 //! because the three assert different contracts: `.out` is what the program
@@ -57,10 +63,13 @@ impl Write for Captured {
 ///
 /// The whole error rather than its message, because `.report` needs the spans
 /// and labels that `message` throws away.
-fn run(source: &str, path: &Path) -> Result<String, QuinceError> {
+fn run(source: &str, path: &Path, input: String) -> Result<String, QuinceError> {
     let program = quince::compile(source)?;
     let captured = Captured::default();
-    let mut interp = Interp::with_output(Box::new(captured.clone()));
+    let mut interp = Interp::with_io(
+        Box::new(captured.clone()),
+        Box::new(std::io::Cursor::new(input.into_bytes())),
+    );
     // What the case's imports resolve against. A single-file case never uses it;
     // a directory case is entirely about it.
     interp.set_path(path.to_path_buf());
@@ -145,7 +154,9 @@ fn check_cases() {
             false => (path.clone(), format!("{name}.qn")),
         };
         let source = std::fs::read_to_string(&entry).expect("case should be readable");
-        let result = run(&source, &entry);
+        // Absent means empty, which is what a case that never reads should see.
+        let input = std::fs::read_to_string(path.with_extension("in")).unwrap_or_default();
+        let result = run(&source, &entry, input);
 
         let out_path = path.with_extension("out");
         let err_path = path.with_extension("err");

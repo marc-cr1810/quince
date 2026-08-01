@@ -49,6 +49,15 @@ pub enum ErrorKind {
     /// one: a cycle reported as a name error says nothing true, and the three
     /// belong together more than any of them belongs with an undefined variable.
     Import,
+    /// The filesystem refused: a file that is not there, a directory that cannot
+    /// be written to.
+    ///
+    /// The one kind whose cause is outside the program, and so the one whose
+    /// occurrence can differ between two runs of identical source. That is why
+    /// it is separate from [`ErrorKind::Import`], which it once stood in for: an
+    /// import failing is a fact about the program, and `io.read` failing is a
+    /// fact about the machine.
+    Io,
     /// Raised by `throw`. The class comes from the instance in
     /// [`QuinceError::payload`], so this variant names none of its own.
     Thrown,
@@ -103,6 +112,7 @@ impl ErrorKind {
             ErrorKind::ZeroDivision => Some("ZeroDivisionError"),
             ErrorKind::Overflow => Some("OverflowError"),
             ErrorKind::Import => Some("ImportError"),
+            ErrorKind::Io => Some("IoError"),
         }
     }
 
@@ -145,6 +155,7 @@ pub static ERROR_KINDS: &[ErrorKind] = &[
     ErrorKind::ZeroDivision,
     ErrorKind::Overflow,
     ErrorKind::Import,
+    ErrorKind::Io,
 ];
 
 #[derive(Clone, Debug, PartialEq)]

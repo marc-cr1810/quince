@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -217,6 +217,22 @@ pub struct Interp {
     temps: Vec<Value>,
     depth: usize,
     out: Box<dyn Write>,
+    /// Where `io.line` reads from.
+    ///
+    /// Injected for the same reason `out` is: a test that cannot supply input
+    /// cannot check what a program does with it, and `io.line` would have been
+    /// the one member of the library with no case behind it. The corpus feeds a
+    /// case its `.in` file through here.
+    input: Box<dyn BufRead>,
+    /// The generator `random` draws from.
+    ///
+    /// Here rather than in a static so that two interpreters in one process do
+    /// not share a stream — the corpus runs cases in parallel, and a global
+    /// generator would make every one of them depend on the order they ran in.
+    ///
+    /// Seeded to a fixed number, so a program is reproducible unless it says
+    /// otherwise. See `stdlib::RANDOM`.
+    rng: u64,
     /// Methods `extend` added, keyed by the class they were added to and the
     /// name they were added under.
     ///
@@ -275,11 +291,23 @@ pub struct Interp {
 
 impl Interp {
     pub fn new() -> Self {
-        Interp::with_output(Box::new(std::io::stdout()))
+        Interp::with_io(
+            Box::new(std::io::stdout()),
+            Box::new(std::io::BufReader::new(std::io::stdin())),
+        )
     }
 
     /// Output is injected so tests can capture what a program prints.
+    ///
+    /// Input is left empty, which is what a case that never reads should see:
+    /// `io.line` answers `nil` at end of input, so a program that reads by
+    /// mistake gets that rather than a terminal the test cannot reach.
     pub fn with_output(out: Box<dyn Write>) -> Self {
+        Interp::with_io(out, Box::new(std::io::empty()))
+    }
+
+    /// Both halves injected, for the cases that feed a program its input.
+    pub fn with_io(out: Box<dyn Write>, input: Box<dyn BufRead>) -> Self {
         let mut heap = Heap::new();
         let globals = heap.alloc(Object::Globals(Globals::new()));
         for native in BUILTINS {
@@ -311,6 +339,8 @@ impl Interp {
             temps: Vec::new(),
             depth: 0,
             out,
+            input,
+            rng: stdlib::DEFAULT_SEED,
             extensions: HashMap::new(),
             stdlib_modules: HashMap::new(),
             files: HashMap::new(),
@@ -422,6 +452,24 @@ impl Interp {
             .iter()
             .map(|(k, v)| (k.to_string(), v.clone()))
             .collect()
+    }
+
+    /// Reads one line of the program's input, for `io.line`.
+    ///
+    /// On [`Interp`] because `input` is private and a native has the interpreter
+    /// and nothing else.
+    pub fn read_line(&mut self, into: &mut String) -> std::io::Result<usize> {
+        self.input.read_line(into)
+    }
+
+    /// The next number from the program's generator, for `random`.
+    pub fn next_random(&mut self) -> u64 {
+        stdlib::next_u64(&mut self.rng)
+    }
+
+    /// Restarts the generator, for `random.seed`.
+    pub fn set_seed(&mut self, seed: u64) {
+        self.rng = seed;
     }
 
     /// Tells the starting module which file it was read from, which is what its
@@ -4057,6 +4105,65 @@ mod tests {
         let mut interp = Interp::with_output(Box::new(Vec::new()));
         interp.run(&program).expect("the test program should run");
         interp
+    }
+
+    /// `io`'s file half, which the corpus cannot hold.
+    ///
+    /// A case writes nothing: `tests/cases` is checked in, and a suite that
+    /// leaves files behind — or that races another case over the same name —
+    /// stops being something anyone trusts. Here a temp directory named for the
+    /// test is cheap, and the round trip is what actually needs proving.
+    #[test]
+    fn io_reads_back_what_it_wrote() {
+        let dir = std::env::temp_dir().join("quince-io-roundtrip");
+        std::fs::create_dir_all(&dir).expect("a temp directory should be creatable");
+        let path = dir.join("notes.txt");
+        let _ = std::fs::remove_file(&path);
+        // Escaped, because a Windows path is full of backslashes and the lexer
+        // reads `\n` in a string literal as a newline wherever it finds one.
+        let quoted = path.display().to_string().replace('\\', "\\\\");
+
+        let interp = run(&format!(
+            "import io\n\
+             let path = \"{quoted}\"\n\
+             let missing = io.exists(path)\n\
+             io.write(path, \"alpha\\nbeta\\n\")\n\
+             let there = io.exists(path)\n\
+             let whole = io.read(path)\n\
+             io.append(path, \"gamma\\n\")\n\
+             let lines = io.lines(path)\n\
+             let count = len(lines)\n\
+             let last = lines[2]"
+        ));
+
+        assert_eq!(global(&interp, "missing"), Some(Value::Bool(false)));
+        assert_eq!(global(&interp, "there"), Some(Value::Bool(true)));
+        assert_eq!(global(&interp, "whole"), Some(Value::from("alpha\nbeta\n")));
+        // Three lines, not four: a trailing newline ends the last one rather
+        // than starting an empty one.
+        assert_eq!(global(&interp, "count"), Some(Value::Int(3)));
+        assert_eq!(global(&interp, "last"), Some(Value::from("gamma")));
+
+        std::fs::remove_file(&path).expect("the test's own file should be removable");
+    }
+
+    #[test]
+    fn reading_a_file_that_is_not_there_is_catchable() {
+        // The point of `ErrorKind::Io` having a class: a missing file is an
+        // ordinary thing to happen to a running program, so a program can decide
+        // what to do about it rather than being ended by it.
+        let missing = std::env::temp_dir().join("quince-does-not-exist-9f3c.txt");
+        let quoted = missing.display().to_string().replace('\\', "\\\\");
+        let interp = run(&format!(
+            "import io\n\
+             let caught = nil\n\
+             try {{\n\
+             \x20   io.read(\"{quoted}\")\n\
+             }} catch e {{\n\
+             \x20   caught = type(e)\n\
+             }}"
+        ));
+        assert_eq!(global(&interp, "caught"), Some(Value::from("IoError")));
     }
 
     /// Builds a list on the heap and hands back both halves, since a test that

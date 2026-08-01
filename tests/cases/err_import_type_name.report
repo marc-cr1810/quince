@@ -1,0 +1,8 @@
+Error: quince::DeclarationError
+
+ × `int` is the name of a type built into the language
+  ╭─[err_import_type_name.qn:1:20]
+1 │ from random import int
+  ·                    ───
+  ╰────
+  help: write `import random` and reach it as `random.int`, which takes no name

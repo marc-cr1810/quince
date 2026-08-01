@@ -1,0 +1,21 @@
+import random
+from random import choice
+
+# The generator starts at a fixed seed, so a program that does not ask for
+# unpredictability gets the same sequence every run. That is what lets this case
+# assert values rather than ranges — a test that only checks `1 <= n && n <= 6`
+# passes for a generator that returns 1 every time.
+print(random.int(1, 6), random.int(1, 6), random.int(1, 6), random.int(1, 6))
+print(random.float())
+print(choice(["a", "b", "c"]))
+
+# Seeding restarts it, so the same seed replays the same draws.
+random.seed(99)
+let first = [random.int(1, 1000), random.int(1, 1000), random.int(1, 1000)]
+random.seed(99)
+let again = [random.int(1, 1000), random.int(1, 1000), random.int(1, 1000)]
+print(first)
+print(first == again)
+
+# A range of one is a constant, and both bounds are inclusive.
+print(random.int(7, 7), random.int(0, 1) >= 0)

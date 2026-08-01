@@ -175,6 +175,26 @@ impl Resolver {
                     ImportNames::Module => self.declare(module, false, stmt.span)?,
                     ImportNames::Names(names) => {
                         for name in names {
+                            // `from random import int` collides with the type
+                            // called `int`, and the general refusal tells whoever
+                            // wrote it to rename their variable — advice that
+                            // cannot be taken, because the name belongs to the
+                            // module. The qualified form is the way through and
+                            // is what this says.
+                            if is_builtin_type(&name.name) {
+                                return Err(declaration(
+                                    format!(
+                                        "`{}` is the name of a type built into the language",
+                                        name.name
+                                    ),
+                                    name.span,
+                                )
+                                .with_help(format!(
+                                    "write `import {module}` and reach it as `{module}.{}`, \
+                                     which takes no name",
+                                    name.name
+                                )));
+                            }
                             self.declare(&name.name, false, name.span)?;
                         }
                     }
