@@ -269,6 +269,32 @@ fn get_completions(state: Option<&DocumentState>, pos: Position) -> Vec<Completi
     // Check if user is typing a dot (e.g. `self.` or `p.`)
     let is_dot_trigger = is_preceded_by_dot(&state.text, pos);
 
+    // After `import` or `from`, the only thing that can follow is a module, so
+    // that is the only thing offered. Offering the stdlib names everywhere would
+    // suggest `math` to a file that never imported it, where the name means
+    // nothing — the point of `import` is that a module is not there until asked
+    // for, and a completion list that forgets it undoes exactly that.
+    if !is_dot_trigger && at_import(&state.text, pos) {
+        for module in quince::stdlib::MODULES {
+            items.push(CompletionItem {
+                label: module.name.to_string(),
+                kind: Some(CompletionItemKind::MODULE),
+                detail: Some(format!(
+                    "{} — {}",
+                    module.name,
+                    module
+                        .members
+                        .iter()
+                        .map(|(name, _)| *name)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )),
+                ..Default::default()
+            });
+        }
+        return items;
+    }
+
     // 1. User-defined classes and type constructors
     if !is_dot_trigger {
         // Language Keywords
@@ -281,23 +307,35 @@ fn get_completions(state: Option<&DocumentState>, pos: Position) -> Vec<Completi
             });
         }
 
-        // Builtin Functions & Types
-        let builtins = &[
-            ("print", "fn print(...) - Prints values to stdout", CompletionItemKind::FUNCTION),
-            ("type", "fn type(value) - Returns the type name of a value", CompletionItemKind::FUNCTION),
-            ("len", "fn len(collection) - Returns the length of a collection", CompletionItemKind::FUNCTION),
-            ("int", "Built-in integer type constructor", CompletionItemKind::TYPE_PARAMETER),
-            ("float", "Built-in float type constructor", CompletionItemKind::TYPE_PARAMETER),
-            ("string", "Built-in string type constructor", CompletionItemKind::TYPE_PARAMETER),
-            ("list", "Built-in list type constructor", CompletionItemKind::TYPE_PARAMETER),
-            ("dict", "Built-in dict type constructor", CompletionItemKind::TYPE_PARAMETER),
-        ];
+        // The globals a program starts with, and the types it can name, read off
+        // the same tables the interpreter binds them from.
+        //
+        // This was a hand-written list until the modules landed, and it had
+        // drifted exactly the way the VS Code grammar had: `bool` was missing,
+        // so the one builtin type nobody thinks to type was also the one the
+        // editor never offered. The same lesson as `KEYWORDS`, in the one place
+        // it can be fixed by pointing at the list rather than guarded by a test.
+        for native in quince::interp::BUILTINS {
+            items.push(CompletionItem {
+                label: native.name.to_string(),
+                kind: Some(CompletionItemKind::FUNCTION),
+                detail: Some(signature_of(native)),
+                ..Default::default()
+            });
+        }
 
-        for &(name, doc, kind) in builtins {
+        // A name the lexer has claimed is skipped, for the reason `Interp::new`
+        // skips it: `nil` and `class` are keywords, so no program can read a
+        // global under those names and completing to one would be a lie.
+        for builtin in quince::class::BUILTINS {
+            let name = builtin.name();
+            if quince::token::TokenKind::keyword(name).is_some() {
+                continue;
+            }
             items.push(CompletionItem {
                 label: name.to_string(),
-                kind: Some(kind),
-                detail: Some(doc.to_string()),
+                kind: Some(CompletionItemKind::CLASS),
+                detail: Some(format!("the built-in type `{name}`")),
                 ..Default::default()
             });
         }
@@ -334,6 +372,41 @@ fn get_completions(state: Option<&DocumentState>, pos: Position) -> Vec<Completi
     items
 }
 
+
+/// A one-line signature for a builtin, built from what the table records.
+///
+/// Which is its name and how many arguments it takes, and nothing else — a
+/// native carries no parameter names. Better than the sentence a hand-written
+/// list used to carry, because it cannot say something the function does not do.
+fn signature_of(native: &quince::value::Native) -> String {
+    match native.arity {
+        None => format!("fn {}(…)", native.name),
+        Some(0) => format!("fn {}()", native.name),
+        Some(n) => {
+            let params = (1..=n).map(|_| "_").collect::<Vec<_>>().join(", ");
+            format!("fn {}({params})", native.name)
+        }
+    }
+}
+
+/// Whether the cursor sits where a module name goes.
+///
+/// The text before it on this line is `import`, or `from`, or a `from` and the
+/// module being imported from — which is where a member name goes rather than a
+/// module, but the members are what the module's own completion lists anyway.
+fn at_import(source: &str, pos: Position) -> bool {
+    let Some(line) = source.lines().nth(pos.line as usize) else {
+        return false;
+    };
+    let before = &line[..(pos.character as usize).min(line.len())];
+    let mut words = before.split_whitespace();
+    match (words.next(), words.next()) {
+        (Some("import"), None) => true,
+        (Some("from"), None) => false,
+        (Some("from"), Some(_)) => true,
+        _ => false,
+    }
+}
 
 fn is_preceded_by_dot(source: &str, pos: Position) -> bool {
     let line = match source.lines().nth(pos.line as usize) {

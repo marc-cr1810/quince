@@ -3616,7 +3616,7 @@ fn check_arity(name: &str, expected: usize, found: usize, span: Span) -> Result<
 /// Anything that acts on one particular type is a method instead, reached
 /// through that type's table in `class.rs`. What remains here either applies to
 /// every type (`len`, `type`) or to none of them (`print`).
-static BUILTINS: &[&Native] = &[&PRINT, &LEN, &TYPE];
+pub static BUILTINS: &[&Native] = &[&PRINT, &LEN, &TYPE];
 
 static PRINT: Native = Native {
     name: "print",

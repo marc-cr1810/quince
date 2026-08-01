@@ -148,6 +148,7 @@ Flat `src/*.rs`, matching the wrapt layout.
 | `dict.rs` | insertion-ordered map, and the values admitted as keys |
 | `class.rs` | the type every value belongs to, and where its behaviour is found |
 | `error.rs` | `QuinceError` with spans, user-facing diagnostics |
+| `stdlib.rs` | the modules the language ships — `math`, `io`, `time`, `random` |
 | `lsp.rs` | the language server — diagnostics, completion, hover, symbols |
 
 Hand-written lexer and parser, no parser-generator dependency. For a language whose
@@ -2097,6 +2098,173 @@ keeping the scopes separate means it cannot arise here at all.
 Both blocks are real scopes in both the resolver and the evaluator, which is the invariant
 from Resolution above — one runtime scope per lexical block, no more and no fewer.
 
+## Modules
+
+A module is a `Globals` with a path. That is the whole of it, and finding that out
+was most of the design: a module has a name table and so does the top-level scope, so
+`Object::Globals` already *was* a module and needed two fields — what it is called and
+where it was read from. `Value::Module` points at one, `math.floor` is a name looked up
+in a scope, and nothing new had to be built to hold either.
+
+### `Slot::Global` walks to the root of the chain
+
+The single-module assumption lived in exactly one place. A local name resolves to
+`(hops, index)` and walks the scope chain; a global skipped the chain and read one field
+on the interpreter. Now it walks out to the `Globals` the chain ends at, which is the
+module the code was compiled in.
+
+Nothing was recorded on a function to make that work. A `Function` already captures the
+scope it was defined in, so a function written in one file and called from another
+bottoms out in its own module's names — which is what lexical scoping meant everywhere
+else in the language already. The one field was the only place not honouring it.
+
+The cost is a pointer-chase per level of nesting, paid only by global reads, which
+already hash a string. If that ever matters the fix is a module handle on `Function` and
+a current module on the interpreter, pushed and restored like every other piece of frame
+state; it is written down in `module_of` and has not been needed.
+
+### A span belongs to a file
+
+This is the part that could have quietly undone v0.5. A span is an offset into one text.
+With two files there are two texts an offset could be into, and rendering one file's
+offsets against another's source produces a caret under whatever happens to sit there —
+the exact defect the diagnostics sweep existed to remove, arriving by the back door.
+
+So `QuinceError` carries the module its spans belong to, and carries it as an `Rc` to a
+shared `ModuleSource` rather than a copy of the text per error.
+
+**It is set on the way out, not at the raise.** A raise site knows what went wrong and
+has no idea what file it is in — there are ninety-odd of them and none takes a module.
+The frames an error unwinds *through* know exactly, and there are two: the loop running
+a module's top-level statements, and the call arm for a user function. The first to set
+it wins, which is the innermost, so an error crossing three modules is reported against
+the one that raised it. `imports_error` in the corpus pins a caret in a file the case
+does not start in, which is the whole mechanism in one `.report`.
+
+### The error classes are shared, not rebuilt
+
+A module's scope is seeded with the builtins, the type classes, and *the same*
+`Error` class objects the starting module holds. Not fresh ones: `catch TypeError`
+compares the class it was handed against the one the error reified into, so two modules
+with two `TypeError` classes would mean a handler that silently never fires. Re-running
+the error prelude per module would have bought that bug and paid a compile per module
+for it.
+
+### A cycle is refused
+
+Reaching a file that is still loading raises, with the chain that got there —
+`alpha.qn → beta.qn → alpha.qn`. Python's alternative is to hand back the half of the
+module that has run so far, which converts a structural mistake into a failure somewhere
+else entirely, at a name that is mysteriously missing. This language has consistently
+refused instead, and the chain is what makes the refusal actionable.
+
+A module that fails to load is *removed* from the registry rather than left marked, so a
+second import of it fails the same way rather than being told it is a cycle.
+
+### What an import may name
+
+A file beside the importer, by a bare name, with no path and no extension. Not a search
+path, not a package, not a subdirectory — each of those is a decision that wants a
+language with modules already in use to decide it, and refusing them now is cheaper than
+half-supporting them. `import utils/strings` is caught in the parser, which is where the
+`/` still exists; by the time the evaluator has a module name it has only an identifier,
+and the reader would have got "expected a newline" instead.
+
+The stdlib is searched first and wins. A file appearing in a directory must not change
+what `import math` means, and the reserved set is small, fixed, and listed in
+`stdlib::MODULES` — which is what makes that a rule someone can hold in their head
+rather than a trap.
+
+**An import is top level only.** A module is loaded once into the scope of the file that
+asked for it, so an import inside a function or a loop would be a load whose effect
+depended on whether the code ran.
+
+### `from` is not a reserved word
+
+`import` is; `from` is not. Taking it broke `op init(from, to)` in the corpus on the
+first run — which is how anyone writes a range — and that cost would have been
+permanent. It is recognised at the one position where it can mean anything: the start of
+a statement, with an `import` two tokens along. That is the parser's second lookahead,
+after the one `final class` needs, and it buys back a word people use.
+
+The TextMate grammar needed the same treatment, and the keyword guard is what said so —
+`the_editor_grammar_highlights_nothing_else` failed the moment `from` stopped being
+reserved, which is the direction that test was written for and sooner than expected.
+`from` is highlighted only where a name and an `import` follow it.
+
+### What the library is, given all that
+
+`import` is what made the library affordable, and it went in first for that reason. With
+no module system every library name is a global a program can never use again, and
+`math` alone is ten of them. Four modules now cost nothing until they are asked for.
+
+A stdlib module is built from a table into the same `Globals` an imported file produces,
+so `math.floor` and `util.helper` are one lookup and the two import forms are one code
+path. Members are handed back *unbound*, unlike a class handing back methods — so a
+stdlib native takes no receiver, which is the opposite of the natives seeded onto a type
+where `upper`'s `args[0]` is the string. That difference is why they live in their own
+file.
+
+**`random` is seeded to a fixed number.** A program that does not ask for
+unpredictability replays exactly. That makes a bug involving random numbers reproducible
+and lets the corpus assert values rather than ranges — the difference between testing
+`random` and testing that it returns a number at all. A program wanting otherwise writes
+`random.seed(time.now())`, which is the one place two of these modules meet.
+
+**`time` ships one clock.** A monotonic one is the right thing to measure elapsed time
+with, but nothing in the language can say "this float may not be compared to that one",
+so shipping both would ship two floats that look alike, must not be mixed, and carry
+nothing saying which is which.
+
+**`io` paths are relative to the working directory**, deliberately unlike `import`. They
+answer different questions: an import names part of the program and travels with it,
+while a path names data the program was pointed at, which belongs to whoever ran it.
+
+### The first natives to call Quince code
+
+`map`, `filter`, and `sort` are the first things in the tree to run a program's own
+function from inside a builtin, which makes them the first to cross a safe point holding
+something of their own. The comment at the `Native` arm of `call` had been predicting
+this for a while: `args` lives in a Rust frame and nothing roots it, which is safe only
+until a builtin reaches a safe point.
+
+So the receiver, the function, the element in flight, and the list being built all go on
+`temps`. The last is the one nothing else could reach — it is not bound to a name until
+`map` returns.
+
+`the_list_being_mapped_into_survives_collection` is what holds that, and its first
+version was worthless. It churned *before* the map and passed with the rooting deleted:
+the collections it counted had all happened already, and by then the threshold had been
+raised past what eight small allocations could reach. Moving the churn inside the
+callback is what puts a real collection between two pushes into the list. See Collection
+above — this is the same trap `a_thrown_payload_survives_the_unwind` was written around,
+and it caught a second victim.
+
+`sum` starts at the first element rather than at zero, and the corpus is what forced it:
+`["a", "b"].sum()` failed at `0 + "a"`. Starting at zero would have meant `sum` worked
+for numbers and quietly refused every class defining `op add`, which is most of the
+reason `op add` exists.
+
+`sort` is a merge sort rather than `sort_by`, because comparing can run an `op lt` and so
+can fail, and `sort_by` has nowhere to put an error. It is stable as a consequence, which
+a class defining its own order has every right to expect.
+
+### What this does not bring
+
+**Function expressions.** `xs.map(fn (x) { return x * 2 })` does not parse: `fn` is a
+statement, so a callback must be declared and named first. Closures work — a `fn`
+captures the scope it was declared in — so a function returning a function maps fine. But
+the short spelling everyone reaches for is not there, and it is a language decision
+rather than a library one.
+
+**Cross-file understanding in the editor.** An imported name is unknown to `lsp.rs`,
+which is honest and is the inference tranche's problem.
+
+**Scoped extensions.** `Interp::extensions` was kept out of `Class::methods` on the
+argument that an extension should one day be visible only where its module was imported.
+Modules now exist and that is still not wired up; the note in `extensions` is the record
+of why the door was left open.
+
 ## Roadmap
 
 **v0.1 — walking skeleton**
@@ -2286,7 +2454,7 @@ compared `err.message`, the one part of a diagnostic with no span in it, so a mi
 span accuracy had no test that any span was accurate. The `.report` file went in first for
 that reason and immediately earned it — it is what turned each of the changes above into a
 diff someone could read, and it caught the one report that the classification pass changed
-by accident. See Three companion files above.
+by accident. See Four companion files above.
 
 What the sweep did not do is add labels everywhere. Four diagnostics have them, and the rest
 draw a bare caret on purpose: a label is worth a line only when it says something the message
@@ -2375,9 +2543,49 @@ whenever the AST is unavailable. Those paths are heuristics and are marked as su
 function names; they are a floor under the AST paths, not a second implementation of them.
 The day a real type checker exists it should take both.
 
-**v0.6 — tooling and a library**
-A language server that knows rather than guesses, and enough library to write a program
-that does something.
+**v0.6 — modules, a library, and a language server that knows rather than guesses**
+
+The milestone was scoped as tooling and a library, on the assumption that the module
+system stayed deferred and the library worked around its absence with namespace objects.
+It did not stay deferred. `import` went in instead, for files as well as for the stdlib,
+which deleted the constraint the library was going to be designed around and made the
+library *simpler* — a namespace is a module like any other, and nothing is a global until
+someone asks for it.
+
+That made the milestone large, and the trade was named before it was taken: if it ran
+long, the thing to cut was library domains, never the module system half-built. A
+language with an `import` that only reaches the stdlib is a language that looks like it
+has modules and does not.
+
+**Modules are done**, and Modules above is the record. The three things worth carrying
+forward from it: `Slot::Global` walking the scope chain was the entire change needed for
+per-module scope, because the chain already ended where it had to; a span belongs to a
+file, and getting that wrong would have quietly undone the v0.5 sweep; and the error
+classes are shared across modules, without which `catch` would have compiled, run, and
+never fired.
+
+**The library is done** — `math`, `io`, `time`, `random`, and twelve methods across the
+three collection types. `map`, `filter`, and `sort` are the first natives to call a
+program's own code, and the rooting that needs is the one genuinely dangerous thing in
+the milestone.
+
+**The inference pass is what remains.** The text heuristics in `lsp.rs` — a receiver's
+class decided by whether its name starts with a capital letter — for a real pass beside
+the resolver that is allowed to answer "unknown". The library is what makes it worth
+doing and what will make its guesses visibly wrong, which was the argument for this
+order. Cross-file inference follows it, not before.
+
+The keyword guard added at the start of the milestone paid for itself twice inside it:
+once when `import` arrived, and once when `from` stopped being reserved. Both times it
+failed before anything shipped, and the second was the direction that looked speculative
+when it was written.
+
+Two hand-written lists turned out to be the same defect wearing different clothes. The
+TextMate grammar had drifted by three keywords; the LSP's builtin completions were
+missing `bool`. The grammar cannot read `KEYWORDS` — VS Code parses it without running
+our code — so it is guarded by a test. The completions can, so they now do. That is the
+rule: point at the list where you can, and where you cannot, fail loudly when the copy is
+wrong.
 
 The milestone is chosen because the limit on using Quince is no longer the language. v0.5
 closed the expressiveness gaps that were worth closing — a class can answer for anything a
@@ -2416,8 +2624,13 @@ sequenced first if the formatter is done at all, and it is the piece to cut if t
 runs long.
 
 **Later**
-Bytecode VM, async/await, module system, sized integer types — all things Zephyr has,
-deferred until the core is solid.
+Bytecode VM, async/await, sized integer types — all things Zephyr has, deferred until the
+core is solid. The module system was on this list and came forward into v0.6; what is
+left of it is packages, a search path, and subdirectory imports, which want a language
+with modules already in use to decide them.
+
+Function expressions belong here now too, and they were not on any list before `map` and
+`filter` existed to want them.
 
 ## Testing
 
@@ -2426,11 +2639,23 @@ deferred until the core is solid.
   tests. This is the suite that matters — it's what catches regressions as the
   evaluator changes shape, and it should grow with every feature.
 
-### Three companion files, asserting three different things
+### Four companion files, asserting four different things
 
 A case's `.out` holds what the program printed. Its `.err` holds the message it failed
 with. Its `.report` holds the whole rendered diagnostic — header, source line, carets,
-every label, the help.
+every label, the help. Its `.in` is the odd one out and the newest: it is an *input*,
+what the case reads from standard input, and absent means empty.
+
+`.in` arrived with `io.line`, which would otherwise have been the one member of the
+library with no case behind it — a terminal is not something a suite can arrange. It is
+optional for a related reason to `.report`: a case that never reads should not have to
+say so.
+
+A case is also allowed to be a *directory* rather than a file, holding a `main.qn` and
+the modules it imports. The companions are named for the case and sit beside it either
+way, so a case growing a second file changes nothing about how it is checked. A directory
+case's report names whichever file actually raised — which is usually one of the imported
+ones, and is the point of `imports_error`.
 
 The first two were the whole story until the sweep, and between them they left the
 milestone's own subject untested. `.err` compares `err.message`, and `message` is the one
