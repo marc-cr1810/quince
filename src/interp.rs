@@ -454,6 +454,30 @@ impl Interp {
             .collect()
     }
 
+    /// Whether `lhs < rhs`, asking the class if it has an opinion.
+    ///
+    /// For `sort`, which needs an ordering it can call rather than an expression
+    /// to evaluate. The same path `<` takes, so a class defining `op lt` or
+    /// `op cmp` sorts by what it said.
+    fn less_than(&mut self, lhs: &Value, rhs: &Value, span: Span) -> Result<bool, QuinceError> {
+        let answer = self.binary(BinaryOp::Lt, lhs.clone(), rhs.clone(), span, span, span)?;
+        match answer.base(&self.heap) {
+            Value::Bool(b) => Ok(*b),
+            // `<` on a pair it does not apply to has already raised by here, so
+            // this is a class whose `op lt` answered with something else — which
+            // `binary` refuses too. Kept as a refusal rather than an unwrap
+            // because the two paths could drift.
+            got => Err(QuinceError::new(
+                format!(
+                    "sorting compared two values and got {} rather than a bool",
+                    got.type_name(&self.heap)
+                ),
+                span,
+            )
+            .with_kind(ErrorKind::Type)),
+        }
+    }
+
     /// Reads one line of the program's input, for `io.line`.
     ///
     /// On [`Interp`] because `input` is private and a native has the interpreter
@@ -3649,6 +3673,264 @@ static LEN: Native = Native {
 ///
 /// `args[0]` is the receiver, so a method's declared arity is one more than the
 /// number of arguments written at the call site.
+/// `xs.reverse()` — a new list, back to front.
+pub static REVERSE: Native = Native {
+    name: "reverse",
+    arity: Some(1),
+    func: |interp, args, span| {
+        let source = receiver_list("reverse", args, &interp.heap, span)?;
+        let mut items = interp.heap.list(source).to_vec();
+        items.reverse();
+        Ok(Value::List(interp.heap.alloc(Object::List(items))))
+    },
+};
+
+/// `xs.find(v)` — the index of the first element equal to `v`, or `-1`.
+///
+/// `-1` rather than `nil`, so the answer is always an int and a caller can
+/// compare it without first asking which kind it got. It is also what `in`
+/// already implies: `x in xs` answers the question `find` is being asked for
+/// when the index does not matter.
+pub static FIND: Native = Native {
+    name: "find",
+    arity: Some(2),
+    func: |interp, args, span| {
+        let source = receiver_list("find", args, &interp.heap, span)?;
+        let mut index = 0;
+        loop {
+            let Some(item) = interp.heap.list(source).get(index).cloned() else {
+                return Ok(Value::Int(-1));
+            };
+            // Equality can run an `op eq`, so the length is re-read every time
+            // round rather than captured — the same reason `walk_list` does.
+            if interp.equals(&item, &args[1])? {
+                return Ok(Value::Int(index as i64));
+            }
+            index += 1;
+        }
+    },
+};
+
+/// `xs.sum()` — the elements added together, left to right.
+///
+/// Through the same `+` an expression uses, so a list of strings concatenates
+/// and a class defining `op add` sums.
+///
+/// It starts at the *first element*, not at zero, and that is the whole reason
+/// the second sentence above is true. Starting at zero would mean every sum
+/// began `0 + x`, so a list of strings would fail and so would a list of any
+/// class that defines `op add` — which is to say `sum` would work for numbers
+/// and lie about the rest. An empty list is the one case with nothing to start
+/// from, and answers `0`: the identity for the only type that can be summed
+/// without knowing what is in the list.
+pub static SUM: Native = Native {
+    name: "sum",
+    arity: Some(1),
+    func: |interp, args, span| {
+        let source = receiver_list("sum", args, &interp.heap, span)?;
+        let mark = interp.temps.len();
+        interp.temps.push(args[0].clone());
+
+        let Some(mut total) = interp.heap.list(source).first().cloned() else {
+            interp.temps.truncate(mark);
+            return Ok(Value::Int(0));
+        };
+        let mut index = 1;
+        let result = loop {
+            let Some(item) = interp.heap.list(source).get(index).cloned() else {
+                break Ok(total);
+            };
+            // The running total is a value held across a call that can allocate,
+            // so it is rooted like any other. The previous one is dropped only
+            // once its replacement exists.
+            interp.temps.push(total.clone());
+            let sum = interp.binary(BinaryOp::Add, total, item, span, span, span);
+            interp.temps.pop();
+            match sum {
+                Ok(value) => total = value,
+                Err(err) => break Err(err),
+            }
+            index += 1;
+        };
+
+        interp.temps.truncate(mark);
+        result
+    },
+};
+
+/// The list `name` was called on, or a type error naming it.
+fn receiver_list(name: &str, args: &[Value], heap: &Heap, span: Span) -> Result<ObjId, QuinceError> {
+    match args[0].base(heap) {
+        Value::List(id) => Ok(*id),
+        other => Err(QuinceError::new(
+            format!(
+                "`{name}` needs a list, but was given {}",
+                other.type_name(heap)
+            ),
+            span,
+        )
+        .with_kind(ErrorKind::Type)),
+    }
+}
+
+/// Walks a list, calling `f` on each element, with everything rooted.
+///
+/// **This is the first thing in the tree to call Quince code from inside a
+/// native**, and the rule it has to keep is the one written at the `Native` arm
+/// of `call`: `args` lives in a Rust frame and nothing roots it, which was safe
+/// only for as long as no builtin reached a safe point. Calling a function
+/// reaches one on every statement of its body.
+///
+/// So three things go on `temps` before anything runs: the receiver, the
+/// function, and the list being built. The results are rooted by being *in* that
+/// list rather than by being pushed separately, and each element is rooted while
+/// it is in flight. Everything is dropped at the mark on the way out, including
+/// on the error path — `truncate` runs before the `?`, which is the discipline
+/// every other frame here already follows.
+///
+/// The length is re-read each time round rather than captured. A callback that
+/// shortens the list it was handed would otherwise index past the end of it.
+fn walk_list(
+    interp: &mut Interp,
+    name: &str,
+    args: &[Value],
+    span: Span,
+    mut f: impl FnMut(&mut Interp, Value, ObjId) -> Result<(), QuinceError>,
+) -> Result<Value, QuinceError> {
+    let source = receiver_list(name, args, &interp.heap, span)?;
+    let mark = interp.temps.len();
+    interp.temps.push(args[0].clone());
+    interp.temps.push(args[1].clone());
+    let out = interp.heap.alloc(Object::List(Vec::new()));
+    interp.temps.push(Value::List(out));
+
+    let mut index = 0;
+    let result = loop {
+        if index >= interp.heap.list(source).len() {
+            break Ok(());
+        }
+        let item = interp.heap.list(source)[index].clone();
+        interp.temps.push(item.clone());
+        let step = f(interp, item, out);
+        interp.temps.pop();
+        if let Err(err) = step {
+            break Err(err);
+        }
+        index += 1;
+    };
+
+    interp.temps.truncate(mark);
+    result?;
+    Ok(Value::List(out))
+}
+
+/// `xs.map(f)` — a new list of `f` applied to each element.
+pub static MAP: Native = Native {
+    name: "map",
+    arity: Some(2),
+    func: |interp, args, span| {
+        walk_list(interp, "map", args, span, |interp, item, out| {
+            let mapped = interp.call(args[1].clone(), vec![item], span)?;
+            interp
+                .heap
+                .list_mut(out)
+                .map(|items| items.push(mapped))
+                .expect("a list this call allocated cannot be frozen");
+            Ok(())
+        })
+    },
+};
+
+/// `xs.filter(f)` — the elements `f` answered truthily for.
+///
+/// The predicate's answer goes through `is_truthy`, so a class deciding its own
+/// truthiness decides this too, exactly as it does in an `if`.
+pub static FILTER: Native = Native {
+    name: "filter",
+    arity: Some(2),
+    func: |interp, args, span| {
+        walk_list(interp, "filter", args, span, |interp, item, out| {
+            let verdict = interp.call(args[1].clone(), vec![item.clone()], span)?;
+            if interp.is_truthy(&verdict)? {
+                interp
+                    .heap
+                    .list_mut(out)
+                    .map(|items| items.push(item))
+                    .expect("a list this call allocated cannot be frozen");
+            }
+            Ok(())
+        })
+    },
+};
+
+/// `xs.sort()` — a new list, in the order `<` puts the elements in.
+///
+/// A new list rather than a rearrangement of this one, so it is usable on a
+/// `const` list and so `sort` cannot surprise a second name for the same list.
+///
+/// A merge sort, because comparing can run Quince code — a class's `op lt` — and
+/// so can fail, which `sort_by` has no way to report. It is also stable, which a
+/// comparison-defining class has every right to expect.
+///
+/// Rooting is simpler here than in `walk_list`: every element goes onto `temps`
+/// once at the start, so the Rust `Vec`s the merge passes around hold clones of
+/// values that are already reachable.
+pub static SORT: Native = Native {
+    name: "sort",
+    arity: Some(1),
+    func: |interp, args, span| {
+        let source = receiver_list("sort", args, &interp.heap, span)?;
+        let mark = interp.temps.len();
+        interp.temps.push(args[0].clone());
+        let items: Vec<Value> = interp.heap.list(source).to_vec();
+        interp.temps.extend(items.iter().cloned());
+
+        let sorted = merge_sort(interp, items, span);
+        interp.temps.truncate(mark);
+        let sorted = sorted?;
+        Ok(Value::List(interp.heap.alloc(Object::List(sorted))))
+    },
+};
+
+fn merge_sort(
+    interp: &mut Interp,
+    items: Vec<Value>,
+    span: Span,
+) -> Result<Vec<Value>, QuinceError> {
+    if items.len() <= 1 {
+        return Ok(items);
+    }
+    let mut right = items;
+    let left = right.split_off(right.len() / 2);
+    // `split_off` hands back the tail, so the names are the wrong way round —
+    // swapped here rather than at every use below.
+    let (left, right) = (right, left);
+    let left = merge_sort(interp, left, span)?;
+    let right = merge_sort(interp, right, span)?;
+
+    let mut merged = Vec::with_capacity(left.len() + right.len());
+    let (mut i, mut j) = (0, 0);
+    while i < left.len() && j < right.len() {
+        // `right < left` rather than `left <= right`, because `<=` is `op cmp`'s
+        // alone and a class may define `op lt` without it. Taking the left one
+        // unless the right is strictly smaller is what keeps this stable.
+        let takes_right = interp.less_than(&right[j], &left[i], span)?;
+        match takes_right {
+            true => {
+                merged.push(right[j].clone());
+                j += 1;
+            }
+            false => {
+                merged.push(left[i].clone());
+                i += 1;
+            }
+        }
+    }
+    merged.extend_from_slice(&left[i..]);
+    merged.extend_from_slice(&right[j..]);
+    Ok(merged)
+}
+
 pub static PUSH: Native = Native {
     name: "push",
     arity: Some(2),
@@ -3712,6 +3994,40 @@ pub static VALUES: Native = Native {
 
 /// Removing a key that is not there is an error, for the same reason reading one
 /// is: silently doing nothing hides the typo that caused it.
+/// `d.get(k, fallback)` — the value at `k`, or `fallback` if it is not there.
+///
+/// The reason to want it is that `d[k]` raises, which is right for a key a
+/// program believes is present and wrong for one it is asking about. Both are
+/// real questions and they need different spellings.
+///
+/// The fallback is required rather than defaulting to `nil`, because a dict may
+/// hold `nil` — and a one-argument `get` would answer the same thing for "not
+/// there" and "there, and nil", which is exactly the distinction someone reaches
+/// for `get` to make.
+pub static GET: Native = Native {
+    name: "get",
+    arity: Some(3),
+    func: |interp, args, span| match args[0].base(&interp.heap) {
+        Value::Dict(id) => {
+            let key = key_of(&interp.heap, &args[1], span)?;
+            Ok(interp
+                .heap
+                .dict(*id)
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(|| args[2].clone()))
+        }
+        other => Err(QuinceError::new(
+            format!(
+                "`get` needs a dict, but was given {}",
+                other.type_name(&interp.heap)
+            ),
+            span,
+        )
+        .with_kind(ErrorKind::Type)),
+    },
+};
+
 pub static REMOVE: Native = Native {
     name: "remove",
     arity: Some(2),
@@ -3776,6 +4092,40 @@ fn text_arg(
         .with_kind(ErrorKind::Type)),
     }
 }
+
+/// `"ab".repeat(3)` — the string joined to itself that many times.
+///
+/// Refuses a negative count rather than answering with an empty string, on the
+/// same reasoning as `sqrt(-1)`: a program asking for `-2` copies has a bug
+/// upstream, and an empty string would carry it further before anything noticed.
+/// Zero copies is a real answer and is allowed.
+pub static REPEAT: Native = Native {
+    name: "repeat",
+    arity: Some(2),
+    func: |interp, args, span| {
+        let Value::Int(count) = args[1].base(&interp.heap) else {
+            return Err(QuinceError::new(
+                format!(
+                    "`repeat` needs an int, but was given {}",
+                    args[1].type_name(&interp.heap)
+                ),
+                span,
+            )
+            .with_kind(ErrorKind::Type));
+        };
+        let count = *count;
+        if count < 0 {
+            return Err(
+                QuinceError::new(format!("cannot repeat a string {count} times"), span)
+                    .with_kind(ErrorKind::Value)
+                    .with_help("a count of copies is not negative"),
+            );
+        }
+        Ok(Value::Str(Rc::from(
+            text(args).repeat(count as usize).as_str(),
+        )))
+    },
+};
 
 pub static UPPER: Native = Native {
     name: "upper",
@@ -4105,6 +4455,57 @@ mod tests {
         let mut interp = Interp::with_output(Box::new(Vec::new()));
         interp.run(&program).expect("the test program should run");
         interp
+    }
+
+    /// The list `map` is building is rooted while the callback runs.
+    ///
+    /// `map` is the first native to call Quince code, which makes it the first
+    /// to cross a safe point with something of its own on the Rust stack. The
+    /// receiver, the function, the element in flight, and the list being filled
+    /// are all on `temps` for that reason — and the list is the one nothing else
+    /// can reach, since it is not bound to a name until `map` returns.
+    ///
+    /// The churn is *inside* the callback, and that detail is the test. A first
+    /// version churned before the map and passed with the rooting deleted: the
+    /// collections it counted had all happened already, and by the time the map
+    /// ran the threshold had been raised past what eight small allocations could
+    /// reach. Allocating during each call is what puts a real collection between
+    /// two pushes into the list being built.
+    ///
+    /// Checked by deleting the `temps.push` of `out` in `walk_list`, which makes
+    /// this panic at `handle points at a collected object`.
+    #[test]
+    fn the_list_being_mapped_into_survives_collection() {
+        let interp = run("fn churn(k) {\n\
+             \x20   let scratch = []\n\
+             \x20   let i = 0\n\
+             \x20   while i < k {\n\
+             \x20       scratch.push([i])\n\
+             \x20       i = i + 1\n\
+             \x20   }\n\
+             }\n\
+             fn wrap(x) {\n\
+             \x20   churn(400)\n\
+             \x20   let boxed = [x, x]\n\
+             \x20   return boxed\n\
+             }\n\
+             let source = [1, 2, 3, 4, 5, 6, 7, 8]\n\
+             let mapped = source.map(wrap)\n\
+             let n = len(mapped)\n\
+             let third = mapped[2]");
+
+        assert!(interp.heap.collections > 0, "the collector never ran");
+        assert!(
+            matches!(global(&interp, "n"), Some(Value::Int(8))),
+            "the mapped list did not survive: got {:?}",
+            global(&interp, "n")
+        );
+        // Reaching into an element proves the results survived too, not just the
+        // list holding them.
+        let Some(Value::List(id)) = global(&interp, "third") else {
+            panic!("the third element should be a list");
+        };
+        assert_eq!(interp.heap.list(id), &[Value::Int(3), Value::Int(3)]);
     }
 
     /// `io`'s file half, which the corpus cannot hold.

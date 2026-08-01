@@ -17,8 +17,9 @@ use crate::ast::{OPS, Op, Openness};
 use crate::dict::Dict;
 use crate::heap::{Heap, ObjId};
 use crate::interp::{
-    BOOL_INIT, CHARS, DICT_INIT, ENDS_WITH, FLOAT_INIT, INT_INIT, JOIN, KEYS, LIST_INIT, LOWER,
-    PUSH, REMOVE, REPLACE, SPLIT, STARTS_WITH, STR_INIT, TRIM, UPPER, VALUES,
+    BOOL_INIT, CHARS, DICT_INIT, ENDS_WITH, FILTER, FIND, FLOAT_INIT, GET, INT_INIT, JOIN, KEYS,
+    LIST_INIT, LOWER, MAP, PUSH, REMOVE, REPEAT, REPLACE, REVERSE, SORT, SPLIT, STARTS_WITH,
+    STR_INIT, SUM, TRIM, UPPER, VALUES,
 };
 use crate::value::{Native, Value};
 
@@ -381,6 +382,7 @@ pub static STR: BuiltinType = BuiltinType {
         ("ends_with", &ENDS_WITH),
         ("join", &JOIN),
         ("lower", &LOWER),
+        ("repeat", &REPEAT),
         ("replace", &REPLACE),
         ("split", &SPLIT),
         ("starts_with", &STARTS_WITH),
@@ -391,12 +393,25 @@ pub static STR: BuiltinType = BuiltinType {
 };
 pub static LIST: BuiltinType = BuiltinType {
     name: "list",
-    methods: &[("push", &PUSH)],
+    methods: &[
+        ("filter", &FILTER),
+        ("find", &FIND),
+        ("map", &MAP),
+        ("push", &PUSH),
+        ("reverse", &REVERSE),
+        ("sort", &SORT),
+        ("sum", &SUM),
+    ],
     init: Some(&LIST_INIT),
 };
 pub static DICT: BuiltinType = BuiltinType {
     name: "dict",
-    methods: &[("keys", &KEYS), ("values", &VALUES), ("remove", &REMOVE)],
+    methods: &[
+        ("get", &GET),
+        ("keys", &KEYS),
+        ("remove", &REMOVE),
+        ("values", &VALUES),
+    ],
     init: Some(&DICT_INIT),
 };
 /// No `init`: there is no value a function could be made *from*. `fn` is how one

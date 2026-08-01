@@ -1,0 +1,58 @@
+fn double(x) { return x * 2 }
+fn big(x) { return x > 3 }
+
+let xs = [3, 1, 4, 1, 5, 9, 2, 6]
+
+# `sort` and `reverse` answer with new lists and leave the receiver alone, so a
+# `const` list can be sorted and a second name for the same list is not changed
+# under it.
+print(xs.sort())
+print(xs.reverse())
+print(xs)
+
+print(xs.sum())
+print(xs.find(4), xs.find(1), xs.find(99))
+print(xs.map(double))
+print(xs.filter(big))
+
+# Nothing to add, nothing to sort, nothing to map.
+print([].sum(), [].sort(), [].map(double), [].filter(big))
+
+# `sum` starts at the first element, not at zero, which is what lets it mean
+# anything for a type whose `+` is not arithmetic.
+print(["a", "b", "c"].sum())
+print(["b", "a", "c"].sort())
+
+# A closure is an ordinary function, so it maps like one.
+fn scaler(k) {
+    fn scale(x) { return x * k }
+    return scale
+}
+print(xs.map(scaler(10)))
+
+# A class decides its own order and its own addition, and both are asked.
+class Money {
+    op init(n) { self.n = n }
+    op lt(other) { return self.n < other.n }
+    op add(other) { return Money(self.n + other.n) }
+    op string() { return "$" + string(self.n) }
+}
+print([Money(5), Money(2), Money(9)].sort())
+print([Money(5), Money(2), Money(9)].sum())
+
+# Sorting is stable: equal elements keep the order they were written in, which
+# is visible because `op lt` looks at `n` alone and `tag` distinguishes them.
+class Tagged {
+    op init(n, tag) { self.n = n; self.tag = tag }
+    op lt(other) { return self.n < other.n }
+    op string() { return string(self.n) + self.tag }
+}
+print([Tagged(1, "a"), Tagged(0, "b"), Tagged(1, "c"), Tagged(0, "d")].sort())
+
+let d = {"a": 1, "b": nil}
+# The fallback is required, so "not there" and "there, and nil" stay different
+# answers rather than collapsing into one.
+print(d.get("a", 0), d.get("z", 0), d.get("b", 0))
+
+print("ab".repeat(3))
+print("x".repeat(0) == "")
