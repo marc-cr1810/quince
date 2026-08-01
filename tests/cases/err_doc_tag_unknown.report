@@ -1,0 +1,8 @@
+Error: quince::DeclarationError
+
+ × `@parm` is not a documentation tag
+  ╭─[err_doc_tag_unknown.qn:2:1]
+2 │ ## @parm xs the numbers
+  · ───────────────────────
+  ╰────
+  help: the tags are `@param`, `@return`, `@throws`

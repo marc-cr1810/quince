@@ -577,6 +577,7 @@ impl Interp {
                 name,
                 value,
                 bind,
+                doc: _,
                 slot,
             } => {
                 let value = self.eval(value, env)?;
@@ -602,6 +603,7 @@ impl Interp {
             }
 
             StmtKind::Class {
+                doc: _,
                 name,
                 parent,
                 parent_span,

@@ -1,5 +1,6 @@
 use std::rc::Rc;
 
+use crate::doc::Doc;
 use crate::token::Span;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -509,6 +510,13 @@ pub struct FnDecl {
     /// Set when the declaration used `op`, which the parser allows only inside a
     /// class body — so a plain function always leaves this `None`.
     pub op: Option<Op>,
+    /// The `##` block written above it, already checked against `params`.
+    ///
+    /// Checked at the parser rather than kept raw, so that a `@param` naming
+    /// something this function does not take is refused where the parameter
+    /// list is in hand — which is the only place the report can say what it
+    /// *does* take.
+    pub doc: Option<Doc>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -619,6 +627,9 @@ pub enum StmtKind {
         bind: BindKind,
         /// Where the binding goes. Always `Local { hops: 0, .. }` or `Global`.
         slot: Option<Slot>,
+        /// The `##` block written above it. A binding has no parameters and no
+        /// return, so this carries a summary and the parser refuses the rest.
+        doc: Option<Doc>,
     },
     /// Shared so a closure can hold the body without deep-copying it each time
     /// the declaration is executed.
@@ -644,6 +655,9 @@ pub enum StmtKind {
         openness: Openness,
         /// Where the class's own name is bound, as for `Let`.
         slot: Option<Slot>,
+        /// The `##` block written above it. A summary only, as for a binding —
+        /// a class takes no arguments; its `op init` does, and documents them.
+        doc: Option<Doc>,
     },
     /// Methods added to a type that already exists.
     ///

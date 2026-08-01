@@ -546,6 +546,7 @@ mod tests {
         let scope = heap.alloc(Object::Env(Env::new(None, 1)));
         let func = heap.alloc(Object::Function(Function {
             decl: std::rc::Rc::new(crate::ast::FnDecl {
+                doc: None,
                 name: "f".to_string(),
                 name_span: crate::token::Span::new(0, 0),
                 params: Vec::new(),

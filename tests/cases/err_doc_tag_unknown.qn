@@ -1,0 +1,5 @@
+## Sums the numbers.
+## @parm xs the numbers
+fn total(xs) {
+    return xs.sum()
+}

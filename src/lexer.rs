@@ -1,5 +1,5 @@
 use crate::error::{ErrorKind, QuinceError};
-use crate::token::{Span, Token, TokenKind};
+use crate::token::{DocBlock, Span, Token, TokenKind};
 
 /// An error for text that does not tokenise.
 ///
@@ -14,11 +14,39 @@ pub struct Lexer<'a> {
     src: &'a str,
     /// Byte offset of the next character to read.
     pos: usize,
+    /// `##` lines seen since the last token, waiting for the token they
+    /// document.
+    pending_doc: Vec<(String, Span)>,
 }
 
 impl<'a> Lexer<'a> {
     pub fn new(src: &'a str) -> Self {
-        Lexer { src, pos: 0 }
+        Lexer {
+            src,
+            pos: 0,
+            pending_doc: Vec::new(),
+        }
+    }
+
+    /// Hands over the documentation gathered for the token about to be pushed.
+    fn take_doc(&mut self) -> Option<DocBlock> {
+        if self.pending_doc.is_empty() {
+            return None;
+        }
+        Some(DocBlock {
+            lines: std::mem::take(&mut self.pending_doc),
+        })
+    }
+
+    /// Whether everything between the last line break and `at` is whitespace.
+    ///
+    /// What separates `## docs` from `let x = 1  ## a note`. Only a `##` that
+    /// starts its line is documentation, because documentation is written
+    /// *above* the thing it describes — a trailing one would attach to whatever
+    /// came next, which is a line the writer was not looking at.
+    fn at_line_start(&self, at: usize) -> bool {
+        let start = self.src[..at].rfind('\n').map_or(0, |index| index + 1);
+        self.src[start..at].chars().all(|c| c.is_whitespace())
     }
 
     /// Consumes the whole input, producing tokens terminated by `Eof`.
@@ -34,6 +62,7 @@ impl<'a> Lexer<'a> {
                     kind: TokenKind::Eof,
                     span: Span::new(start, start),
                     newline_before,
+                    doc: self.take_doc(),
                 });
                 return Ok(tokens);
             };
@@ -91,6 +120,7 @@ impl<'a> Lexer<'a> {
                 kind,
                 span: Span::new(start, self.pos),
                 newline_before,
+                doc: self.take_doc(),
             });
         }
     }
@@ -134,6 +164,7 @@ impl<'a> Lexer<'a> {
                 // `#` rather than `//`, which is floor division. This also makes a
                 // `#!` shebang line a comment for free.
                 Some('#') => {
+                    let start = self.pos;
                     // The terminating newline is left for the next iteration so it
                     // still counts as a line break.
                     while let Some(c) = self.peek() {
@@ -141,6 +172,19 @@ impl<'a> Lexer<'a> {
                             break;
                         }
                         self.advance();
+                    }
+                    // `##` at the start of a line is documentation and is kept;
+                    // everything else is commentary and is thrown away exactly
+                    // as it always was. A shebang is `#!` and so is unaffected,
+                    // and neither is `### ---` — that is a `##` whose text
+                    // happens to begin with a `#`, which is a banner and reads
+                    // as one.
+                    let line = &self.src[start..self.pos];
+                    if let Some(text) = line.strip_prefix("##")
+                        && self.at_line_start(start)
+                    {
+                        self.pending_doc
+                            .push((text.trim().to_string(), Span::new(start, self.pos)));
                     }
                 }
                 _ => return newline,
@@ -385,6 +429,74 @@ mod tests {
         );
         assert_eq!(kinds("# only a comment"), vec![]);
         assert_eq!(kinds("#!/usr/bin/env quince\nlet"), vec![TokenKind::Let]);
+    }
+
+    /// The documentation gathered onto the first token that is not `Eof`.
+    fn docs(src: &str) -> Vec<String> {
+        Lexer::new(src)
+            .tokenize()
+            .expect("the source lexes")
+            .iter()
+            .find(|token| token.kind != TokenKind::Eof)
+            .and_then(|token| token.doc.clone())
+            .map(|block| block.lines.into_iter().map(|(text, _)| text).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn two_hashes_at_the_start_of_a_line_are_kept() {
+        assert_eq!(docs("## the docs\nlet x = 1"), vec!["the docs".to_string()]);
+        assert_eq!(
+            docs("## first\n##\n## third\nlet x = 1"),
+            vec!["first".to_string(), String::new(), "third".to_string()]
+        );
+        // Indented, because a method's documentation sits inside a class body.
+        assert_eq!(docs("class C {\n    ## the docs\n    fn m() {}\n}"), Vec::<String>::new());
+        assert_eq!(
+            docs("    ## the docs\n    fn m() {}"),
+            vec!["the docs".to_string()]
+        );
+    }
+
+    #[test]
+    fn one_hash_is_still_thrown_away() {
+        // The whole point of choosing `##`: a comment stays a comment, and
+        // nothing anybody has already written becomes documentation.
+        assert_eq!(docs("# just a note\nlet x = 1"), Vec::<String>::new());
+        assert_eq!(docs("#!/usr/bin/env quince\nlet x = 1"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_trailing_double_hash_documents_nothing() {
+        // It would otherwise attach to whatever came next, which is a line the
+        // writer was not looking at when they typed it.
+        assert_eq!(docs("let x = 1  ## a note\nlet y = 2"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn documentation_attaches_to_the_token_that_follows_it() {
+        let tokens = Lexer::new("## the docs\nlet x = 1\nlet y = 2")
+            .tokenize()
+            .expect("the source lexes");
+        assert!(tokens[0].doc.is_some(), "the first `let` is documented");
+        assert!(
+            tokens.iter().skip(1).all(|token| token.doc.is_none()),
+            "nothing else is"
+        );
+    }
+
+    #[test]
+    fn a_doc_line_carries_the_span_of_the_line_it_was_written_on() {
+        // What lets a report about one tag underline that tag. Checked against
+        // the source text rather than against numbers, so it cannot pass while
+        // pointing somewhere plausible and wrong.
+        let src = "## first\n## @param x second\nfn f(x) {}";
+        let tokens = Lexer::new(src).tokenize().expect("the source lexes");
+        let block = tokens[0].doc.clone().expect("the `fn` is documented");
+        for (text, span) in block.lines {
+            let written = &src[span.start as usize..span.end as usize];
+            assert_eq!(written.trim_start_matches('#').trim(), text);
+        }
     }
 
     #[test]

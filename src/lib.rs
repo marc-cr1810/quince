@@ -2,6 +2,7 @@ pub mod ast;
 pub mod class;
 pub mod color;
 pub mod dict;
+pub mod doc;
 pub mod env;
 pub mod error;
 pub mod heap;

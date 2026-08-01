@@ -2,6 +2,7 @@ use crate::ast::{
     self, BinaryOp, BindKind, Block, Expr, ExprKind, FnDecl, ImportName, ImportNames, LogicalOp,
     Op, Openness, Param, Stmt, StmtKind, UnaryOp, Var,
 };
+use crate::doc::Doc;
 use crate::error::{ErrorKind, QuinceError};
 use crate::token::{Span, Token, TokenKind};
 
@@ -122,6 +123,7 @@ impl Parser {
 
     fn let_stmt(&mut self) -> Result<Stmt, QuinceError> {
         let keyword = self.advance();
+        let doc = Self::doc_of(&keyword, "a binding")?;
         let bind = match keyword.kind {
             TokenKind::Let => BindKind::Let,
             TokenKind::Final => BindKind::Final,
@@ -141,6 +143,7 @@ impl Parser {
                 name,
                 value,
                 bind,
+                doc,
             },
             span,
         })
@@ -170,7 +173,9 @@ impl Parser {
     /// the check needs is local: the name, the span, and the parameters, all in
     /// hand before the body is parsed.
     fn fn_decl(&mut self, method: bool) -> Result<FnDecl, QuinceError> {
-        let keyword = self.advance().kind.clone();
+        let token = self.advance();
+        let doc = Self::doc_of(&token, "a function")?;
+        let keyword = token.kind.clone();
         let is_op = keyword == TokenKind::Op;
         let after = if is_op { "after `op`" } else { "after `fn`" };
         let (name, name_span) = self.expect_ident(after)?;
@@ -241,6 +246,14 @@ impl Parser {
             }
         }
 
+        // Checked here because here is where the parameter list is in hand, so
+        // the report can say what the function *does* take. A `@param` that
+        // named nothing would otherwise be documentation nobody could find the
+        // mistake in.
+        if let Some(doc) = &doc {
+            doc.check(&params)?;
+        }
+
         let body = self.block()?;
         Ok(FnDecl {
             name,
@@ -248,7 +261,30 @@ impl Parser {
             params,
             body,
             op,
+            doc,
         })
+    }
+
+    /// The documentation attached to a token, parsed and checked for shape.
+    ///
+    /// `what` names the thing being declared, for the report when a tag is
+    /// written that the declaration has no room for — `@return` above a `let`
+    /// describes nothing, and there is no reading of it that is right.
+    ///
+    /// A `fn` is the one form with a signature, so it is the one form that
+    /// checks nothing here and everything later: its `@param`s are checked
+    /// against the parameter list once that has been read.
+    fn doc_of(token: &Token, what: &str) -> Result<Option<Doc>, QuinceError> {
+        let Some(block) = &token.doc else {
+            return Ok(None);
+        };
+        let doc = Doc::parse(block)?;
+        if what != "a function" {
+            doc.check_has_no_signature(what)?;
+        }
+        // A block of empty `##` lines documents nothing, and carrying it would
+        // make an editor render a heading with no text under it.
+        Ok((!doc.is_empty()).then_some(doc))
     }
 
     /// Refuses a name a body has already declared.
@@ -286,6 +322,9 @@ impl Parser {
     /// of it after the word.
     fn class_stmt(&mut self) -> Result<Stmt, QuinceError> {
         let start = self.peek().span;
+        // The modifier when there is one, since that is the first token of the
+        // header and so the one the documentation attached to.
+        let doc = Self::doc_of(self.peek(), "a class")?;
         let openness = match self.peek().kind {
             TokenKind::Final => Openness::Final,
             TokenKind::Complete => Openness::Complete,
@@ -337,6 +376,7 @@ impl Parser {
                 methods,
                 openness,
                 slot: None,
+                doc,
             },
             span: start.to(end),
         })

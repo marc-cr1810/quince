@@ -2385,6 +2385,67 @@ Two hundred claims over forty programs nobody wrote with a checker in mind. A pa
 to answer `Unknown` has exactly one way to be wrong, and this is what looks for it — the
 unit tests assert that the pass *says* `int`, and this asserts that the value is one.
 
+## Doc comments
+
+`##` at the start of a line is documentation; `#` is a comment and is discarded exactly as
+it always was. The lexer gathers the `##` lines it passes and hands them to the next token
+it produces; the parser reads them off the declaration keyword and `doc.rs` decides what
+they say.
+
+Choosing a second sigil rather than promoting every comment is the whole of the design.
+Retaining all comments would have unlocked the formatter in the same change, and it was
+refused for one reason: `# TODO: this leaks` would have become published documentation,
+and "the comment directly above" is an adjacency guess of exactly the species the
+inference pass was written to delete. `##` makes the writer say which is which.
+
+### The tags are checked against the declaration
+
+A block is a summary and then `@param`, `@return`, `@throws`. `@param radius` on a
+function whose parameter is `r` is refused, with the caret under that line and a help
+naming what it does take.
+
+That refusal is the reason the format is parsed at all rather than stored as prose.
+Documentation is a second copy of the signature, and a second copy drifts — the TextMate
+grammar drifted by three keywords, the LSP's completions were missing `bool`, and both are
+recorded above as one defect wearing two faces. Prose that has stopped describing its
+function is worse than none, because it is read and believed. This is the same rule
+`op lenght` is refused by: `Tag::from_name` is the only way in, so `@parm` is an error
+listing the three that exist rather than a line quietly absorbed into the paragraph above.
+
+The check runs one direction only. A parameter with no `@param` is fine — a rule against
+it would mean a half-documented function cannot be written, and what people do about a
+rule like that is delete the documentation.
+
+Tags that need a signature are refused where there is none: a `let` and a `class` get a
+summary. A class's arguments belong to its `op init`, which documents them like any other
+function.
+
+### Docs ride on the token, not in the stream
+
+`Token` carries `doc: Option<DocBlock>`, beside `newline_before`, and for the identical
+reason that field exists. A `TokenKind::Doc` in the stream would have to be skipped at
+every match site in the parser — a hundred places with no interest in it, any one of which
+could forget, each failing as a baffling syntax error. Recording it on the token means the
+four declaration sites that care ask for it and nothing else changes.
+
+Each line keeps its own span, which is what lets a report about one tag underline that
+tag. `@return` has a struct rather than a bare `String` for no other reason: without a
+span its diagnostic pointed at the summary three lines above the mistake.
+
+### What it does not bring
+
+**The editor does not render any of this yet.** The blocks are parsed, checked, and hung
+on the AST, and `lsp.rs` still shows a hand-written table of ten builtins. Wiring the two
+together is the next tranche, along with deleting that table.
+
+**A native cannot document its parameters.** `Native` records an arity and not the names,
+so `@param` on a builtin could not be checked and is not offered — `signature_of` still
+renders `fn split(_, _)`. Giving natives their parameter names would fix the signature
+help and the documentation at once, and it is the obvious thing to do next to them.
+
+**Comments are still discarded**, so the formatter is no closer. `##` was made additive on
+purpose: the lexer change needed for a formatter can land later without disturbing this.
+
 ## Roadmap
 
 **v0.1 — walking skeleton**

@@ -1,0 +1,7 @@
+## The distance from the origin.
+##
+## @param x the horizontal offset
+## @param radius the vertical offset
+fn magnitude(x, y) {
+    return x + y
+}

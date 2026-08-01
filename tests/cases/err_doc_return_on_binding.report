@@ -1,0 +1,7 @@
+Error: quince::DeclarationError
+
+ × `@return` does not describe a binding
+  ╭─[err_doc_return_on_binding.qn:2:1]
+2 │ ## @return nothing
+  · ──────────────────
+  ╰────

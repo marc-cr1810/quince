@@ -1,0 +1,42 @@
+# Documentation is `##`; a plain `#` is a comment and always was.
+
+## The distance from the origin.
+##
+## @param x the horizontal offset
+## @param y the vertical offset,
+## which may be negative
+## @return the distance, never negative
+## @throws TypeError when either is not a number
+fn magnitude(x, y) {
+    return math.sqrt(x * x + y * y)
+}
+
+## The number everything is measured against.
+final SCALE = 2
+
+## A point on the plane.
+##
+## Its `op init` documents the arguments; a class takes none of its own.
+class Point {
+    ## Builds one.
+    ##
+    ## @param x how far across
+    ## @param y how far up
+    op init(x, y) {
+        self.x = x
+        self.y = y
+    }
+
+    ## How far this point is from the origin.
+    ##
+    ## @return the distance
+    fn magnitude() {
+        return magnitude(self.x, self.y)
+    }
+}
+
+import math
+
+let p = Point(3, 4)
+print(p.magnitude())
+print(magnitude(6, 8) * SCALE)   ## not documentation — it does not start its line

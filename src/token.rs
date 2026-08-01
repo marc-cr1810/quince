@@ -227,6 +227,31 @@ impl fmt::Display for TokenKind {
     }
 }
 
+/// The `##` lines written immediately above a token.
+///
+/// One entry per line, holding the text after the `##` and the span of the
+/// whole line — so a report about one tag underlines that tag rather than the
+/// paragraph above it.
+///
+/// Raw here on purpose. The lexer's job is to notice that these lines are
+/// documentation rather than commentary; deciding what they *say* is
+/// [`crate::doc`]'s, and it needs the declaration in hand to do it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DocBlock {
+    pub lines: Vec<(String, Span)>,
+}
+
+impl DocBlock {
+    /// Where the block begins, for a report that has nothing more specific to
+    /// point at.
+    pub fn span(&self) -> Span {
+        match (self.lines.first(), self.lines.last()) {
+            (Some((_, first)), Some((_, last))) => first.to(*last),
+            _ => Span::new(0, 0),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Token {
     pub kind: TokenKind,
@@ -237,6 +262,14 @@ pub struct Token {
     /// structure. Recording it per token keeps newlines out of the stream
     /// itself, which would otherwise have to be skipped at every match site.
     pub newline_before: bool,
+    /// The documentation written above this token, if any.
+    ///
+    /// Carried on the token for exactly the reason `newline_before` is. A
+    /// `Doc` token in the stream would have to be skipped at every match site
+    /// in the parser — a hundred places that have no interest in it, any one of
+    /// which could forget. Recording it here means the four declaration sites
+    /// that *do* care ask for it and nothing else changes.
+    pub doc: Option<DocBlock>,
 }
 
 #[cfg(test)]

@@ -1,0 +1,3 @@
+## A cache of results.
+## @return nothing
+let cache = {}
