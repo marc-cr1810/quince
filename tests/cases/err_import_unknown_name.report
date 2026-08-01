@@ -1,0 +1,8 @@
+Error: quince::AttributeError
+
+ × `math` declares nothing called `florr`
+  ╭─[err_import_unknown_name.qn:1:25]
+1 │ from math import floor, florr
+  ·                         ─────
+  ╰────
+  help: did you mean `floor`?

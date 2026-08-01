@@ -10,6 +10,7 @@ pub mod lexer;
 pub mod parser;
 pub mod resolver;
 pub mod show;
+pub mod stdlib;
 pub mod token;
 pub mod value;
 

@@ -24,7 +24,12 @@
       "patterns": [
         {
           "name": "keyword.control.quince",
-          "match": "\\b(if|else|while|for|in|return|try|catch|throw)\\b"
+          "match": "\\b(if|else|while|for|in|return|try|catch|throw|import)\\b"
+        },
+        {
+          "comment": "`from` is not reserved: it is a keyword only where the parser treats it as one, which is at the start of a `from <module> import` and nowhere else.",
+          "name": "keyword.control.quince",
+          "match": "\\bfrom\\b(?=\\s+[A-Za-z_][A-Za-z0-9_]*\\s+import\\b)"
         },
         {
           "name": "keyword.declaration.quince",

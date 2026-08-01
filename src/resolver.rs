@@ -16,7 +16,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ast::{self, Block, Expr, ExprKind, FnDecl, Op, Slot, Stmt, StmtKind};
+use crate::ast::{self, Block, Expr, ExprKind, FnDecl, ImportNames, Op, Slot, Stmt, StmtKind};
 use crate::class::BUILTINS;
 use crate::error::{ErrorKind, QuinceError};
 use crate::token::Span;
@@ -167,6 +167,18 @@ impl Resolver {
                 }
                 StmtKind::Fn { decl, .. } => self.declare(&decl.name, false, stmt.span)?,
                 StmtKind::Class { name, .. } => self.declare_slot(name, false, stmt.span)?,
+                // Through the same check as every other binding, so `import math`
+                // twice, or beside a `let math`, is the one mistake that already
+                // has a sentence for it. Immutable, like a `fn`: rebinding the
+                // name would leave a module loaded and unreachable.
+                StmtKind::Import { module, names, .. } => match names {
+                    ImportNames::Module => self.declare(module, false, stmt.span)?,
+                    ImportNames::Names(names) => {
+                        for name in names {
+                            self.declare(&name.name, false, name.span)?;
+                        }
+                    }
+                },
                 _ => {}
             }
         }
@@ -291,6 +303,23 @@ impl Resolver {
             } => {
                 self.expr(value)?;
                 *slot = Some(self.slot_of(name));
+                Ok(())
+            }
+
+            // Nothing to resolve — an import names no expression and reserves no
+            // slot. What is left is the one rule the grammar cannot state: a
+            // module is loaded once, into the scope of the file that asked for
+            // it, so an import inside a function or a loop would be a load whose
+            // effect depends on whether the code ran. Refused here, where the
+            // scope stack knows the answer.
+            StmtKind::Import { module, .. } => {
+                if !self.scopes.is_empty() {
+                    return Err(declaration(
+                        format!("`{module}` can only be imported at the top level"),
+                        span,
+                    )
+                    .with_help("move this import to the top of the file"));
+                }
                 Ok(())
             }
 

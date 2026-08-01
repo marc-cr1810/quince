@@ -4,7 +4,8 @@ use std::rc::Rc;
 
 use crate::ast::Slot;
 use crate::ast::{
-    BinaryOp, Block, Expr, ExprKind, LogicalOp, Op, Reflect, Stmt, StmtKind, UnaryOp, Var,
+    BinaryOp, Block, Expr, ExprKind, ImportNames, LogicalOp, Op, Reflect, Stmt, StmtKind, UnaryOp,
+    Var,
 };
 use crate::class::{BUILTINS as BUILTIN_TYPES, Builtin, Class, Instance};
 use crate::dict::{Dict, Key, NotAKey};
@@ -13,6 +14,7 @@ use crate::error::{ERROR_KINDS, ErrorKind, QuinceError};
 use crate::heap::{Heap, ObjId, Object};
 use crate::token::{Span, TokenKind};
 use crate::show::Ask;
+use crate::stdlib;
 use crate::value::{BoundMethod, Function, Native, Value};
 
 /// Guards against a runaway recursion taking the process down with a native
@@ -196,6 +198,17 @@ pub struct Interp {
     /// A root, because the functions in here are heap objects reachable from
     /// nowhere else — the class does not hold them, which is the entire point.
     extensions: HashMap<(ObjId, String), Value>,
+    /// Every stdlib module built so far, keyed by its name.
+    ///
+    /// A cache, and the thing that makes a module *one* object: `import math` in
+    /// two places has to hand back the same scope, or two copies of `math.pi`
+    /// would exist and `math` imported twice would not equal itself.
+    ///
+    /// A root, for the same reason `extensions` is one — between the build and
+    /// the binding there is nothing else holding it, and after the binding it is
+    /// held only by whichever modules imported it, which is not the same as
+    /// being held forever.
+    stdlib_modules: HashMap<&'static str, ObjId>,
     /// The class each [`ErrorKind`] reifies into, captured once at startup.
     ///
     /// Held here rather than looked up in globals at `catch` time because `Error`
@@ -245,6 +258,7 @@ impl Interp {
             depth: 0,
             out,
             extensions: HashMap::new(),
+            stdlib_modules: HashMap::new(),
             error_classes: Vec::new(),
         };
         interp.install_error_classes();
@@ -378,8 +392,13 @@ impl Interp {
         if !self.heap.should_collect() {
             return;
         }
-        let mut roots =
-            Vec::with_capacity(self.scopes.len() + self.temps.len() + self.extensions.len() + 1);
+        let mut roots = Vec::with_capacity(
+            self.scopes.len()
+                + self.temps.len()
+                + self.extensions.len()
+                + self.stdlib_modules.len()
+                + 1,
+        );
         roots.push(self.globals);
         roots.extend(&self.scopes);
         roots.extend(self.temps.iter().filter_map(Value::handle));
@@ -387,6 +406,11 @@ impl Interp {
         // extension's function is not in the class's table, so the class does not
         // keep it alive. Its captured scope comes along through the function.
         roots.extend(self.extensions.values().filter_map(Value::handle));
+        // A module is reachable from whoever imported it, but the cache outlives
+        // any particular importer — and `from math import floor` binds the
+        // function without binding the module it came from, which leaves the
+        // scope holding it reachable from here and nowhere else.
+        roots.extend(self.stdlib_modules.values());
         self.heap.collect(&roots);
     }
 
@@ -597,6 +621,48 @@ impl Interp {
                         env,
                     })));
                     self.extensions.insert((id, decl.name.clone()), func);
+                }
+                Ok(Flow::Normal)
+            }
+
+            StmtKind::Import {
+                module,
+                module_span,
+                names,
+            } => {
+                let loaded = self.load_module(module, *module_span)?;
+                let into = env::module_of(&self.heap, env);
+
+                match names {
+                    ImportNames::Module => {
+                        self.heap
+                            .globals_mut(into)
+                            .declare(module, Value::Module(loaded), false);
+                    }
+                    ImportNames::Names(names) => {
+                        // Every name read before any is bound, so a list whose
+                        // third entry is not there leaves the scope exactly as it
+                        // found it. The same rule `extend` follows, and for the
+                        // same reason: a statement that reports an error and
+                        // changes the program anyway is the worst of both.
+                        let mut values = Vec::with_capacity(names.len());
+                        for name in names {
+                            let value = self
+                                .heap
+                                .globals(loaded)
+                                .get(&name.name)
+                                .cloned()
+                                .ok_or_else(|| {
+                                    self.not_in_module(module, &name.name, name.span, loaded)
+                                })?;
+                            values.push(value);
+                        }
+                        for (name, value) in names.iter().zip(values) {
+                            self.heap
+                                .globals_mut(into)
+                                .declare(&name.name, value, false);
+                        }
+                    }
                 }
                 Ok(Flow::Normal)
             }
@@ -908,6 +974,58 @@ impl Interp {
             at = self.heap.class(id).parent;
         }
         false
+    }
+
+    /// The scope of the module called `name`, building it if this is the first
+    /// time it has been asked for.
+    ///
+    /// Only the stdlib for now. A file beside the importer is the other half and
+    /// is what the message below promises nothing about.
+    fn load_module(&mut self, name: &str, span: Span) -> Result<ObjId, QuinceError> {
+        if let Some(id) = self.stdlib_modules.get(name) {
+            return Ok(*id);
+        }
+
+        let Some(module) = stdlib::module_named(name) else {
+            let mut err = QuinceError::new(format!("there is no module called `{name}`"), span)
+                .with_kind(ErrorKind::Name);
+            let names: Vec<&str> = stdlib::MODULES.iter().map(|m| m.name).collect();
+            err = match crate::error::did_you_mean(name, names.clone()) {
+                Some(suggestion) => err.with_help(format!("did you mean `{suggestion}`?")),
+                None => err.with_help(format!("the modules that exist are {}", names.join(", "))),
+            };
+            return Err(err);
+        };
+
+        let id = stdlib::build(module, &mut self.heap);
+        self.stdlib_modules.insert(module.name, id);
+        Ok(id)
+    }
+
+    /// A name a module does not declare, reached either way it can be asked for.
+    ///
+    /// `math.florr` and `from math import florr` are the same mistake and get the
+    /// same sentence, which is worth arranging deliberately: the two spellings
+    /// reach the same lookup, and `no_attr` would otherwise report the first as
+    /// "module has no method `florr`" — naming the type rather than the module,
+    /// and calling a name a method when a module has none.
+    ///
+    /// [`ErrorKind::Attr`] because that is what this is: a scope that exists,
+    /// asked for something it does not have.
+    fn not_in_module(&self, module: &str, name: &str, span: Span, loaded: ObjId) -> QuinceError {
+        let mut err = QuinceError::new(format!("`{module}` declares nothing called `{name}`"), span)
+            .with_kind(ErrorKind::Attr);
+        let declared: Vec<String> = self
+            .heap
+            .globals(loaded)
+            .iter()
+            .map(|(key, _)| key.to_string())
+            .collect();
+        let refs: Vec<&str> = declared.iter().map(|s| s.as_str()).collect();
+        if let Some(suggestion) = crate::error::did_you_mean(name, refs) {
+            err = err.with_help(format!("did you mean `{suggestion}`?"));
+        }
+        err
     }
 
     /// Stores a freshly declared value in the slot the resolver picked for it.
@@ -1952,7 +2070,12 @@ impl Interp {
         if let Value::Module(id) = receiver {
             return match self.heap.globals(*id).get(name) {
                 Some(value) => Ok(Attr::Field(value.clone())),
-                None => Err(self.no_attr(receiver, name, target_span, name_span, expr_span)),
+                None => Err(self.not_in_module(
+                    self.heap.globals(*id).name().unwrap_or("module"),
+                    name,
+                    name_span,
+                    *id,
+                )),
             };
         }
 
@@ -2361,6 +2484,12 @@ impl Interp {
             // since two equal values must land in the same bucket.
             (Value::Class(a), Value::Class(b)) => a == b,
             (Value::Instance(a), Value::Instance(b)) => a == b,
+            // By identity, like a class, and the cache in `load_module` is what
+            // makes that useful rather than pedantic: a module is built once, so
+            // two imports of `math` are the same object and compare equal. If it
+            // were built per import, this would answer `false` for two things a
+            // programmer has every reason to call the same.
+            (Value::Module(a), Value::Module(b)) => a == b,
             _ => false,
         };
         Ok(equal)

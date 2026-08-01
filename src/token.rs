@@ -56,6 +56,9 @@ pub enum TokenKind {
     Let,
     Final,
     Const,
+    /// `import` is reserved; the `from` that may precede it is not. See
+    /// [`KEYWORDS`].
+    Import,
     If,
     Else,
     While,
@@ -108,10 +111,16 @@ pub enum TokenKind {
 /// there and missing here is a keyword the completer never offers and the
 /// highlighter's own test never checks, which is what `extend` was until the
 /// class modifiers arrived and the omission was noticed beside them.
+///
+/// `from` is deliberately absent. `from math import floor` needs the word and
+/// reserving it would cost `op init(from, to)`, which is how anyone writes a
+/// range and which the corpus already had. It is recognised by the parser at the
+/// one position where it can mean anything — the start of a statement, with an
+/// `import` two tokens later — and is an ordinary identifier everywhere else.
 pub const KEYWORDS: &[&str] = &[
     "fn", "op", "class", "extends", "extend", "self", "super", "let", "final", "complete",
-    "sealed", "const", "if", "else", "while", "for", "in", "return", "try", "catch", "throw",
-    "true", "false", "nil",
+    "sealed", "const", "import", "if", "else", "while", "for", "in", "return", "try", "catch",
+    "throw", "true", "false", "nil",
 ];
 
 impl TokenKind {
@@ -130,6 +139,7 @@ impl TokenKind {
             "complete" => TokenKind::Complete,
             "sealed" => TokenKind::Sealed,
             "const" => TokenKind::Const,
+            "import" => TokenKind::Import,
             "if" => TokenKind::If,
             "else" => TokenKind::Else,
             "while" => TokenKind::While,
@@ -168,6 +178,7 @@ impl fmt::Display for TokenKind {
             TokenKind::Complete => write!(f, "complete"),
             TokenKind::Sealed => write!(f, "sealed"),
             TokenKind::Const => write!(f, "const"),
+            TokenKind::Import => write!(f, "import"),
             TokenKind::If => write!(f, "if"),
             TokenKind::Else => write!(f, "else"),
             TokenKind::While => write!(f, "while"),

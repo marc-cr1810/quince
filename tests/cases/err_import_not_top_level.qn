@@ -1,0 +1,4 @@
+fn helper() {
+    import math
+    return math.floor(1.5)
+}

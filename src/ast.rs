@@ -473,6 +473,29 @@ impl Op {
     }
 }
 
+/// What an [`StmtKind::Import`] binds.
+///
+/// The two forms differ in what lands in the scope and in nothing else: both
+/// name one module, and both load it exactly once. `from` is not a second
+/// mechanism, it is a choice about how many names to spend.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ImportNames {
+    /// `import math` — the module itself, under the name it was imported by.
+    Module,
+    /// `from math import floor, ceil` — each name, bound to what the module
+    /// declared under it.
+    Names(Vec<ImportName>),
+}
+
+/// One name in a `from … import` list.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImportName {
+    pub name: String,
+    /// Its own span, so a module that declares three of the four names asked for
+    /// can have the caret put under the fourth.
+    pub span: Span,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct FnDecl {
     pub name: String,
@@ -641,6 +664,21 @@ pub enum StmtKind {
         /// Never an `op`, which the parser refuses. An extension may add to a
         /// type; it may not change how the language dispatches on it.
         methods: Vec<Rc<FnDecl>>,
+    },
+    /// `import math`, or `from math import floor, ceil`.
+    ///
+    /// No `slot`, unlike every other binding form. An import is valid only at
+    /// the top level — the resolver refuses one anywhere else — and a top-level
+    /// name has no slot to reserve, so the evaluator declares into the importing
+    /// module's scope by name. The field would be `Some(Slot::Global)` at every
+    /// import there will ever be.
+    Import {
+        /// The module named after `import`, or after `from`.
+        module: String,
+        /// Where it was named, so a report about the *module* underlines the
+        /// word naming it and not the list of names that follows.
+        module_span: Span,
+        names: ImportNames,
     },
     If {
         cond: Expr,

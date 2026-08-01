@@ -1,6 +1,6 @@
 use crate::ast::{
-    self, BinaryOp, BindKind, Block, Expr, ExprKind, FnDecl, LogicalOp, Op, Openness, Param, Stmt,
-    StmtKind, UnaryOp, Var,
+    self, BinaryOp, BindKind, Block, Expr, ExprKind, FnDecl, ImportName, ImportNames, LogicalOp,
+    Op, Openness, Param, Stmt, StmtKind, UnaryOp, Var,
 };
 use crate::error::{ErrorKind, QuinceError};
 use crate::token::{Span, Token, TokenKind};
@@ -97,6 +97,12 @@ impl Parser {
             .with_help("use `fn` for a function that is called by name")),
             TokenKind::Class => self.class_stmt(),
             TokenKind::Extend => self.extend_stmt(),
+            TokenKind::Import => self.import_stmt(),
+            // `from` is not reserved — see `KEYWORDS`. It introduces an import
+            // only here, at the start of a statement with an `import` two tokens
+            // along, and `from` is an ordinary name everywhere else including in
+            // the very next line of this file.
+            TokenKind::Ident(_) if self.at_from_import() => self.import_stmt(),
             TokenKind::If => self.if_stmt(),
             TokenKind::While => self.while_stmt(),
             TokenKind::For => self.for_stmt(),
@@ -381,6 +387,54 @@ impl Parser {
                 target: Var::new(target),
                 target_span,
                 methods,
+            },
+            span: start.to(end),
+        })
+    }
+
+    /// `import math` and `from math import floor, ceil`.
+    ///
+    /// One function for both, because they are one statement written two ways —
+    /// the module is named either side of the `import`, and which side it lands
+    /// on decides only what gets bound.
+    fn import_stmt(&mut self) -> Result<Stmt, QuinceError> {
+        let start = self.peek().span;
+        let from = self.advance().kind != TokenKind::Import;
+
+        if !from {
+            let (module, module_span) = self.expect_ident("after `import`")?;
+            self.end_of_statement()?;
+            return Ok(Stmt {
+                kind: StmtKind::Import {
+                    module,
+                    module_span,
+                    names: ImportNames::Module,
+                },
+                span: start.to(module_span),
+            });
+        }
+
+        let (module, module_span) = self.expect_ident("after `from`")?;
+        self.expect(TokenKind::Import, "after the module being imported from")?;
+
+        let mut names = Vec::new();
+        loop {
+            let (name, span) = self.expect_ident("in an import list")?;
+            names.push(ImportName { name, span });
+            if !self.eat(&TokenKind::Comma) {
+                break;
+            }
+        }
+        // Unreachable — the loop above runs at least once — but the span below
+        // is built from the last name and the compiler cannot know that.
+        let end = names.last().map_or(module_span, |last| last.span);
+        self.end_of_statement()?;
+
+        Ok(Stmt {
+            kind: StmtKind::Import {
+                module,
+                module_span,
+                names: ImportNames::Names(names),
             },
             span: start.to(end),
         })
@@ -785,6 +839,21 @@ impl Parser {
         self.tokens
             .get(self.pos + 1)
             .is_some_and(|token| std::mem::discriminant(&token.kind) == std::mem::discriminant(kind))
+    }
+
+    /// Whether the statement starting here is `from <module> import …`.
+    ///
+    /// The deeper of the parser's two lookaheads, and it exists for one word.
+    /// `from` is not reserved, so nothing about the first token says this is an
+    /// import; the `import` two along is what says it. Deciding any earlier would
+    /// mean taking the word, and `op init(from, to)` is how anyone writes a
+    /// range.
+    fn at_from_import(&self) -> bool {
+        matches!(&self.peek().kind, TokenKind::Ident(name) if name == "from")
+            && self
+                .tokens
+                .get(self.pos + 2)
+                .is_some_and(|token| token.kind == TokenKind::Import)
     }
 
     /// Consumes and returns the current token, parking on `Eof` at the end.
