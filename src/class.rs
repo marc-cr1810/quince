@@ -134,9 +134,10 @@ pub struct BuiltinType {
 /// A class's [`Op`] table, boxed.
 ///
 /// Boxed because `Object` is an enum in an arena of `Option<Object>`, so its
-/// largest variant sizes *every* heap slot — a list, an env, an instance. Twenty-one
-/// inline slots took that from 104 bytes to 592, making every object in the heap
-/// five times its size to carry a table only classes have.
+/// largest variant sizes *every* heap slot — a list, an env, an instance. Inlining
+/// the table took that from 104 bytes to 592 when there were twenty-one of them,
+/// making every object in the heap five times its size to carry a table only
+/// classes have. There are twenty-three now, and the argument only grows.
 ///
 /// The array is boxed rather than the whole [`Class`], which would be the easier
 /// change: `name` and `methods` are read on every method call, and putting them

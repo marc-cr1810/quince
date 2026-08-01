@@ -1128,8 +1128,8 @@ in its chain — the case it existed for is now the ordinary one — and with it
 still has one member, and `class Point { op add(other) { … } }` is not a thing that can be
 written. What this does is let a class extending a builtin reach *its base's* operators:
 `Username('marc') == 'marc'` works because `string`'s `==` does the comparing, and
-`Box(1) + Box(1)` is still refused with no way to change that. The slots are still owed; see
-the Roadmap.
+`Box(1) + Box(1)` is still refused with no way to change that. The slots came next and are
+what lifts that refusal — see What a class may answer for below.
 
 Methods had one choke point. Operators have none: nothing routes through a single place the
 way `args.insert(0, receiver)` does. So there is one helper, applied deliberately:
@@ -1282,6 +1282,180 @@ takes, so `op eq(a, b)` should be an error in the class body rather than at the 
 comparison — but `init` takes any number, so the check would have had nothing to act on.
 It arrives with the first fixed-arity operation, for the reason Sequencing above already
 records: a commit whose content nothing exercises is worse than the later diff it avoids.
+
+## What a class may answer for
+
+Twenty-two ops beside `init`, landed in four steps: what a class converts to and whether
+it is true; what equals it and how it orders; what the arithmetic operators mean to it;
+and how it behaves as a collection. A class that declares all of them is indistinguishable
+from a builtin at every site the *language* asks a value a question — which is the
+requirement the whole design was built to meet. A `Range` holding two numbers answers
+`len`, `[i]`, `in` and `for` without holding a collection at all.
+
+### One shape, at every site
+
+```rust
+if let Some(method) = self.slot(value, Op::Bool) {
+    let answer = self.call_op(method, value, Vec::new())?;
+    return match answer.base(&self.heap) {
+        Value::Bool(b) => Ok(*b),
+        other => Err(self.op_returned(Op::Bool, value, "a bool", other)),
+    };
+}
+// otherwise the payload, otherwise refuse
+```
+
+Ask the class, check what came back, fall through to the payload, refuse. Thirteen sites
+follow it: `is_truthy`, `display_styled`, `repr_styled`, `construct_builtin`, `equals`,
+`compare`, `arith`, `unary`, `index_get`, the index arm of `assign`, `contains`,
+`exec_for`, and the `len` native.
+
+Four ask the class in order to *refuse better*, which is the opposite direction and was
+not predicted: `key_of` refuses a class that declares `op eq`, `slice` refuses one that
+declares `op get`, and `partly_ordered` and `only_asks_the_left` each ask the operand that
+was *not* consulted, so they can say why it was not.
+
+Every op is asked **before** the payload is unwrapped, without exception. A class
+extending `string` that declares `op string` has to beat the string it carries, or
+declaring it would do nothing at all — and the same argument applies to every other op,
+so none of them gets to be the exception.
+
+### What an op must answer with
+
+| op | must answer | checked |
+| --- | --- | --- |
+| `bool` | a bool | yes |
+| `string`, `int`, `float`, `list`, `dict` | its own type | yes |
+| `eq`, `lt`, `gt`, `contains` | a bool | yes |
+| `cmp` | an int, read for its sign | yes |
+| `len` | an int | yes |
+| `iter` | a list | yes |
+| `add` … `rem`, `neg`, `get` | anything | no |
+| `set` | anything, and it is discarded | no |
+
+Nothing is coerced. `op bool` answering with an empty list would mean the emptiness of
+that list quietly deciding an `if`, one indirection away from anything the reader can see.
+
+The unchecked half is not an oversight. `a + b` has no type it has to be — a class
+extending `list` whose `+` appends returns another of itself, which is the entire point of
+declaring it — and `x[i] = v` is worth `v` the way every other assignment is, so what
+`op set` returns has nowhere to go. `op len` is checked for being an int but not for being
+positive: nothing indexes with the answer, so an odd length is the class's own answer to
+its own question.
+
+### Comparison follows C++, not either Python
+
+Four ops, and the shape is `operator<=>`:
+
+| you write | you get | reached from the right? |
+| --- | --- | --- |
+| `op eq` | `==`, `!=`, and searching a list | yes, symmetric |
+| `op cmp` | `<` `<=` `>` `>=` | yes, with the sign inverted |
+| `op lt` | `<`, beating `cmp` | no |
+| `op gt` | `>`, beating `cmp` | no |
+
+`op cmp` is the only op that can answer `<=` and `>=`. A class declaring just `op lt` gets
+`<` and nothing else, exactly as writing `operator<` in C++ leaves `a <= b` a compile
+error. Deriving `a <= b` from `not (a > b)` would assume the order is total, and a
+three-way answer exists precisely so a class can decline to be: `{1} < {2}` and
+`{2} < {1}` are both false in Python and the two sets are not equal, which no single
+`-1/0/1` can express. That is also why `op lt` and `op gt` exist beside `cmp` rather than
+being derived from it.
+
+Python 2's `__cmp__` was this exact shape and Python 3 deleted it in favour of six
+methods. The difference that makes it worth having here is that `cmp` is not the *only*
+way to answer — a class that cannot place itself in a total order writes `op lt` and stops.
+
+`op eq` and `op cmp` are reached from either side, because `==` cannot depend on which
+order it was written in, and a reflected `<=>` only needs its sign turned around.
+`op lt` and `op gt` are not, which is C++ again: a reversed candidate exists for
+`operator<=>` and not for a plain `operator<`.
+
+Getting `<=` wrong is the one mistake this makes easy, so it has a diagnostic of its own
+rather than falling through to `cannot compare`, which reads as if the op had been ignored:
+
+```
+× `<=` needs `op cmp`, which Version does not declare
+  help: `op lt` answers `<` alone. `op cmp` answers all four comparisons at once,
+        returning a negative int, zero, or a positive one
+```
+
+### Arithmetic asks the left operand only
+
+`2 - Money(3)` reaching `Money`'s `sub` computes `3 - 2` and is wrong by a sign, with
+nothing to catch it. So all seven arithmetic ops are `Reflect::Never` and only the left
+operand's class is asked — the same answer C++ gives a class with a member `operator-`
+and no free function.
+
+Held as data on the op rather than as branches inside `binary`, so adding one states its
+rule in the same exhaustive match that gives it a name. That is what made this step cheap:
+`reflect()` had already been written, and the arithmetic wiring changed one file.
+
+Writing the operands the other way round then becomes the easy mistake, and gets the same
+treatment `<=` did — the plain type error's advice to "change the types to be compatible"
+is advice to go and rewrite a class that is already correct:
+
+```
+× `op sub` is Money's, and the value on the left is the one asked
+  help: reaching Money from the right would hand it the two values the other way
+        round, so it is not asked — convert the int, or swap the operands
+```
+
+### `op eq` costs the class its use as a dict key
+
+`==` and hashing were already one decision — see that section above, where a subclass of
+`string` had to hash as the string it carries. Declaring `op eq` is the other end of it: a
+`Key` holds no handle and so cannot run a method, which means two values the class calls
+equal would hash apart and a dict would hold both. Refused at `key_of`, before the payload
+unwrap, with the reason stated. Python enforces the same rule by setting `__hash__` to
+`None`, and it is not a policy in either language — it is what a hash table is.
+
+### `const` is checked before `op set` runs
+
+A frozen object must not get to *observe* a write that is refused anyway. An `op set` that
+logged, counted or raised would have happened, and the assignment it belonged to would
+still have failed. So the check is on the instance, before the call, rather than on the
+payload the op might eventually write through.
+
+The corpus case proves the ordering by having the op push to a list that is *not* frozen
+with the instance, so an op that ran leaves a mark whether or not its own write succeeded.
+Moving the check after the call puts a `"b"` in that list, which is what makes the case a
+guard rather than a passing assertion.
+
+### `op get` answers one index
+
+Not `x[a:b]`. There is no value in the language meaning "1 to 3" — slicing is a `Slice`
+node precisely because inventing a range value to carry two optional ints was the worse
+trade, see v0.3 — so there is nothing to hand a one-argument op. Slicing a class that
+declares `op get` is therefore refused, rather than reaching past the op to the list
+underneath, which is the one thing declaring it said not to do. `Op::Get`'s doc comment
+claimed it covered both and was simply wrong; it is now the place that says why it does not.
+
+### The prediction about a list that checks itself
+
+When `op` landed, this file predicted that "every operation after the first is a line
+added to a list which already checks itself". Half of that is redeemed and half is
+retracted, and the halves are worth separating.
+
+**The table did what it was for.** `Op` is a closed set, and `name`, `arity` and `reflect`
+are exhaustive matches over it, so no op could be added without stating what it is called,
+how many parameters it takes, and whether the right operand may answer. `Op::COUNT` sizes
+the slot array, so nothing had to be remembered. Adding `Op::Lt` and `Op::Gt` really was
+lines in a list, and the compiler asked the three questions that mattered.
+
+**The call sites were not lines in a list, and could not have been.** The sites are not
+uniform: `binary` has two operands and a reflection question, `len` is a native and unwraps
+for itself, `set` has a `const` check that must precede it, `iter` has a return type the
+loop then consumes. Three ops needed a diagnostic written specifically for the mistake they
+make easy. Measured in source lines, the four steps cost 360, 245, 96 and 131. The 96 is
+the arithmetic — seven ops at once, and the cheapest of the four precisely because
+`reflect()` already existed and the two sites it needed were already open.
+
+The earlier claim that the thirteen payload-unwrap sites would be the thirteen slot sites
+held better: thirteen of the fourteen gained one. `list_index` did not, because `op get` is
+asked one level above it. And one site the unwrap list never had appeared — the index arm
+of `assign`, which is the only op that *writes*, and the only one whose ordering against
+`const` had to be decided.
 
 ## Bindings — `let`, `final`, `const`
 
@@ -1691,8 +1865,8 @@ and `in`. Adding them turned up a use-after-free in the collector that had been
 there since it landed — see Collection — so the root set grew to cover intermediate
 expression values at the same time.
 
-Still missing: the protocol slots that would let a user class decide its own truthiness,
-printing, equality, indexing, or iteration. `try`/`catch`/`throw` landed in v0.5. `push`, `keys`,
+The protocol slots have since landed — a user class decides its own truthiness, printing,
+equality, ordering, arithmetic, indexing and iteration. `try`/`catch`/`throw` landed in v0.5. `push`, `keys`,
 `values`, and `remove` began as free functions standing in for methods; dispatch landed
 and they moved onto their types, leaving `print`, `len`, and `type` as the only globals.
 There are no tuples, which is why iterating a dict yields keys rather than pairs. The
@@ -1731,7 +1905,8 @@ Classes, methods, inheritance, `self`.
 storable in a list, passable to a function — and `extends` plus `super` complete the
 milestone. What v0.4 does *not* bring is protocol slots: a class cannot yet decide its
 own truthiness, printing, equality, indexing, or iteration. Those are one coherent
-piece of work and are listed under v0.5 rather than left implied here.
+piece of work and were listed under v0.5 rather than left implied here — where they
+have since landed.
 
 **v0.5 — robustness**
 `try`/`catch` and span-accurate diagnostics everywhere. GC is done.
@@ -1808,23 +1983,29 @@ and that was wrong in a way worth recording rather than quietly correcting. Lett
 reach `string`'s `==` and letting a class define its own `==` are different features that
 happen to touch the same functions. `Op` still has exactly one member. The mistake was
 possible because both get described as "making operators work on instances", and the tell that
-it was a mistake is that nothing was added to `OPS` — the prediction made when `op` landed,
-that every operation after the first would be a line added to a list that already checks
-itself, is still unredeemed.
+it was a mistake is that nothing was added to `OPS`.
 
 The thirteen unwrap sites are also the thirteen sites the slots will need, so whichever of the
 two went first, the second revisits them. An earlier draft claimed the ordering avoided
-writing the unwrapping twice; it does not, and that claim was never tested.
+writing the unwrapping twice; it does not, and that claim was never tested. It has since been
+checked against what happened: thirteen of the fourteen named sites did gain a slot, and one
+the list never had — the index arm of `assign` — appeared with `op set`. The prediction from
+`op`'s own section, that every operation after the first would be a line added to a list that
+already checks itself, came out half right; What a class may answer for above separates the
+half that held from the half that did not.
 
 What was genuinely unexpected is how much the implicit init *removed* — the "extends a builtin
 but has no `op init`" rule and the resolver's `inits` set both went, because the case they
 guarded became the ordinary one.
 
-What v0.5 still owes, in order: the protocol slots, then `extend`, then the diagnostics sweep.
-The slots are the piece this is all still building toward — a class deciding its own
-truthiness, printing, equality, indexing and iteration, each as an `op` beside `init`. They
-arrive whole or not at all, and each of the thirteen sites gains the same shape: ask the class,
-then fall back to the payload, then refuse.
+The protocol slots were the piece this was all building toward, and they are **done** — a
+class decides its own truthiness, printing, conversion, equality, ordering, arithmetic,
+indexing and iteration, each as an `op` beside `init`. The predicted shape mostly held: ask
+the class, then fall back to the payload, then refuse, at ten of the sites. Three ask the
+class in order to refuse *better*, which nothing predicted. See What a class may answer for
+above, which is also where the accounting of that prediction lives.
+
+What v0.5 still owes, in order: `extend`, then the diagnostics sweep.
 
 Subclassing a builtin went before the slots because it is what a user asked for, not because
 the ordering saved anything. The two touch the same functions — `is_truthy`, `equals`,
@@ -1848,6 +2029,13 @@ indexing, and iteration stop being closed matches over `Value` and gain one arm 
 asks the class. Deferred to a single pass on purpose: doing them one at a time means
 five separate decisions about what a class may override and no way to keep them
 consistent.
+
+They landed in four steps rather than one, and the reason is worth keeping: the *decisions*
+were made together — what an op may return, when it is asked, whether the right operand
+answers — while the wiring went in a family at a time, each with its own corpus case. A
+single commit touching every operator at once would have been unreviewable and would have
+put the four return-type rules beyond the reach of the test that proves each one bites.
+What a class may answer for above is the record.
 
 One rule for the diagnostics sweep, worth writing down before it starts: **"protocol
 slot" is a word for this document, not for a report.** Implementation vocabulary — slot,

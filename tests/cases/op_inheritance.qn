@@ -1,0 +1,38 @@
+# An op is a method, and inherits like one. The slots are copied down when the
+# class is built rather than walked at each use, so this is the case that would
+# notice if a copy ever went the wrong way.
+class Base {
+    op init(n) { self.n = n }
+    op string() { return "Base " + string(self.n) }
+    op eq(other) { return self.n == other.n }
+}
+
+# Declares nothing, answers everything.
+class Kid extends Base {}
+print(Kid(1))
+print(Kid(1) == Kid(1))
+
+# A declaration beats the copy it inherited.
+class Loud extends Base {
+    op string() { return "LOUD " + string(self.n) }
+}
+print(Loud(2))
+
+# And the parent's is still reachable by name, the same way an ordinary
+# overridden method is.
+class Quiet extends Base {
+    op string() { return "(" + super.string() + ")" }
+}
+print(Quiet(3))
+
+# An op is ordinary Quince code. It can throw, and the throw is catchable at the
+# expression that triggered it — nothing about being called by the language
+# rather than by a program changes how the error travels.
+class Broken {
+    op string() { throw Error("no string for you") }
+}
+try {
+    print(Broken())
+} catch e {
+    print("caught:", e.message)
+}
