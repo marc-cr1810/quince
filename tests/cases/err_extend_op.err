@@ -1,1 +1,1 @@
-`int` cannot be given an `op` by an extension
+`int` natively supports `op bool` and cannot be overridden by an extension

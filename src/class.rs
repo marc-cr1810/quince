@@ -118,6 +118,80 @@ impl Builtin {
             Builtin::Nil | Builtin::Function | Builtin::Class | Builtin::Module => None,
         }
     }
+
+    /// Whether this builtin type natively implements/supports a specific [`Op`].
+    pub fn natively_supports_op(self, op: Op) -> bool {
+        match self {
+            Builtin::Int | Builtin::Float => matches!(
+                op,
+                Op::Add
+                    | Op::Sub
+                    | Op::Mul
+                    | Op::Div
+                    | Op::FloorDiv
+                    | Op::Rem
+                    | Op::Neg
+                    | Op::Eq
+                    | Op::Cmp
+                    | Op::Lt
+                    | Op::Gt
+                    | Op::Bool
+                    | Op::Int
+                    | Op::Float
+                    | Op::Str
+                    | Op::Init
+            ),
+            Builtin::Str => matches!(
+                op,
+                Op::Add
+                    | Op::Eq
+                    | Op::Cmp
+                    | Op::Lt
+                    | Op::Gt
+                    | Op::Len
+                    | Op::Get
+                    | Op::Contains
+                    | Op::Iter
+                    | Op::Str
+                    | Op::Bool
+                    | Op::Init
+            ),
+            Builtin::List => matches!(
+                op,
+                Op::Add
+                    | Op::Eq
+                    | Op::Len
+                    | Op::Get
+                    | Op::Set
+                    | Op::Contains
+                    | Op::Iter
+                    | Op::List
+                    | Op::Bool
+                    | Op::Str
+                    | Op::Init
+            ),
+            Builtin::Dict => matches!(
+                op,
+                Op::Eq
+                    | Op::Len
+                    | Op::Get
+                    | Op::Set
+                    | Op::Contains
+                    | Op::Iter
+                    | Op::Dict
+                    | Op::Bool
+                    | Op::Str
+                    | Op::Init
+            ),
+            Builtin::Bool => matches!(
+                op,
+                Op::Bool | Op::Str | Op::Int | Op::Float | Op::Eq | Op::Init
+            ),
+            Builtin::Nil | Builtin::Function | Builtin::Class | Builtin::Module => {
+                matches!(op, Op::Bool | Op::Str | Op::Eq)
+            }
+        }
+    }
 }
 
 /// Seed data for one builtin type: what it is called and what it can do.

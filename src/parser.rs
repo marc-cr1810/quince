@@ -398,19 +398,9 @@ impl Parser {
             // Refused here rather than at the class, because everything the check
             // needs is in hand: the keyword and its span, before a body is parsed.
             // The same reason `op` at the top level is caught in this file.
-            if self.check(&TokenKind::Op) {
-                return Err(declaration(
-                    format!("`{target}` cannot be given an `op` by an extension"),
-                    self.peek().span,
-                )
-                .with_help(
-                    "an extension adds methods a program calls by name — an `op` decides what \
-                     the language itself does with every value of the type, everywhere",
-                ));
-            }
-            if !self.check(&TokenKind::Fn) {
+            if !self.check(&TokenKind::Fn) && !self.check(&TokenKind::Op) {
                 return Err(syntax(
-                    format!("expected a method, found {}", self.peek().kind),
+                    format!("expected a method or op, found {}", self.peek().kind),
                     self.peek().span,
                 ));
             }

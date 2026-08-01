@@ -293,6 +293,13 @@ impl Heap {
         }
     }
 
+    pub fn class_mut(&mut self, id: ObjId) -> &mut Class {
+        match self.get_mut(id) {
+            Object::Class(class) => class,
+            other => panic!("expected a class, found {other:?}"),
+        }
+    }
+
     pub fn instance(&self, id: ObjId) -> &Instance {
         match self.get(id) {
             Object::Instance(instance) => instance,

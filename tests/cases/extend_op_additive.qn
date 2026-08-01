@@ -1,0 +1,16 @@
+# Non-native op extensions are allowed when the target type does not natively support the operator.
+extend dict {
+    op mul(n) {
+        let result = {}
+        let keys = self.keys()
+        for k in keys {
+            result[k] = self[k] * n
+        }
+        return result
+    }
+}
+
+let d = {"a": 2, "b": 5}
+let scaled = d * 3
+print(scaled["a"])
+print(scaled["b"])

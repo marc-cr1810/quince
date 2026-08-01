@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use crate::ast::Slot;
 use crate::ast::{
-    BinaryOp, Block, Expr, ExprKind, ImportNames, LogicalOp, Op, Reflect, Stmt, StmtKind, UnaryOp,
+    BinaryOp, Block, Expr, ExprKind, FnDecl, ImportNames, LogicalOp, Op, Reflect, Stmt, StmtKind, UnaryOp,
     Var,
 };
 use crate::class::{BUILTINS as BUILTIN_TYPES, Builtin, Class, Instance};
@@ -763,7 +763,7 @@ impl Interp {
                 // half-applied extension would be the worst of both: a program
                 // that reported an error and changed behaviour anyway.
                 for decl in methods {
-                    self.may_extend(id, &decl.name, *target_span)?;
+                    self.may_extend(id, decl, *target_span)?;
                 }
 
                 // Nothing here reaches a safe point, so the functions are safe
@@ -774,7 +774,10 @@ impl Interp {
                         decl: Rc::clone(decl),
                         env,
                     })));
-                    self.extensions.insert((id, decl.name.clone()), func);
+                    self.extensions.insert((id, decl.name.clone()), func.clone());
+                    if let Some(op) = decl.op {
+                        self.heap.class_mut(id).slots[op.index()] = Some(func);
+                    }
                 }
                 Ok(Flow::Normal)
             }
@@ -2547,7 +2550,8 @@ impl Interp {
     /// library that has to keep growing without breaking callers. Quince has nine
     /// builtin types with single-digit method counts, so the loud answer is
     /// affordable here and would not be there.
-    fn may_extend(&self, id: ObjId, name: &str, span: Span) -> Result<(), QuinceError> {
+    fn may_extend(&self, id: ObjId, decl: &FnDecl, span: Span) -> Result<(), QuinceError> {
+        let name = &decl.name;
         let type_name = || self.heap.class(id).name.clone();
         // First, because it is the only one of the three that is about the type
         // rather than about the name being added: a closed type refuses the block,
@@ -2565,7 +2569,25 @@ impl Interp {
                 type_name()
             )));
         }
-        if self.heap.class(id).method(name, &self.heap).is_some() {
+
+        if let Some(op) = decl.op {
+            let class = self.heap.class(id);
+            let natively_supported = if let Some(builtin) = class.builtin {
+                builtin.natively_supports_op(op)
+            } else {
+                false
+            };
+            if natively_supported || class.slot(op).is_some() {
+                return Err(QuinceError::new(
+                    format!("`{}` natively supports `op {}` and cannot be overridden by an extension", type_name(), op.name()),
+                    span,
+                )
+                .with_kind(ErrorKind::Type)
+                .with_help(
+                    "an extension may only add ops that the type does not already natively support",
+                ));
+            }
+        } else if self.heap.class(id).method(name, &self.heap).is_some() {
             return Err(QuinceError::new(
                 format!("{} already has a method `{name}`", type_name()),
                 span,
@@ -2577,6 +2599,7 @@ impl Interp {
                  another name",
             ));
         }
+
         if self.extensions.contains_key(&(id, name.to_string())) {
             return Err(QuinceError::new(
                 format!("{} has already been extended with `{name}`", type_name()),
