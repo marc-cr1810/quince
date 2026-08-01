@@ -40,6 +40,7 @@ pub enum Builtin {
     Dict,
     Function,
     Class,
+    Module,
 }
 
 /// Every builtin type, in the order their class objects are allocated.
@@ -60,6 +61,7 @@ pub static BUILTINS: &[Builtin] = &[
     Builtin::Dict,
     Builtin::Function,
     Builtin::Class,
+    Builtin::Module,
 ];
 
 impl Builtin {
@@ -78,6 +80,7 @@ impl Builtin {
             Builtin::Dict => &DICT,
             Builtin::Function => &FUNCTION,
             Builtin::Class => &CLASS,
+            Builtin::Module => &MODULE,
         }
     }
 
@@ -108,7 +111,10 @@ impl Builtin {
             Builtin::Dict => Some(Op::Dict),
             // `nil` has no conversion to override: it is a keyword, not a global,
             // so `nil(x)` does not parse in the first place.
-            Builtin::Nil | Builtin::Function | Builtin::Class => None,
+            // A module is produced by `import` and by nothing else. There is no
+            // value it could be made from, so there is nothing for a class to
+            // override — the same answer `function` and `class` give.
+            Builtin::Nil | Builtin::Function | Builtin::Class | Builtin::Module => None,
         }
     }
 }
@@ -410,10 +416,23 @@ pub static CLASS: BuiltinType = BuiltinType {
     methods: &[],
     init: None,
 };
+/// The type of an imported module, which is what `type(math)` reports.
+///
+/// No methods, and it will stay that way: everything reachable through a module
+/// is a name the module itself declared, found by looking in its scope rather
+/// than on its type. A method here would be a name every module has and no
+/// module wrote, which is the one thing that could collide with what an imported
+/// file chose to call something.
+pub static MODULE: BuiltinType = BuiltinType {
+    name: "module",
+    methods: &[],
+    init: None,
+};
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::env::Globals;
     use crate::heap::Object;
     use crate::value::Native;
 
@@ -483,6 +502,7 @@ mod tests {
                 builtin: None,
                 openness: Openness::Open,
             }))),
+            Value::Module(heap.alloc(Object::Globals(Globals::module("m", None)))),
         ];
 
         for value in values {

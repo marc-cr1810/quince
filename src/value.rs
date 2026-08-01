@@ -77,6 +77,11 @@ pub enum Value {
     /// an instance.
     Class(ObjId),
     Instance(ObjId),
+    /// An imported module, which is a value for the same reasons a class is: it
+    /// can be bound, passed, and stored. The handle is an [`crate::env::Globals`]
+    /// — a module and a top-level scope are the same object, so `math.floor` is a
+    /// name looked up in a scope and nothing new had to be built to hold one.
+    Module(ObjId),
 }
 
 impl Value {
@@ -91,7 +96,8 @@ impl Value {
             | Value::Function(id)
             | Value::BoundMethod(id)
             | Value::Class(id)
-            | Value::Instance(id) => Some(*id),
+            | Value::Instance(id)
+            | Value::Module(id) => Some(*id),
             _ => None,
         }
     }
@@ -118,6 +124,7 @@ impl Value {
             Value::Dict(_) => Builtin::Dict,
             Value::Function(_) | Value::Native(_) | Value::BoundMethod(_) => Builtin::Function,
             Value::Class(_) => Builtin::Class,
+            Value::Module(_) => Builtin::Module,
             Value::Instance(id) => return heap.instance(*id).class,
         };
         heap.builtin_class(builtin)
@@ -189,7 +196,10 @@ impl Value {
             // there is nothing to ask, since a class cannot yet answer for itself.
             // One extending a builtin was unwrapped above, so `Username("")` is
             // falsy exactly as `""` is.
-            Value::Class(_) | Value::Instance(_) => true,
+            // A module is always truthy, empty or not. `if math` asks whether the
+            // module exists, and by the time there is a value to ask about, it
+            // does — an import that found nothing raised instead of binding.
+            Value::Class(_) | Value::Instance(_) | Value::Module(_) => true,
         }
     }
 
@@ -238,6 +248,13 @@ impl Value {
                 )
             }
             Value::Class(id) => format!("<class {}>", heap.class(*id).name),
+            Value::Module(id) => match heap.globals(*id).name() {
+                Some(name) => format!("<module {name}>"),
+                // The starting module is never imported, so nothing names it and
+                // nothing holds it as a value. Reachable only if that stops being
+                // true, and a bare `<module>` is the honest thing to say if it is.
+                None => "<module>".to_string(),
+            },
             // Not the base's type name but this value's: an instance carrying no
             // payload is its own base, and what it should say is its class.
             Value::Instance(_) => format!("<{} instance>", self.type_name(heap)),
@@ -286,6 +303,7 @@ impl PartialEq for Value {
             (Value::BoundMethod(a), Value::BoundMethod(b)) => a == b,
             (Value::Class(a), Value::Class(b)) => a == b,
             (Value::Instance(a), Value::Instance(b)) => a == b,
+            (Value::Module(a), Value::Module(b)) => a == b,
             _ => false,
         }
     }

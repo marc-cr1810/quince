@@ -914,10 +914,10 @@ impl Interp {
     fn bind(&mut self, slot: &Option<Slot>, name: &str, value: Value, mutable: bool, env: ObjId) {
         match resolved(slot) {
             Slot::Local { index, .. } => self.heap.env_mut(env).set(index, value),
-            Slot::Global => self
-                .heap
-                .globals_mut(self.globals)
-                .declare(name, value, mutable),
+            Slot::Global => {
+                let module = env::module_of(&self.heap, env);
+                self.heap.globals_mut(module).declare(name, value, mutable)
+            }
         }
     }
 
@@ -1206,7 +1206,7 @@ impl Interp {
             }
             Slot::Global => self
                 .heap
-                .globals(self.globals)
+                .globals(env::module_of(&self.heap, env))
                 .get(&var.name)
                 .cloned()
                 .ok_or_else(|| {
@@ -1216,7 +1216,7 @@ impl Interp {
 
                     let mut candidates: Vec<String> = self
                         .heap
-                        .globals(self.globals)
+                        .globals(env::module_of(&self.heap, env))
                         .iter()
                         .map(|(k, _)| k.to_string())
                         .collect();
@@ -1244,11 +1244,8 @@ impl Interp {
                     }
                     Slot::Global => {
                         let name = &var.name;
-                        match self
-                            .heap
-                            .globals_mut(self.globals)
-                            .assign(name, value.clone())
-                        {
+                        let module = env::module_of(&self.heap, env);
+                        match self.heap.globals_mut(module).assign(name, value.clone()) {
                             Ok(()) => {}
                             Err(AssignError::Undefined) => {
                                 return Err(QuinceError::new(
@@ -1945,6 +1942,18 @@ impl Interp {
                 .get(&Key::Str(Rc::from(name)))
         {
             return Ok(Attr::Field(value.clone()));
+        }
+
+        // A module hands back what it declared, and hands it back *unbound*: the
+        // names in a module are ordinary top-level names, so `math.floor` is the
+        // same function `from math import floor` would have bound directly, and
+        // calling it inserts no receiver. A module is a scope, not an object with
+        // methods, and this is the line that says so.
+        if let Value::Module(id) = receiver {
+            return match self.heap.globals(*id).get(name) {
+                Some(value) => Ok(Attr::Field(value.clone())),
+                None => Err(self.no_attr(receiver, name, target_span, name_span, expr_span)),
+            };
         }
 
         // A class hands back its methods unbound, so `Point.dist(p)` works and

@@ -139,6 +139,13 @@ impl Interp {
             Value::Instance(_) => {
                 Style::MAGENTA.paint(format!("<{} instance>", value.type_name(&self.heap)), color)
             }
+            Value::Module(id) => {
+                let text = match self.heap.globals(*id).name() {
+                    Some(name) => format!("<module {name}>"),
+                    None => "<module>".to_string(),
+                };
+                Style::MAGENTA.paint(text, color)
+            }
         };
         Ok(text)
     }
