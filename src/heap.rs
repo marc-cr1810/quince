@@ -547,6 +547,7 @@ mod tests {
         let func = heap.alloc(Object::Function(Function {
             decl: std::rc::Rc::new(crate::ast::FnDecl {
                 name: "f".to_string(),
+                name_span: crate::token::Span::new(0, 0),
                 params: Vec::new(),
                 body: crate::ast::Block {
                     stmts: Vec::new(),

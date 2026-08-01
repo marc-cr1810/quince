@@ -1,0 +1,9 @@
+# `fn` and `op` share that one table, so this is the same collision as two `fn`s
+# and gets the same answer. The two are not a pair of overloads: `op string` is
+# reached by `print`, `fn string` by writing `x.string()`, and one name cannot
+# hold both.
+class Money {
+    op init(cents) { self.cents = cents }
+    op string() { return "$" + string(self.cents) }
+    fn string() { return "money" }
+}

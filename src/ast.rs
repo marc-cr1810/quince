@@ -476,6 +476,10 @@ impl Op {
 #[derive(Clone, Debug, PartialEq)]
 pub struct FnDecl {
     pub name: String,
+    /// Where the name was written, which the body's span cannot stand in for: a
+    /// report about a *declaration* should underline the word being declared,
+    /// not the twenty lines under it.
+    pub name_span: Span,
     /// For a method, `self` is `params[0]`; see [`SELF`].
     pub params: Vec<Param>,
     pub body: Block,

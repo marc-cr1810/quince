@@ -190,6 +190,34 @@ them would quietly keep the older one. Making it an error is the restrictive
 choice on purpose — an error can be relaxed later, a semantics cannot. Shadowing
 across nested scopes is untouched.
 
+That rule reached exactly one of the five places a name can be declared twice,
+and the reason is worth keeping because it is the shape this kind of gap always
+has. The check lived in `declare_slot`, which returns early at the top level —
+correctly, since a global needs no slot — and a class body is not a scope at all,
+so it never went near the function. Four of the five silently kept the second
+declaration:
+
+| where | before | now |
+| --- | --- | --- |
+| `fn` inside a function | error | error |
+| `fn` at the top level | second one wins | error |
+| a method in a class | second one wins | error |
+| an `op` in a class | second one wins | error |
+| a `fn` in an `extend` | second one wins | error |
+
+The two new checks sit where each has what it needs. A class or `extend` body is
+checked in the parser, which is holding the declarations already — the same
+argument that put the `op innit` check there. The top level is checked in the
+resolver, against a set of names kept per *resolver* rather than per process: at
+a prompt, writing the function again is how you fix it, and each REPL entry is
+its own `compile`, so the set starts empty every time.
+`a_repl_entry_may_redefine_what_an_earlier_one_declared` is what holds that open.
+
+`fn` and `op` share one table, so `op string` beside `fn string` is the same
+collision and gets the same answer. They are not a pair of overloads: one is
+reached by `print`, the other by writing `x.string()`, and one name cannot hold
+both.
+
 The resolver is also the first half of the work a bytecode compiler needs, so
 none of it is throwaway if the VM happens.
 
@@ -231,8 +259,9 @@ if 4 in all { print("built", all) }
 ```
 
 - Dynamic typing, optional annotations later (as Zephyr has)
-- `let` / `final` / `const` bindings; a name may be declared only once per scope,
-  but may shadow one from an enclosing scope
+- `let` / `final` / `const` bindings; a name may be declared only once per scope
+  — or per class body, or per `extend` body — but may shadow one from an
+  enclosing scope
 - Lists and dicts, both mutable and both structurally compared; `in` for membership
 - Braces, not significant whitespace — simpler to parse, fewer edge cases
 - `#` line comments, which leaves `//` free for floor division and makes a `#!`
@@ -898,7 +927,8 @@ Four decisions the plan left open, each of which had to be made to write the cod
   answers print something plausible — so it is a Rust test.
 - **Extending twice with the same name is refused too**, which is the first refusal read
   honestly: an extension replacing an extension is exactly as silent as one replacing a
-  method.
+  method. That covers two `extend` blocks; one *block* declaring a name twice is the
+  parser's, and was the gap that turned out to be four gaps — see Resolution above.
 - **Every name in a block is checked before any is added.** A block whose third method
   collides leaves the type as it found it. The alternative is a program that reports an
   error *and* changes behaviour, which is the worst of both.

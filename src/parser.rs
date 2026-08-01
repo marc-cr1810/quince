@@ -216,10 +216,39 @@ impl Parser {
         let body = self.block()?;
         Ok(FnDecl {
             name,
+            name_span,
             params,
             body,
             op,
         })
+    }
+
+    /// Refuses a name a body has already declared.
+    ///
+    /// A class body is a table keyed by name, so a second `fn a` overwrites the
+    /// first — silently, with the one it replaced still sitting on the page above
+    /// it. The resolver already refuses two `fn`s in a *function* for the same
+    /// reason and in almost the same words; a class body simply is not a scope,
+    /// so there was nowhere for that check to live until here.
+    ///
+    /// `fn` and `op` share the table, so `fn string` beside `op string` is the
+    /// same collision and gets the same answer.
+    fn refuse_duplicate(
+        declared: &[std::rc::Rc<FnDecl>],
+        decl: &FnDecl,
+        whose: &str,
+    ) -> Result<(), QuinceError> {
+        if !declared.iter().any(|seen| seen.name == decl.name) {
+            return Ok(());
+        }
+        Err(QuinceError::new(
+            format!("{whose} already declares `{}`", decl.name),
+            decl.name_span,
+        )
+        .with_help(
+            "the second would replace the first without a word — rename it, or delete the \
+             one you meant to be rid of",
+        ))
     }
 
     fn class_stmt(&mut self) -> Result<Stmt, QuinceError> {
@@ -243,7 +272,9 @@ impl Parser {
                     self.peek().span,
                 ));
             }
-            methods.push(std::rc::Rc::new(self.fn_decl(true)?));
+            let decl = self.fn_decl(true)?;
+            Self::refuse_duplicate(&methods, &decl, &name)?;
+            methods.push(std::rc::Rc::new(decl));
         }
         let end = self.expect(TokenKind::RBrace, "after the class body")?.span;
 
@@ -290,7 +321,9 @@ impl Parser {
                     self.peek().span,
                 ));
             }
-            methods.push(std::rc::Rc::new(self.fn_decl(true)?));
+            let decl = self.fn_decl(true)?;
+            Self::refuse_duplicate(&methods, &decl, &target)?;
+            methods.push(std::rc::Rc::new(decl));
         }
         let end = self
             .expect(TokenKind::RBrace, "after the extension body")?

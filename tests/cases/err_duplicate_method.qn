@@ -1,0 +1,9 @@
+# A class body is a table keyed by name, so the second `area` would replace the
+# first without a word — with the one it replaced still on the page above it.
+class Square {
+    op init(side) { self.side = side }
+    fn area() { return self.side * self.side }
+    fn area() { return self.side * 2 }
+}
+
+print(Square(3).area())

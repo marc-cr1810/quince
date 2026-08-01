@@ -1,0 +1,6 @@
+# The same rule inside an `extend` block. Two blocks extending `int` with the
+# same name are already refused; one block doing it twice was the gap.
+extend int {
+    fn double() { return self * 2 }
+    fn double() { return self * 3 }
+}

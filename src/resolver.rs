@@ -76,6 +76,15 @@ struct Resolver {
     /// program — and deliberately so, on the same reasoning as `declare`: an
     /// error can be relaxed later, a semantics cannot.
     types: HashSet<String>,
+    /// Names already declared at the top level, where there is no scope to hold
+    /// them.
+    ///
+    /// A global is bound by name at run time and needs no slot, which is why
+    /// `declare_slot` returns early up there — but "needs no slot" is not "may be
+    /// declared twice", and for two years it read as though it were. Kept per
+    /// resolver rather than per process, so the REPL still redefines a function
+    /// freely: each entry is its own `compile`, and this set is empty again.
+    globals: HashSet<String>,
     /// What each class extends, by name. Flat and never popped, for the reason
     /// [`Resolver::types`] is.
     ///
@@ -207,7 +216,16 @@ impl Resolver {
     /// cannot be refused for being one.
     fn declare_slot(&mut self, name: &str, mutable: bool, span: Span) -> Result<(), QuinceError> {
         let Some(scope) = self.scopes.last_mut() else {
-            return Ok(()); // top level: a global, bound by name at run time
+            // Top level: a global, bound by name at run time, so there is no slot
+            // to reserve — but the same name declared twice is the same mistake
+            // it is anywhere else, and the second still wins silently.
+            if !self.globals.insert(name.to_string()) {
+                return Err(QuinceError::new(
+                    format!("`{name}` is already declared in this scope"),
+                    span,
+                ));
+            }
+            return Ok(());
         };
         if scope.names.contains_key(name) {
             return Err(QuinceError::new(

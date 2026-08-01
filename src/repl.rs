@@ -1107,6 +1107,21 @@ mod tests {
         let res = interp.run_repl(&check_pgm).unwrap();
         assert_eq!(res, Some(Value::Int(60)));
     }
+
+    #[test]
+    fn a_repl_entry_may_redefine_what_an_earlier_one_declared() {
+        // Declaring a name twice in one program is refused. This is why that
+        // refusal is per-compile and not per-process: at a prompt, writing the
+        // function again *is* how you fix it, and a REPL that made you restart
+        // over a typo would be the worse tool.
+        let mut interp = Interp::new();
+        for source in ["fn a() { return 1 }", "fn a() { return 2 }"] {
+            let program = quince::compile(source).expect("each entry compiles on its own");
+            interp.run_repl(&program).expect("and runs");
+        }
+        let call = quince::compile("a()").unwrap();
+        assert_eq!(interp.run_repl(&call).unwrap(), Some(Value::Int(2)));
+    }
 }
 
 fn handle_meta_command(

@@ -1,0 +1,7 @@
+# A global needs no slot, which is why the resolver reserves none for it. That is
+# not the same as being allowed to declare it twice — at a REPL prompt writing
+# the function again is how you fix it, but in one file it is a mistake.
+fn total(xs) { return len(xs) }
+fn total(xs) { return 0 }
+
+print(total([1, 2, 3]))
