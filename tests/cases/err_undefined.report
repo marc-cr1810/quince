@@ -1,0 +1,7 @@
+Error: quince::NameError
+
+ × undefined variable `ghost`
+  ╭─[err_undefined.qn:1:7]
+1 │ print(ghost)
+  ·       ─────
+  ╰────

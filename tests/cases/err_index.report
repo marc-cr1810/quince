@@ -1,0 +1,8 @@
+Error: quince::IndexError
+
+ × index 5 is out of range for a list of length 2
+  ╭─[err_index.qn:2:7]
+2 │ print(xs[5])
+  ·       ─────
+  ╰────
+  help: valid range is 0..1

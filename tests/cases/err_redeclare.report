@@ -1,0 +1,7 @@
+Error: quince::DeclarationError
+
+ × `x` is already declared in this scope
+  ╭─[err_redeclare.qn:3:5]
+3 │     let x = 2
+  ·     ─────────
+  ╰────

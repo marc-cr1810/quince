@@ -1,0 +1,7 @@
+Error: quince::NameError
+
+ × `x` is used before it is declared
+  ╭─[err_use_before_decl.qn:4:11]
+4 │     print(x)
+  ·           ─
+  ╰────

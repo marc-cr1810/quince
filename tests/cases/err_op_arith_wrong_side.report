@@ -1,0 +1,10 @@
+Error: quince::TypeError
+
+ × `op sub` is Money's, and the value on the left is the one asked
+   ╭─[err_op_arith_wrong_side.qn:12:7]
+12 │ print(500 - Money(200))
+   ·       ─┬─   ────┬─────
+   ·        │        ╰── `op sub` is here
+   ·        ╰── int, and this is the side asked
+   ╰────
+   help: reaching Money from the right would hand it the two values the other way round, so it is not asked — convert the int, or swap the operands if that is what you meant

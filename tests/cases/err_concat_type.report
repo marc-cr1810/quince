@@ -1,0 +1,11 @@
+Error: quince::TypeError
+
+ × cannot add list and string
+  ╭─[err_concat_type.qn:3:7]
+3 │ print(xs + "tail")
+  ·       ┬─ ┬ ──┬───
+  ·       │  │   ╰── string
+  ·       │  ╰── doesn't support these values
+  ·       ╰── list
+  ╰────
+  help: Change list or string to be compatible types and try again

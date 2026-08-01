@@ -2,12 +2,28 @@
 //!
 //! A `.out` file holds the expected stdout; a `.err` file holds the expected
 //! error message. Adding a case is dropping in two files — no Rust changes.
+//!
+//! A `.report` file holds the whole rendered diagnostic — the header, the
+//! caret, every label, the help line. It is optional and the other two are not,
+//! because the three assert different contracts: `.out` is what the program
+//! printed, `.err` is the message a `catch` would see, and `.report` is what
+//! someone reading the terminal gets. Only the last one has an opinion about
+//! *where* the caret lands, which is why it exists at all — before it, a
+//! milestone named "span-accurate diagnostics" had no test that any span was
+//! accurate.
+//!
+//! Opt a case in by creating an empty `.report` beside it and running the suite
+//! with `QUINCE_BLESS=1`, which fills in every `.report` that exists and does not
+//! match. Blessing never creates one, so a case gains a rendered assertion only
+//! because someone asked for it, and a report that changes under a refactor has
+//! to be looked at before it is accepted.
 
 use std::cell::RefCell;
 use std::io::Write;
 use std::path::Path;
 use std::rc::Rc;
 
+use quince::error::QuinceError;
 use quince::interp::Interp;
 
 /// A writer the test can read back afterwards.
@@ -31,15 +47,53 @@ impl Write for Captured {
     }
 }
 
-/// Runs a program, returning its output or the message it failed with.
-fn run(source: &str) -> Result<String, String> {
-    let program = quince::compile(source).map_err(|err| err.message)?;
+/// Runs a program, returning its output or the error it failed with.
+///
+/// The whole error rather than its message, because `.report` needs the spans
+/// and labels that `message` throws away.
+fn run(source: &str) -> Result<String, QuinceError> {
+    let program = quince::compile(source)?;
     let captured = Captured::default();
     let mut interp = Interp::with_output(Box::new(captured.clone()));
     match interp.run(&program) {
         Ok(()) => Ok(captured.contents()),
-        Err(err) => Err(err.message),
+        Err(err) => Err(err),
     }
+}
+
+/// Whether `QUINCE_BLESS` asked for expected files to be rewritten.
+fn blessing() -> bool {
+    std::env::var_os("QUINCE_BLESS").is_some_and(|value| value != "0")
+}
+
+/// Compares one expectation, blessing it instead if that was asked for.
+///
+/// Trailing whitespace is trimmed from both ends of the comparison and nothing
+/// else is touched: a report's internal padding is part of what it renders, and
+/// a harness that normalised it could not tell a misaligned caret from a correct
+/// one. What the trim buys is that a missing final newline in a companion file
+/// is not a failure.
+fn compare(
+    failures: &mut Vec<String>,
+    path: &Path,
+    what: &str,
+    expected: &str,
+    actual: &str,
+) {
+    if expected.trim_end() == actual.trim_end() {
+        return;
+    }
+    let name = path.file_stem().unwrap().to_string_lossy();
+    if blessing() {
+        std::fs::write(path, format!("{}\n", actual.trim_end()))
+            .expect("a blessed file should be writable");
+        return;
+    }
+    failures.push(format!(
+        "{name}: {what} did not match\n  expected: {:?}\n  actual:   {:?}",
+        expected.trim_end(),
+        actual.trim_end()
+    ));
 }
 
 /// Runs the corpus the way the binary does.
@@ -72,37 +126,48 @@ fn check_cases() {
         let source = std::fs::read_to_string(&path).expect("case should be readable");
         let result = run(&source);
 
-        let expected_out = std::fs::read_to_string(path.with_extension("out")).ok();
-        let expected_err = std::fs::read_to_string(path.with_extension("err")).ok();
+        let out_path = path.with_extension("out");
+        let err_path = path.with_extension("err");
+        let report_path = path.with_extension("report");
+        let expected_out = std::fs::read_to_string(&out_path).ok();
+        let expected_err = std::fs::read_to_string(&err_path).ok();
+        let expected_report = std::fs::read_to_string(&report_path).ok();
 
-        match (expected_out, expected_err, result) {
-            (Some(expected), _, Ok(actual)) => {
+        if expected_out.is_none() && expected_err.is_none() && expected_report.is_none() {
+            failures.push(format!("{name}: has no .out, .err, or .report file"));
+            continue;
+        }
+
+        match result {
+            Ok(actual) => {
                 checked += 1;
-                if expected.trim_end() != actual.trim_end() {
-                    failures.push(format!(
-                        "{name}: output did not match\n  expected: {:?}\n  actual:   {:?}",
-                        expected.trim_end(),
-                        actual.trim_end()
-                    ));
+                match expected_out {
+                    Some(expected) => {
+                        compare(&mut failures, &out_path, "output", &expected, &actual)
+                    }
+                    // A `.err` or `.report` and no `.out` says the case is meant
+                    // to fail, and it did not.
+                    None => failures.push(format!(
+                        "{name}: expected an error, succeeded with: {actual:?}"
+                    )),
                 }
             }
-            (_, Some(expected), Err(actual)) => {
+            Err(err) => {
                 checked += 1;
-                if expected.trim_end() != actual.trim_end() {
-                    failures.push(format!(
-                        "{name}: error did not match\n  expected: {:?}\n  actual:   {:?}",
-                        expected.trim_end(),
-                        actual.trim_end()
-                    ));
+                if expected_out.is_some() {
+                    failures.push(format!("{name}: expected output, failed: {}", err.message));
+                    continue;
+                }
+                if let Some(expected) = expected_err {
+                    compare(&mut failures, &err_path, "error", &expected, &err.message);
+                }
+                if let Some(expected) = expected_report {
+                    // The case's own file name rather than its path, so a report
+                    // does not bake in where the repository happens to live.
+                    let rendered = err.report(&source, &format!("{name}.qn"));
+                    compare(&mut failures, &report_path, "report", &expected, &rendered);
                 }
             }
-            (Some(_), _, Err(err)) => {
-                failures.push(format!("{name}: expected output, failed: {err}"))
-            }
-            (_, Some(_), Ok(out)) => failures.push(format!(
-                "{name}: expected an error, succeeded with: {out:?}"
-            )),
-            (None, None, _) => failures.push(format!("{name}: has neither a .out nor a .err file")),
         }
     }
 

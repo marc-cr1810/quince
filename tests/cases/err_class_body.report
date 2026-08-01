@@ -1,0 +1,7 @@
+Error: quince::SyntaxError
+
+ × expected a method, found let
+  ╭─[err_class_body.qn:2:5]
+2 │     let x = 1
+  ·     ───
+  ╰────

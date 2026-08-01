@@ -2,8 +2,24 @@ use crate::ast::{
     self, BinaryOp, BindKind, Block, Expr, ExprKind, FnDecl, LogicalOp, Op, Openness, Param, Stmt,
     StmtKind, UnaryOp, Var,
 };
-use crate::error::QuinceError;
+use crate::error::{ErrorKind, QuinceError};
 use crate::token::{Span, Token, TokenKind};
+
+/// An error for text that does not parse.
+fn syntax(message: impl Into<String>, span: Span) -> QuinceError {
+    QuinceError::new(message, span).with_kind(ErrorKind::Syntax)
+}
+
+/// An error for text that parses and still is not a program.
+///
+/// The parser raises both, which is why these are two functions rather than one
+/// applied at the stage boundary. A handful of rules are checked here and not in
+/// the resolver because everything they need is already in hand — the keyword
+/// and its span, before a body is parsed — and being caught early does not make
+/// them grammar. Reading which function a site calls is how you tell.
+fn declaration(message: impl Into<String>, span: Span) -> QuinceError {
+    QuinceError::new(message, span).with_kind(ErrorKind::Declaration)
+}
 
 /// Binding power of unary operators, above every infix operator so `-a * b`
 /// groups as `(-a) * b`.
@@ -74,7 +90,7 @@ impl Parser {
             TokenKind::Fn => self.fn_stmt(),
             // An `op` is a method the language calls on an instance, so there is
             // nothing for one to belong to out here.
-            TokenKind::Op => Err(QuinceError::new(
+            TokenKind::Op => Err(declaration(
                 "`op` is only valid inside a class body",
                 self.peek().span,
             )
@@ -158,7 +174,7 @@ impl Parser {
             // answer to "then what can I write", and it grows with the language.
             Some(Op::from_name(&name).ok_or_else(|| {
                 let names: Vec<&str> = ast::OPS.iter().map(|op| op.name()).collect();
-                QuinceError::new(
+                declaration(
                     format!("`{name}` is not an operation a class can define"),
                     name_span,
                 )
@@ -202,7 +218,7 @@ impl Parser {
             let found = params.len() - usize::from(method);
             if found != arity {
                 let plural = if arity == 1 { "" } else { "s" };
-                return Err(QuinceError::new(
+                return Err(declaration(
                     format!(
                         "`op {}` takes {arity} parameter{plural}, but {found} were declared",
                         op.name()
@@ -247,7 +263,7 @@ impl Parser {
         if !declared.iter().any(|seen| seen.name == decl.name) {
             return Ok(());
         }
-        Err(QuinceError::new(
+        Err(declaration(
             format!("{whose} already declares `{}`", decl.name),
             decl.name_span,
         )
@@ -296,7 +312,7 @@ impl Parser {
         let mut methods = Vec::new();
         while !self.check(&TokenKind::RBrace) && !self.at_end() {
             if !self.check(&TokenKind::Fn) && !self.check(&TokenKind::Op) {
-                return Err(QuinceError::new(
+                return Err(syntax(
                     format!("expected a method, found {}", self.peek().kind),
                     self.peek().span,
                 ));
@@ -337,7 +353,7 @@ impl Parser {
             // needs is in hand: the keyword and its span, before a body is parsed.
             // The same reason `op` at the top level is caught in this file.
             if self.check(&TokenKind::Op) {
-                return Err(QuinceError::new(
+                return Err(declaration(
                     format!("`{target}` cannot be given an `op` by an extension"),
                     self.peek().span,
                 )
@@ -347,7 +363,7 @@ impl Parser {
                 ));
             }
             if !self.check(&TokenKind::Fn) {
-                return Err(QuinceError::new(
+                return Err(syntax(
                     format!("expected a method, found {}", self.peek().kind),
                     self.peek().span,
                 ));
@@ -518,7 +534,7 @@ impl Parser {
         }
 
         if !is_assignable(&lhs) {
-            return Err(QuinceError::new(
+            return Err(syntax(
                 "cannot assign to this expression",
                 lhs.span,
             ));
@@ -738,7 +754,7 @@ impl Parser {
             }
 
             _ => {
-                return Err(QuinceError::new(
+                return Err(syntax(
                     format!("expected an expression, found `{}`", token.kind),
                     token.span,
                 ));
@@ -799,7 +815,7 @@ impl Parser {
             return Ok(self.advance());
         }
         let found = self.peek();
-        Err(QuinceError::new(
+        Err(syntax(
             format!("expected `{kind}` {context}, found `{}`", found.kind),
             found.span,
         ))
@@ -812,7 +828,7 @@ impl Parser {
             self.advance();
             return Ok(result);
         }
-        Err(QuinceError::new(
+        Err(syntax(
             format!("expected a name {context}, found `{}`", token.kind),
             token.span,
         ))
@@ -839,13 +855,13 @@ impl Parser {
         // literal gets parsed as one and fails here on its first `:`. Saying so
         // is far more use than naming the token.
         if token.kind == TokenKind::Colon {
-            return Err(QuinceError::new(
+            return Err(syntax(
                 "unexpected `:` — a `{` at the start of a statement opens a block, \
                  so a dict literal there needs parentheses around it",
                 token.span,
             ));
         }
-        Err(QuinceError::new(
+        Err(syntax(
             format!(
                 "expected a newline or `;` after this statement, found `{}`",
                 token.kind

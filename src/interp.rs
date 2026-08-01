@@ -260,10 +260,13 @@ impl Interp {
     fn install_error_classes(&mut self) {
         // Taken from the enum rather than written out, so the name in
         // `BASE_ERROR` and the name subclasses extend cannot drift apart.
-        let base = ErrorKind::Runtime.class_name();
+        // `ERROR_KINDS` lists the catchable kinds and only those, so every name
+        // it asks for is there. `only_the_uncatchable_kinds_are_unlisted` is what
+        // keeps that true.
+        let base = ErrorKind::Runtime.code();
         let mut source = String::from(BASE_ERROR);
         for kind in ERROR_KINDS {
-            let name = kind.class_name();
+            let name = kind.class_name().expect("a listed kind names a class");
             if name != base {
                 // An empty body on purpose: `init` comes from `Error` through the
                 // same lookup a user's subclass uses, so there is nothing to say.
@@ -280,7 +283,7 @@ impl Interp {
         self.error_classes = ERROR_KINDS
             .iter()
             .map(|kind| {
-                let name = kind.class_name();
+                let name = kind.class_name().expect("a listed kind names a class");
                 match self.heap.globals(self.globals).get(name) {
                     Some(Value::Class(id)) => (*kind, *id),
                     _ => unreachable!("the prelude declares `{name}` as a class"),
@@ -495,7 +498,8 @@ impl Interp {
                                         other.type_name(&self.heap)
                                     ),
                                     at,
-                                ));
+                                )
+                                .with_kind(ErrorKind::Type));
                             }
                         }
                     }
@@ -876,7 +880,10 @@ impl Interp {
         // Set directly rather than by calling `init`, because this is the runtime
         // building the object rather than a program asking for one. The values
         // match what `Error.init` would have produced.
-        fields.insert(Key::Str(Rc::from(KIND)), Value::from(err.kind.class_name()));
+        // `error_class` above has already refused any kind that names no class,
+        // so reaching here means there is one.
+        let kind_name = err.kind.class_name().expect("a reified kind names a class");
+        fields.insert(Key::Str(Rc::from(KIND)), Value::from(kind_name));
         Value::Instance(self.heap.alloc(Object::Instance(Instance {
             class,
             fields,
@@ -1194,6 +1201,7 @@ impl Interp {
                         format!("`{}` is used before it is declared", var.name),
                         span,
                     )
+                    .with_kind(ErrorKind::Name)
                 })
             }
             Slot::Global => self
@@ -1246,13 +1254,25 @@ impl Interp {
                                 return Err(QuinceError::new(
                                     format!("undefined variable `{name}`"),
                                     target.span,
-                                ));
+                                )
+                                .with_kind(ErrorKind::Name));
                             }
+                            // `Frozen` rather than a kind of its own, because the
+                            // class is named for the refusal and not for the
+                            // mechanism: a `final` name and a `const` list are
+                            // different things to pin, and both answer "that will
+                            // not change" to whoever tried to change it.
+                            //
+                            // The local form of this is a `DeclarationError` from
+                            // the resolver, which cannot see globals to give them
+                            // the same treatment. Same sentence, two kinds — see
+                            // Bindings.
                             Err(AssignError::Immutable) => {
                                 return Err(QuinceError::new(
                                     format!("cannot reassign `{name}`"),
                                     target.span,
-                                ));
+                                )
+                                .with_kind(ErrorKind::Frozen));
                             }
                         }
                     }
@@ -1345,17 +1365,21 @@ impl Interp {
                             .map_err(|_| frozen(&self.heap, &Value::Instance(id), target.span))?;
                         Ok(value)
                     }
+                    // `Type` and not `Attr`: an int has no fields at all, so the
+                    // receiver is the mistake rather than the name reached for.
                     other => Err(QuinceError::new(
                         format!("cannot set a field on {}", other.type_name(&self.heap)),
                         target.span,
-                    )),
+                    )
+                    .with_kind(ErrorKind::Type)),
                 }
             }
 
             _ => Err(QuinceError::new(
                 "cannot assign to this expression",
                 target.span,
-            )),
+            )
+            .with_kind(ErrorKind::Type)),
         }
     }
 
@@ -2041,7 +2065,8 @@ impl Interp {
             None => Err(QuinceError::new(
                 format!("{} has no method `{name}`", self.heap.class(id).name),
                 span,
-            )),
+            )
+            .with_kind(ErrorKind::Attr)),
         }
     }
 
@@ -2167,9 +2192,17 @@ impl Interp {
     ) -> Result<Value, QuinceError> {
         let span = match &method {
             Value::Function(id) => self.heap.function(*id).decl.body.span,
-            // A builtin's seeded `init` is the only native a slot ever holds, and
-            // construction reaches it without coming through here.
-            _ => Span::new(0, 0),
+            // `Class::builtin` fills exactly one slot from a seed table, so a
+            // native in a slot is an `init` and nothing else; and `init` is not
+            // among the ops that come through here — construction has its own
+            // path. Both halves are in this crate, and `a_native_fills_no_slot_
+            // but_init` holds the first.
+            //
+            // A placeholder span used to stand here. It was never rendered,
+            // which is exactly the problem: an unreachable branch that answers
+            // with byte zero is indistinguishable from a reachable one that is
+            // wrong, and the sweep cannot tell them apart from the outside.
+            other => unreachable!("an op slot holds a function, found {other:?}"),
         };
 
         let mark = self.temps.len();
@@ -2192,13 +2225,12 @@ impl Interp {
         expected: &str,
         got: &Value,
     ) -> QuinceError {
-        let span = self
-            .slot(receiver, op)
-            .and_then(|method| match method {
-                Value::Function(id) => Some(self.heap.function(id).decl.body.span),
-                _ => None,
-            })
-            .unwrap_or(Span::new(0, 0));
+        // Reached only after that op answered, so the slot is filled and holds a
+        // function — see `call_op` for why a native cannot be here.
+        let span = match self.slot(receiver, op) {
+            Some(Value::Function(id)) => self.heap.function(id).decl.body.span,
+            other => unreachable!("`op {}` answered from {other:?}", op.name()),
+        };
         QuinceError::new(
             format!(
                 "`op {}` must answer with {expected}, but {}'s returned {}",
@@ -2405,7 +2437,8 @@ impl Interp {
             _ => Err(QuinceError::new(
                 format!("cannot negate {}", value.type_name(&self.heap)),
                 span,
-            )),
+            )
+            .with_kind(ErrorKind::Type)),
         }
     }
 
@@ -2434,14 +2467,18 @@ impl Interp {
         // The ordering operators, asked before the operands are unwrapped for the
         // same reason: a class extending `int` that says how it orders has to beat
         // the int it carries.
-        if let Some(answer) = self.compare(op, &lhs, &rhs, expr_span)? {
+        // The three spans travel together because the diagnostics that need the
+        // operands need the whole expression too, and threading them one at a
+        // time through two layers was three parameters either way.
+        let spans = (lhs_span, rhs_span, expr_span);
+        if let Some(answer) = self.compare(op, &lhs, &rhs, spans)? {
             return Ok(answer);
         }
 
         // And the arithmetic, which has to be asked before the `+` on strings and
         // lists below: a class extending `list` that says what `+` means to it is
         // saying it instead of concatenation, not as well as.
-        if let Some(answer) = self.arith(op, &lhs, &rhs, expr_span)? {
+        if let Some(answer) = self.arith(op, &lhs, &rhs, spans)? {
             return Ok(answer);
         }
 
@@ -2501,8 +2538,9 @@ impl Interp {
         op: BinaryOp,
         lhs: &Value,
         rhs: &Value,
-        span: Span,
+        spans: (Span, Span, Span),
     ) -> Result<Option<Value>, QuinceError> {
+        let span = spans.2;
         let specific = match op {
             BinaryOp::Lt => Some(Op::Lt),
             BinaryOp::Gt => Some(Op::Gt),
@@ -2528,7 +2566,7 @@ impl Interp {
             // right *would* have answered, which is why this is only reached once
             // that has been asked for and found missing.
             if let Some(specific) = specific {
-                self.only_asks_the_left(specific, lhs, rhs, span)?;
+                self.only_asks_the_left(specific, lhs, rhs, spans)?;
             }
             return Ok(None);
         };
@@ -2620,7 +2658,7 @@ impl Interp {
         op: BinaryOp,
         lhs: &Value,
         rhs: &Value,
-        span: Span,
+        spans: (Span, Span, Span),
     ) -> Result<Option<Value>, QuinceError> {
         let slot = match op {
             BinaryOp::Add => Op::Add,
@@ -2633,7 +2671,7 @@ impl Interp {
             _ => return Ok(None),
         };
         let Some((method, receiver, other, _)) = self.binary_slot(slot, lhs, rhs) else {
-            return self.only_asks_the_left(slot, lhs, rhs, span).map(|()| None);
+            return self.only_asks_the_left(slot, lhs, rhs, spans).map(|()| None);
         };
         self.call_op(method, &receiver, vec![other]).map(Some)
     }
@@ -2650,12 +2688,13 @@ impl Interp {
         slot: Op,
         lhs: &Value,
         rhs: &Value,
-        span: Span,
+        spans: (Span, Span, Span),
     ) -> Result<(), QuinceError> {
         // Only the right, since the left having it is how we would not be here.
         if self.slot(rhs, slot).is_none() {
             return Ok(());
         }
+        let (lhs_span, rhs_span, span) = spans;
         Err(QuinceError::new(
             format!(
                 "`op {}` is {}'s, and the value on the left is the one asked",
@@ -2665,6 +2704,18 @@ impl Interp {
             span,
         )
         .with_kind(ErrorKind::Type)
+        // The whole diagnostic is about which side is which, so the two sides
+        // are what the labels name. Saying it in the message and then drawing one
+        // caret across both operands leaves the reader to work out which end the
+        // sentence is talking about.
+        .with_label(
+            lhs_span,
+            format!("{}, and this is the side asked", lhs.type_name(&self.heap)),
+        )
+        .with_label(
+            rhs_span,
+            format!("`op {}` is here", slot.name()),
+        )
         .with_help(format!(
             "reaching {} from the right would hand it the two values the other way round, so it \
              is not asked — convert the {}, or swap the operands if that is what you meant",
@@ -2734,14 +2785,16 @@ impl Interp {
                             needle.type_name(&self.heap)
                         ),
                         span,
-                    ));
+                    )
+                    .with_kind(ErrorKind::Type));
                 }
             },
             _ => {
                 return Err(QuinceError::new(
                     format!("cannot use `in` on {}", haystack.type_name(&self.heap)),
                     span,
-                ));
+                )
+                .with_kind(ErrorKind::Type));
             }
         };
         Ok(Value::Bool(found))
@@ -2783,6 +2836,10 @@ fn key_of(heap: &Heap, value: &Value, span: Span) -> Result<Key, QuinceError> {
             ),
             span,
         )
+        // All three refusals here are `Type` and not `Key`: `KeyError` is a key
+        // the dict does not hold, and these are values that may not be keys at
+        // all. Python draws the same line, raising `TypeError: unhashable type`.
+        .with_kind(ErrorKind::Type)
         .with_help(
             "a dict finds a key by its contents alone and cannot run `op eq`, so two keys \
              the class calls equal would be filed apart",
@@ -2796,7 +2853,7 @@ fn key_of(heap: &Heap, value: &Value, span: Span) -> Result<Key, QuinceError> {
             ),
             NotAKey::Nan => "NaN cannot be a dict key, because it is not equal to itself".into(),
         };
-        QuinceError::new(message, span)
+        QuinceError::new(message, span).with_kind(ErrorKind::Type)
     })
 }
 
@@ -3245,7 +3302,8 @@ fn text_arg(
                 other.type_name(heap)
             ),
             span,
-        )),
+        )
+        .with_kind(ErrorKind::Type)),
     }
 }
 
@@ -3291,10 +3349,13 @@ pub static REPLACE: Native = Native {
     func: |interp, args, span| {
         let from = text_arg(&interp.heap, args, 1, "replace", span)?;
         if from.is_empty() {
+            // `Value` and not `Type`: a string is exactly what `replace` accepts,
+            // and that particular string is the mistake.
             return Err(QuinceError::new(
                 "`replace` needs something to look for, but was given \"\"".to_string(),
                 span,
-            ));
+            )
+            .with_kind(ErrorKind::Value));
         }
         let to = text_arg(&interp.heap, args, 2, "replace", span)?;
         Ok(Value::Str(Rc::from(
@@ -3314,7 +3375,8 @@ pub static SPLIT: Native = Native {
             return Err(QuinceError::new(
                 "`split` needs a separator, but was given \"\" — use `chars` instead".to_string(),
                 span,
-            ));
+            )
+            .with_kind(ErrorKind::Value));
         }
         let parts: Vec<Value> = text(args)
             .split(sep.as_ref())
@@ -3349,7 +3411,8 @@ pub static JOIN: Native = Native {
                     args[1].type_name(&interp.heap)
                 ),
                 span,
-            ));
+            )
+            .with_kind(ErrorKind::Type));
         };
 
         let mut parts = Vec::with_capacity(interp.heap.list(*id).len());
@@ -3363,7 +3426,8 @@ pub static JOIN: Native = Native {
                             other.type_name(&interp.heap)
                         ),
                         span,
-                    ));
+                    )
+                    .with_kind(ErrorKind::Type));
                 }
             }
         }

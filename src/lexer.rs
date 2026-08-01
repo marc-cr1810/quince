@@ -1,5 +1,14 @@
-use crate::error::QuinceError;
+use crate::error::{ErrorKind, QuinceError};
 use crate::token::{Span, Token, TokenKind};
+
+/// An error for text that does not tokenise.
+///
+/// Every error the lexer raises is one of these — there is no other way for
+/// this stage to fail — so the kind is applied in one place rather than at
+/// seven call sites, and a new one cannot be added unclassified.
+fn syntax(message: impl Into<String>, span: Span) -> QuinceError {
+    QuinceError::new(message, span).with_kind(ErrorKind::Syntax)
+}
 
 pub struct Lexer<'a> {
     src: &'a str,
@@ -60,7 +69,7 @@ impl<'a> Lexer<'a> {
                 '&' if self.eat('&') => TokenKind::AndAnd,
                 '|' if self.eat('|') => TokenKind::OrOr,
                 '&' | '|' => {
-                    return Err(QuinceError::new(
+                    return Err(syntax(
                         format!("unexpected '{c}' (did you mean '{c}{c}'?)"),
                         Span::new(start, self.pos),
                     ));
@@ -71,7 +80,7 @@ impl<'a> Lexer<'a> {
                 c if is_ident_start(c) => self.ident(start),
 
                 _ => {
-                    return Err(QuinceError::new(
+                    return Err(syntax(
                         format!("unexpected character '{c}'"),
                         Span::new(start, self.pos),
                     ));
@@ -169,11 +178,11 @@ impl<'a> Lexer<'a> {
         if is_float {
             text.parse::<f64>()
                 .map(TokenKind::Float)
-                .map_err(|_| QuinceError::new(format!("invalid number '{text}'"), span))
+                .map_err(|_| syntax(format!("invalid number '{text}'"), span))
         } else {
             text.parse::<i64>()
                 .map(TokenKind::Int)
-                .map_err(|_| QuinceError::new(format!("integer '{text}' is out of range"), span))
+                .map_err(|_| syntax(format!("integer '{text}' is out of range"), span))
         }
     }
 
@@ -188,7 +197,7 @@ impl<'a> Lexer<'a> {
 
         loop {
             let Some(c) = self.advance() else {
-                return Err(QuinceError::new(
+                return Err(syntax(
                     "unterminated string literal",
                     Span::new(start, self.pos),
                 ));
@@ -199,7 +208,7 @@ impl<'a> Lexer<'a> {
                 '\\' => {
                     let escape_start = self.pos - 1;
                     let Some(esc) = self.advance() else {
-                        return Err(QuinceError::new(
+                        return Err(syntax(
                             "unterminated string literal",
                             Span::new(start, self.pos),
                         ));
@@ -217,7 +226,7 @@ impl<'a> Lexer<'a> {
                         '"' => '"',
                         '\'' => '\'',
                         _ => {
-                            return Err(QuinceError::new(
+                            return Err(syntax(
                                 format!("unknown escape '\\{esc}'"),
                                 Span::new(escape_start, self.pos),
                             ));

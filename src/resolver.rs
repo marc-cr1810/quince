@@ -18,8 +18,18 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ast::{self, Block, Expr, ExprKind, FnDecl, Op, Slot, Stmt, StmtKind};
 use crate::class::BUILTINS;
-use crate::error::QuinceError;
+use crate::error::{ErrorKind, QuinceError};
 use crate::token::Span;
+
+/// An error for a program that parses and still is not one.
+///
+/// Every error this stage raises is one of these: by the time the resolver runs
+/// the grammar is satisfied, and what is left to get wrong is names — declaring
+/// one twice, reading one that is not in scope yet, writing `self` where there
+/// is no receiver. So the kind is applied here rather than at ten call sites.
+fn declaration(message: impl Into<String>, span: Span) -> QuinceError {
+    QuinceError::new(message, span).with_kind(ErrorKind::Declaration)
+}
 
 /// Resolves a whole program in place.
 pub fn resolve(program: &mut [Stmt]) -> Result<(), QuinceError> {
@@ -170,7 +180,7 @@ impl Resolver {
     /// `int` after that line would mean something the language did not choose.
     fn declare_type(&mut self, name: &str, span: Span) -> Result<(), QuinceError> {
         if is_builtin_type(name) {
-            return Err(QuinceError::new(
+            return Err(declaration(
                 format!("`{name}` is a type built into the language"),
                 span,
             )
@@ -194,7 +204,7 @@ impl Resolver {
                 false => "a class in this program",
             };
             return Err(
-                QuinceError::new(format!("`{name}` is the name of {what}"), span).with_help(
+                declaration(format!("`{name}` is the name of {what}"), span).with_help(
                     format!(
                         "a type's name cannot also be a variable — rename this one, not `{name}`"
                     ),
@@ -220,7 +230,7 @@ impl Resolver {
             // to reserve — but the same name declared twice is the same mistake
             // it is anywhere else, and the second still wins silently.
             if !self.globals.insert(name.to_string()) {
-                return Err(QuinceError::new(
+                return Err(declaration(
                     format!("`{name}` is already declared in this scope"),
                     span,
                 ));
@@ -228,14 +238,14 @@ impl Resolver {
             return Ok(());
         };
         if scope.names.contains_key(name) {
-            return Err(QuinceError::new(
+            return Err(declaration(
                 format!("`{name}` is already declared in this scope"),
                 span,
             ));
         }
         let index = scope.count;
         scope.count = index.checked_add(1).ok_or_else(|| {
-            QuinceError::new("a scope may not declare more than 65535 names", span)
+            declaration("a scope may not declare more than 65535 names", span)
         })?;
         scope
             .names
@@ -459,7 +469,7 @@ impl Resolver {
                 && is_init
                 && calls == 0
             {
-                return Err(QuinceError::new(
+                return Err(declaration(
                     format!("`{class}`'s `op init` never calls `super.init`"),
                     span,
                 )
@@ -529,7 +539,7 @@ impl Resolver {
                 // `undefined variable`, which describes the symptom rather than
                 // the mistake.
                 if var.name == ast::SELF && self.find(ast::SELF).is_none() {
-                    return Err(QuinceError::new(
+                    return Err(declaration(
                         "`self` is only valid inside a method",
                         expr.span,
                     ));
@@ -602,7 +612,7 @@ impl Resolver {
                 // with no parent has no `super` at all, while a plain function
                 // has neither.
                 if self.find(ast::SUPER).is_none() {
-                    return Err(QuinceError::new(
+                    return Err(declaration(
                         "`super` is only valid inside a method of a class that extends another",
                         expr.span,
                     ));
@@ -613,7 +623,7 @@ impl Resolver {
                 // constructor on an object that already finished. Confining it is
                 // also what makes the count above mean what the check reads it as.
                 if name == Op::Init.name() && !self.in_init {
-                    return Err(QuinceError::new(
+                    return Err(declaration(
                         "`super.init` is only valid inside `op init`",
                         expr.span,
                     )
@@ -644,7 +654,7 @@ impl Resolver {
                         true => "`self` is the receiver, not a variable to assign to".to_string(),
                         false => format!("cannot reassign `{}`", var.name),
                     };
-                    return Err(QuinceError::new(message, target.span));
+                    return Err(declaration(message, target.span));
                 }
                 self.expr(target)
             }

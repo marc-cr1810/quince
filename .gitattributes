@@ -1,0 +1,18 @@
+# The corpus is compared byte for byte.
+#
+# `tests/programs.rs` diffs a case's output against its companion file, trimming
+# only whitespace at the very end so that a missing final newline is not a
+# failure. Everything inside the file counts — a `.report` renders carets by
+# padding with spaces, so a harness that normalised them could not tell a
+# misaligned caret from a correct one. That only works if the companion file has
+# the same line endings everywhere, so the files are pinned rather than the
+# comparison loosened. Without this, `core.autocrlf=true` hands a Windows
+# checkout CRLF and three cases fail before anything is even run.
+#
+# The `.qn` files are pinned for the same reason from the other end: they are
+# the source a report's carets are measured against.
+tests/cases/*.qn text eol=lf
+tests/cases/*.out text eol=lf
+tests/cases/*.err text eol=lf
+tests/cases/*.report text eol=lf
+examples/*.qn text eol=lf

@@ -1893,6 +1893,9 @@ the new kind and a handler went looking for a global nobody bound.
 `class_name` is an exhaustive match, which is what makes this hold: a new variant cannot be
 added without naming its class in the same edit.
 
+It answers `Option`, and the `None` arm is the whole compile-time story — see A kind you
+cannot catch below.
+
 The instance carries `kind` as a field, and `Error.init` sets it from `type(self)` — which is
 already the receiver's class name. So a user's `class ParseError extends Error` that calls
 `super.init(message)` reports `ParseError` without the prelude knowing it exists. Reification
@@ -1903,6 +1906,9 @@ Only some of the forty-odd raise sites are classified. `new` fills in `Runtime`,
 kept compiling untouched and read as the base `Error` — a gap rather than a lie, and one that
 closes a site at a time. The ones a program is likely to catch are done: type, name,
 attribute, index, key, frozen, recursion, zero division, overflow.
+
+The thirty compile-time sites are now done too, and they needed a kind that names no class to
+get there — see A kind you cannot catch below.
 
 ### The payload crosses the unwind unrooted
 
@@ -1930,6 +1936,97 @@ every `call` frame the error unwinds through, so a handler at the `try`'s depth 
 the `try`'s depth — a `try` at depth 5 around a runaway recursion runs its handler at depth
 5, with the whole stack available again. That falls straight out of the unwind discipline
 above and is a reason to keep that discipline exactly as it is.
+
+### A label has to say something the message did not
+
+Every report used to end with its own message written twice — once as the sentence at the
+top, and once again as a label under the caret, because a diagnostic that supplied no labels
+had one synthesised from `message`. It looked like a rich diagnostic and carried the
+information of a plain one.
+
+The cost is not the duplication, it is what the duplication trains. The space under a caret
+is where a label goes, and a reader who finds the sentence they just read there learns to
+skip that space — so the four diagnostics that *do* put something new there get skipped
+too. A diagnostic that says everything twice is one that cannot emphasise anything.
+
+So a diagnostic with nothing to add now draws a bare underline and no branch, and the `┬`
+connector is drawn only where a branch actually attaches. What is left in the branch rows is
+only ever new information: which operand is which in `xs + "tail"`, which side of `500 -
+Money(200)` the language asked, which half of `xs.nope()` is the receiver and which the
+name. Those read as annotations again rather than as decoration.
+
+This is why most reports have no labels at all and that is the right number. `index 9 is out
+of range for a list of length 2` names the index, the length, and the type in the sentence,
+and adds a valid range in the help; a label under the caret could only repeat one of them.
+
+### Carets are measured against a line, so the line has to be shown
+
+A span is a byte offset, and a column is that offset counted from the start of *its* line.
+The renderer took the line the error's own span fell on, showed that one line, and then
+measured every label against it — which is correct exactly when every label is on that line,
+and silently wrong otherwise.
+
+    2 │ let y = xs +
+      ·         ┬─ ┬   ──┬───
+      ·         │  │     ╰── string
+
+The `string` label belongs to line 3. Drawn against line 2 it underlines columns 17 to 23 of
+a twelve-character line: past the end of the text, pointing at nothing, in a report whose
+whole purpose is to point. Any operand on its own line hit this — a wrapped condition, a
+call broken over arguments, a list built across four lines.
+
+Labels are now grouped by line and each line is shown with its own underline and branches, in
+source order, with a `⋮` between blocks so two labels three lines apart do not read as
+adjacent. A span running past its first line is drawn to the end of that line rather than
+wrapping, because the frame has no continuation mark and the first line is where it starts.
+
+The gutter is sized for the highest line number any block will show, not for the error's own,
+or the frame goes crooked the moment a label sits ten lines below the caret.
+
+### A kind you cannot catch
+
+Lexing, parsing, and resolving all happen inside `compile`, which runs to completion before
+`Interp::run` is called. So nothing those stages raise can reach a `catch` — there is no
+frame to unwind to, and there is no program running to have written one. That makes them the
+first errors with a kind worth reporting and no class to reify into.
+
+`class_name` answers `Option<&'static str>` and both compile-time kinds answer `None`. The
+invariant narrows from "every kind names a class" to "every *catchable* kind names a class",
+and the `None` arm is where the compiler holds it. Binding the classes anyway was the
+alternative, and it was refused for what it would let someone write: `catch e: SyntaxError`
+would be a clause that can never fire, and the language would have no way to say so. A class
+that exists only to be uncatchable is worse than no class, because the first thing a
+programmer does with a name they can see is use it.
+
+The reporting half is a second function. `code` gives the word inside `error[…]`, the two
+compile kinds name themselves there, and every other kind defers to `class_name` — so a class
+name is written once and the two answers cannot drift. Splitting them is what lets a syntax
+error report as one without pretending to be catchable.
+
+That split is what makes the ordering cheap to change later. When `import` compiles a module
+part-way through a run, a compile error becomes something a handler can be standing under,
+and the change is one arm moving from `None` to `Some` plus one line in `ERROR_KINDS`.
+
+### Two words, because the grammar is not the program
+
+`Syntax` is text that does not parse. `Declaration` is text that parses and still is not a
+program: a name declared twice, `self` where there is no receiver, an `op` at the top level,
+`op eq` declaring two parameters where the language passes one.
+
+Python folds both into `SyntaxError` — it reports a name assigned before its `global`
+declaration as one — and that was the cheaper option by one word. It was refused for the same
+reason `Attr` is separate from `Type`: the two mistakes send you looking in different places.
+Told the syntax is wrong, you reread the punctuation on the line, and for a duplicate `let`
+there is nothing wrong with the punctuation on the line. The word has to survive being read
+by someone who has not read the parser.
+
+The split is not by module, which is the part worth writing down. Five of the parser's
+thirteen refusals are declaration errors — `op` outside a class, an unknown `op` name, the
+`op` arity check, a duplicate method, an `op` in an extension. They live in the parser
+because everything the check needs is in hand there, the keyword and its span before a body
+is parsed, and being caught early does not make them grammar. So the parser gets two
+constructors and the site says which it is by which one it calls; the lexer and the resolver
+get one each, because neither can raise the other sort.
 
 ### What this does not bring
 
@@ -2073,6 +2170,8 @@ have since landed.
 **v0.5 — robustness**
 `try`/`catch` and span-accurate diagnostics everywhere. GC is done.
 
+**Done.**
+
 `try`/`catch`/`throw` is **done** — see Errors as values above. It went first of the three,
 because it settles what a `QuinceError` *is* before protocol slots start threading one
 through `display`, `is_truthy`, and `equals` at every call site. The diagnostics sweep goes
@@ -2173,7 +2272,24 @@ helper and three call sites. The one thing that needed care was the part the pla
 written down — the table is a root, and nothing else refers to what it holds. See What
 landed, and what the plan above did not say.
 
-What v0.5 still owes: the diagnostics sweep, and nothing else.
+The diagnostics sweep went last, as planned, and **v0.5 is complete**. It found more than the
+classification it was scoped as. Every raise site now carries a kind — the thirty compile-time
+ones needed a kind that names no class to get there, see A kind you cannot catch above — but
+the two real defects were in the renderer, not in the sites. A label on a line other than the
+error's own was drawn against the wrong line and underlined text that was not there, and every
+diagnostic repeated its message under its own caret, which is what taught a reader to stop
+looking at the space where labels go.
+
+Both were invisible from inside the suite, and that is the part worth keeping: the corpus
+compared `err.message`, the one part of a diagnostic with no span in it, so a milestone about
+span accuracy had no test that any span was accurate. The `.report` file went in first for
+that reason and immediately earned it — it is what turned each of the changes above into a
+diff someone could read, and it caught the one report that the classification pass changed
+by accident. See Three companion files above.
+
+What the sweep did not do is add labels everywhere. Four diagnostics have them, and the rest
+draw a bare caret on purpose: a label is worth a line only when it says something the message
+did not, and most messages already name every value they are about.
 
 Subclassing a builtin went before the slots because it is what a user asked for, not because
 the ordering saved anything. The two touch the same functions — `is_truthy`, `equals`,
@@ -2222,3 +2338,29 @@ deferred until the core is solid.
 - A `tests/` corpus of `.qn` programs paired with expected output, run as integration
   tests. This is the suite that matters — it's what catches regressions as the
   evaluator changes shape, and it should grow with every feature.
+
+### Three companion files, asserting three different things
+
+A case's `.out` holds what the program printed. Its `.err` holds the message it failed
+with. Its `.report` holds the whole rendered diagnostic — header, source line, carets,
+every label, the help.
+
+The first two were the whole story until the sweep, and between them they left the
+milestone's own subject untested. `.err` compares `err.message`, and `message` is the one
+part of a diagnostic with no spans in it, so 88 error cases asserted a sentence and not one
+of them asserted where the caret landed. A caret could point at the wrong token, at the
+whole statement instead of the operand, or at byte zero, and the suite stayed green. The
+only span coverage was a handful of unit tests in `error.rs` against errors built by hand,
+which check the renderer and cannot check what the interpreter hands it.
+
+`.report` is optional and the other two are not, because they are contracts at different
+levels. `message` is what a `catch` sees and what a program may be written against; the
+report is what a person reads. Pinning every case's rendering would make every future
+change to the renderer an 88-file diff, and most of those files would be asserting the same
+three shapes. So a case opts in: create an empty `.report`, run with `QUINCE_BLESS=1`, and
+the harness fills it. Blessing never *creates* one, which is the property that matters — it
+cannot quietly adopt a diagnostic nobody chose to pin, and a report that changes has to be
+read before it is accepted.
+
+The path in a report's location line is the case's own file name rather than its path on
+disk, so the files do not bake in where the repository lives.

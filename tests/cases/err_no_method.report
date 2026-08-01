@@ -1,0 +1,9 @@
+Error: quince::AttributeError
+
+ × list has no method `nope`
+  ╭─[err_no_method.qn:2:1]
+2 │ xs.nope()
+  · ┬─ ─┬──
+  · │   ╰── no field or method `nope`
+  · ╰── list
+  ╰────

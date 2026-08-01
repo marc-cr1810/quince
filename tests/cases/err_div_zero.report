@@ -1,0 +1,7 @@
+Error: quince::ZeroDivisionError
+
+ × division by zero
+  ╭─[err_div_zero.qn:1:7]
+1 │ print(1 / 0)
+  ·       ─────
+  ╰────

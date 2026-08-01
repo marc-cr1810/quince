@@ -1,0 +1,8 @@
+Error: quince::TypeError
+
+ × `Debt` cannot extend `Money`
+  ╭─[err_final_class_extends.qn:9:20]
+9 │ class Debt extends Money {
+  ·                    ─────
+  ╰────
+  help: `Money` is declared `final`, so it has no subclasses — `Debt` can hold a `Money`, but it cannot be one

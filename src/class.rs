@@ -596,4 +596,35 @@ mod tests {
             assert_eq!(same, 1, "{} is named twice", builtin.name());
         }
     }
+
+    /// A native may sit in the `init` slot and in no other.
+    ///
+    /// `call_op` and `op_returned` both read an op's body span straight off a
+    /// `Value::Function`, and both call the alternative unreachable rather than
+    /// answering with a span they made up. This is the half of that reasoning a
+    /// test can hold: the day a seed table learns to name an `op` of its own,
+    /// this fails here rather than as a panic in whichever report went looking
+    /// for a body that was never there.
+    #[test]
+    fn a_native_fills_no_slot_but_init() {
+        for builtin in BUILTINS {
+            let class = Class::builtin(*builtin);
+            for op in OPS.iter().copied() {
+                let Some(filled) = class.slot(op) else {
+                    continue;
+                };
+                assert!(
+                    op == Op::Init,
+                    "{} seeds `op {}`, which no report can find a body for",
+                    builtin.name(),
+                    op.name()
+                );
+                assert!(
+                    matches!(filled, Value::Native(_)),
+                    "{}'s `op init` should be a native",
+                    builtin.name()
+                );
+            }
+        }
+    }
 }

@@ -302,9 +302,13 @@ fn get_completions(state: Option<&DocumentState>, pos: Position) -> Vec<Completi
             });
         }
 
-        // Builtin Error Classes
-        for kind in quince::error::ERROR_KINDS {
-            let class_name = kind.class_name();
+        // Builtin Error Classes. Offering only what `ERROR_KINDS` lists is the
+        // point: a kind with no class is a kind no program can name, so it has
+        // nothing to complete to.
+        for class_name in quince::error::ERROR_KINDS
+            .iter()
+            .filter_map(|kind| kind.class_name())
+        {
             items.push(CompletionItem {
                 label: class_name.to_string(),
                 kind: Some(CompletionItemKind::CLASS),
@@ -1351,7 +1355,11 @@ fn get_signature_help(state: Option<&DocumentState>, pos: Position) -> Option<Si
         });
     }
 
-    if callee == "Error" || quince::error::ERROR_KINDS.iter().any(|k| k.class_name() == callee) {
+    if callee == "Error"
+        || quince::error::ERROR_KINDS
+            .iter()
+            .any(|k| k.class_name() == Some(callee.as_str()))
+    {
         return Some(SignatureHelp {
             signatures: vec![SignatureInformation {
                 label: format!("{callee}(message)"),

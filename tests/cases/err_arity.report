@@ -1,0 +1,8 @@
+Error: quince::TypeError
+
+ × `f` takes 2 arguments, but 1 were given
+  ╭─[err_arity.qn:2:7]
+2 │ print(f(1))
+  ·       ────
+  ╰────
+  help: add 1 argument to match `f`'s signature

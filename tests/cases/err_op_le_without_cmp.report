@@ -1,0 +1,8 @@
+Error: quince::TypeError
+
+ × `<=` needs `op cmp`, which Version does not declare
+  ╭─[err_op_le_without_cmp.qn:9:7]
+9 │ print(Version(1) <= Version(2))
+  ·       ────────────────────────
+  ╰────
+  help: `op lt` answers `<` alone. `op cmp` answers all four comparisons at once, returning a negative int, zero, or a positive one

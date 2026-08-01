@@ -1,0 +1,7 @@
+Error: quince::Error
+
+ × boom
+  ╭─[err_throw_uncaught.qn:1:1]
+1 │ throw Error("boom")
+  · ───────────────────
+  ╰────
