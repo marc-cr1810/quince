@@ -2265,6 +2265,126 @@ argument that an extension should one day be visible only where its module was i
 Modules now exist and that is still not wired up; the note in `extensions` is the record
 of why the door was left open.
 
+## Type inference
+
+`infer.rs` walks the AST and answers *what class is this expression* — a literal, a
+constructor call, a field, a call whose returns agree — and answers `Unknown` for
+everything else. It is a pass beside the resolver, not a stage inside it: the resolver
+decides where a name lives and fails a program that gets that wrong, while this decides
+what a name holds and cannot fail at all. Nothing in the file returns a `Result`.
+
+That is the whole shape of it. `Unknown` is the ordinary answer for a dynamically typed
+program — a parameter is whatever the caller passed, a list holds whatever was put in it
+— and the pass exists because the alternative was already in the tree: `lsp.rs` decided a
+receiver's class by whether its name started with a capital letter. That guess is right
+often enough to be trusted and wrong without saying so, which is the worst combination
+available.
+
+### `Unknown` is an answer, not a failure
+
+The type is three states and joining two of them is equality: `int` joined with `int` is
+`int`, and anything else is `Unknown`. There is no union in the middle and no `nil`-shaped
+bottom. A variable holding an int on one path and a string on the other has no type worth
+reporting, and v0.7's annotations are where a program gets to *say* it meant both.
+
+What that costs is visible in `a_bare_return_is_a_nil_that_joins`: a function returning a
+`Point` down one branch and bare-`return`ing down the other returns neither. The
+alternative — taking the branch that says something and ignoring the one that does not —
+is how a checker starts lying.
+
+There is one place the pass is optimistic on purpose. A body with some `return`s and a
+path that falls off the end is taken at its word rather than joined with the `nil` that
+path produces, because knowing whether a body always returns is a flow analysis, and this
+pass is the floor such a thing would stand on rather than a first draft of it.
+
+### A class name is not an instance of it
+
+`Point` is a value of type `class`; only `Point()` is a `Point`. The heuristic could not
+draw that line because it decided by spelling, and both halves of the mistake are pinned:
+`a_class_name_holds_a_class_and_not_an_instance`, and `a_lowercase_class_is_still_a_class`
+for the program that names a type `point` and was getting nothing at all.
+
+That distinction is why `Types::of_path` takes `Point()` rather than `Point`, and why
+`lsp.rs` grew a second reader for the text before the cursor. `get_receiver_before_dot`
+strips the parentheses, which is right for the heuristics and destroys the only evidence
+the pass needs; `receiver_path` keeps them, normalising arguments away because the
+arguments say nothing about the type. Two readers rather than one changed reader, so the
+floor keeps behaving exactly as it did.
+
+### What the language decides, and what a class decides
+
+`1 / 2` is a float and `a == b` is a bool, because the evaluator says so whatever the
+operands were — `compare` reads whatever `op cmp` answered for its sign and hands back a
+bool, so a comparison on a class is still decidable. `m + m` on a class declaring `op add`
+is `Unknown`, because that op may return anything at all. The split is not a heuristic
+about likely programs; it is a reading of `Interp::binary`, and the two tests around it
+name which side each case falls on.
+
+The same rule decides the smaller cases. Indexing a string gives a string and indexing a
+list gives nothing, because a list is not a `list[T]` until v0.7 says so. A `for` loop
+over a list *literal* takes its elements, since that is the one place the element type is
+written in the file.
+
+### Nothing is read off a second list
+
+A module's members come from `stdlib::MODULES`, and a constant is *built* to find out what
+it is — `math.pi` is a float because building it produces one. The builtin constructors
+come from `Builtin::conversion`, so a type that gains or loses one is followed without
+this file being touched, and `every_builtin_that_can_be_called_names_a_type` pins the
+reading against the list.
+
+A native says what it returns, on the native. `Native` carries `returns: Option<Builtin>`
+beside its name and arity, so `"a,b".split(",")` is a list and `math.floor(2.5)` is an
+int. Before that field existed every call into the library was `Unknown`, the heuristics
+answered instead, and they were wrong in the way heuristics are: `split` returns a list,
+and reading the literal at the front of the line called it a string. The editor offered
+`.lower()` on a list and hid `.push()`.
+
+`None` is half of what makes the field worth reading. `abs` keeps the type it was handed,
+`dict.get` answers with whatever was stored, and `io.line` is a string until input runs
+out and then it is `nil`. Naming a type for any of those would be the same guess in a more
+authoritative place — the field is believed, so it may only be filled in where it is
+certain.
+
+Nothing in Rust can check it. A native's body builds a `Value` at run time, so a wrong
+entry compiles and then lies to every editor. `every_declared_return_is_what_the_native_actually_returns`
+is the answer: it generates a Quince program calling all forty-two, runs it, and compares
+`type(x)` against what each declared. The hand-written part is the list of calls, and the
+completeness assertion beside it is what keeps that honest — a native that declares a
+return and is never called fails the test rather than going unchecked.
+
+### Cycles and recursion are shapes it can be handed
+
+`fn down(n) { return down(n - 1) }` is a program, and so is a class whose field is one of
+itself. Both are guarded by an in-progress set, and both answer `Unknown` on re-entry —
+which is also the true answer, since the recursive arm carries no information. An
+`extends` cycle is refused at run time and not by the resolver, so the pass can be handed
+one of those too; every walk up a parent chain carries a visited set for it.
+
+### The editor keeps the last thing it understood
+
+The pass needs a tree and typing a `.` is what stops a document having one — which would
+have made it useless at precisely the moment it is asked. So `DocumentState` keeps the
+previous `Types` when the new text does not parse. The offsets before the cursor are
+unchanged, and a scope that contained the cursor still contains it, because the text after
+the edit is what went stale and that is not what anyone is asking about.
+
+That is what `typed(&[…])` in the LSP tests is for: a document built from its final text
+alone is a document nobody ever has, and a completion test written that way would be
+testing a state that cannot occur.
+
+The heuristics stay underneath, unchanged. `Type::Unknown` from the pass is not a weak
+answer that a guess outranks — it is the pass saying the guess is all there is — and the
+match in `get_completions` is where that ordering is written down.
+
+### The corpus is what checks it
+
+`what_the_pass_claims_is_what_the_programs_produce` runs every case that compiles, then
+compares each claim against the runtime class of the global that name ended up holding.
+Two hundred claims over forty programs nobody wrote with a checker in mind. A pass allowed
+to answer `Unknown` has exactly one way to be wrong, and this is what looks for it — the
+unit tests assert that the pass *says* `int`, and this asserts that the value is one.
+
 ## Roadmap
 
 **v0.1 — walking skeleton**
@@ -2569,11 +2689,21 @@ three collection types. `map`, `filter`, and `sort` are the first natives to cal
 program's own code, and the rooting that needs is the one genuinely dangerous thing in
 the milestone.
 
-**The inference pass is what remains.** The text heuristics in `lsp.rs` — a receiver's
-class decided by whether its name starts with a capital letter — for a real pass beside
-the resolver that is allowed to answer "unknown". The library is what makes it worth
-doing and what will make its guesses visibly wrong, which was the argument for this
-order. Cross-file inference follows it, not before.
+**The inference pass is done**, and Type inference above is the record. It landed in the
+order the milestone argued for and the library did the job the argument gave it: `math.`
+completed to nothing at all before there was a `math`, and a receiver's class decided by
+its first letter was not visibly wrong until there was a corpus to be wrong about. The
+three things worth carrying forward: `Unknown` had to be an answer rather than a failure
+or the pass would have had to guess exactly where the heuristics do; the editor keeps the
+last tree it understood, because typing the `.` is what stops a document parsing and a
+pass that gave up there would be useless at the only moment it is wanted; and the
+corpus check — every claim against the runtime class of the value that name ended up
+holding — is what makes the whole thing more than a set of assertions about itself.
+
+The natives were the gap it shipped with, and they are closed: `Native` now records what
+it returns and what it is for, so a call into the library is understood and the editor's
+documentation lives beside the code it describes. Cross-file inference is still after it,
+not before.
 
 The keyword guard added at the start of the milestone paid for itself twice inside it:
 once when `import` arrived, and once when `from` stopped being reserved. Both times it

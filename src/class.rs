@@ -454,6 +454,8 @@ mod tests {
     static DUMMY: Native = Native {
         name: "dummy",
         arity: None,
+        returns: None,
+        doc: "A stand-in for a test, which needs a native and not what it does.",
         func: |_interp, _args, _span| Ok(Value::Nil),
     };
 

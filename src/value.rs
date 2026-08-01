@@ -47,6 +47,31 @@ pub struct Native {
     pub name: &'static str,
     /// `None` for variadic builtins such as `print`.
     pub arity: Option<usize>,
+    /// The type this always produces, or `None` for one whose answer depends on
+    /// what it was given.
+    ///
+    /// Here so that the inference pass can read it. Before this existed every
+    /// call into the library was `Unknown` to it, which meant the editor fell
+    /// back to guessing and guessed wrong — `"a,b".split(",")` is a list, and a
+    /// heuristic reading the literal at the front of the line called it a
+    /// string.
+    ///
+    /// `None` is a real answer and has to stay available. `abs` keeps the
+    /// int-ness of what it was handed, `dict.get` returns whatever was stored,
+    /// and `io.line` is a string until input runs out and then it is `nil`.
+    /// Naming a type for those would be the same lie in a more authoritative
+    /// place — the whole value of the field is that it is trusted, so it must
+    /// only be filled in where it is certain.
+    pub returns: Option<Builtin>,
+    /// What this function is for, in the words a reader wants at the moment
+    /// they hover over it.
+    ///
+    /// Beside the implementation rather than in `lsp.rs`, which is where it
+    /// used to live as a hand-written table of ten entries — a table that could
+    /// not describe the other forty-two and had no way to notice it was wrong.
+    /// A field with no default is what makes documenting a new builtin part of
+    /// adding one.
+    pub doc: &'static str,
     pub func: NativeFn,
 }
 
@@ -324,6 +349,8 @@ mod tests {
     static DUMMY: Native = Native {
         name: "dummy",
         arity: None,
+        returns: None,
+        doc: "A stand-in for a test, which needs a native and not what it does.",
         func: |_interp, _args, _span| Ok(Value::Nil),
     };
 

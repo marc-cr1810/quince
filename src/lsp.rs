@@ -18,11 +18,54 @@ use lsp_types::{
 
 use quince::ast::{Expr, ExprKind, Stmt, StmtKind};
 use quince::error::QuinceError;
+use quince::infer::{self, Type, Types};
 use quince::token::{Span, KEYWORDS};
 
 struct DocumentState {
     text: String,
     ast: Option<Vec<Stmt>>,
+    /// What the inference pass last made of this document.
+    ///
+    /// Held beside the tree rather than computed per request, because every
+    /// request over one document would compute the same thing and the answer
+    /// only changes when the text does.
+    ///
+    /// *Last*, not *current*, and that word is doing the work. Typing the `.`
+    /// in `p.` is what makes a document stop parsing, so the moment the pass is
+    /// most wanted is the moment there is no tree to run it over. Keeping the
+    /// previous answer is what makes it useful at all: the text before the
+    /// cursor is unchanged, so the offsets the lookup cares about still point
+    /// where they did, and a scope that contained the cursor still contains it.
+    /// What goes stale is everything after the edit, which is not what anyone
+    /// is asking about.
+    types: Option<Types>,
+}
+
+impl DocumentState {
+    /// Reads a document, keeping what was known about the one it replaces.
+    fn new(text: String, previous: Option<DocumentState>) -> DocumentState {
+        let ast = parse_ast_lenient(&text);
+        let types = match &ast {
+            Some(ast) => Some(infer::infer(ast)),
+            None => previous.and_then(|state| state.types),
+        };
+        DocumentState { text, ast, types }
+    }
+
+    /// What the pass made of the dotted path the cursor sits after.
+    ///
+    /// `Unknown` covers three cases that are one case to a caller: the document
+    /// did not parse, the path was not a path, or nothing about it was
+    /// decidable. All three mean the same thing — ask the heuristics.
+    fn inferred(&self, pos: Position) -> Type {
+        let Some(types) = &self.types else {
+            return Type::Unknown;
+        };
+        let Some(path) = receiver_path(&self.text, pos) else {
+            return Type::Unknown;
+        };
+        types.of_path(&path, position_to_offset(&self.text, pos))
+    }
 }
 
 const LEGEND_TYPES: &[SemanticTokenType] = &[
@@ -184,16 +227,17 @@ fn handle_notification(
             let params: DidOpenTextDocumentParams = serde_json::from_value(notif.params)?;
             let uri = params.text_document.uri;
             let text = params.text_document.text;
-            let ast = parse_ast_lenient(&text);
-            documents.insert(uri.clone(), DocumentState { text: text.clone(), ast });
+            let previous = documents.remove(&uri);
+            documents.insert(uri.clone(), DocumentState::new(text.clone(), previous));
             publish_diagnostics(connection, uri, &text)?;
         }
         "textDocument/didChange" => {
             let params: DidChangeTextDocumentParams = serde_json::from_value(notif.params)?;
             let uri = params.text_document.uri;
             if let Some(change) = params.content_changes.into_iter().last() {
-                let ast = parse_ast_lenient(&change.text);
-                documents.insert(uri.clone(), DocumentState { text: change.text.clone(), ast });
+                let previous = documents.remove(&uri);
+                let state = DocumentState::new(change.text.clone(), previous);
+                documents.insert(uri.clone(), state);
                 publish_diagnostics(connection, uri, &change.text)?;
             }
         }
@@ -358,9 +402,23 @@ fn get_completions(state: Option<&DocumentState>, pos: Position) -> Vec<Completi
 
     // 2. Traversal for AST & Text Symbols (Classes, Methods, Functions, Variables)
     if is_dot_trigger {
-        if let Some(receiver) = get_receiver_before_dot(&state.text, pos) {
-            let target_class = infer_receiver_class(&state.text, &receiver, pos);
-            collect_dot_completions_for_class(&state.text, state.ast.as_deref(), &receiver, target_class.as_deref(), &mut items);
+        // The pass first, and the text heuristics only where it declines to
+        // answer. That ordering is the whole of the arrangement: what the pass
+        // says it knows, it knows, and `Unknown` is not a weak answer that a
+        // guess can outrank — it is the pass saying the guess is all there is.
+        match state.inferred(pos) {
+            Type::Module(module) => collect_module_completions(&module, &mut items),
+            Type::Class(class) => {
+                if let Some(receiver) = get_receiver_before_dot(&state.text, pos) {
+                    collect_dot_completions_for_class(&state.text, state.ast.as_deref(), &receiver, Some(&class), &mut items);
+                }
+            }
+            Type::Unknown => {
+                if let Some(receiver) = get_receiver_before_dot(&state.text, pos) {
+                    let target_class = infer_receiver_class(&state.text, &receiver, pos);
+                    collect_dot_completions_for_class(&state.text, state.ast.as_deref(), &receiver, target_class.as_deref(), &mut items);
+                }
+            }
         }
     } else {
         if let Some(ast) = &state.ast {
@@ -449,6 +507,78 @@ fn get_receiver_before_dot(source: &str, pos: Position) -> Option<String> {
     } else {
         Some(cleaned.to_string())
     }
+}
+
+/// The dotted path the cursor sits at the end of, ready for the inference pass.
+///
+/// `o.inner.`, `math.`, `b.twin().` — read backwards from the dot, one segment
+/// at a time, with every argument list normalised to `()` because the arguments
+/// change nothing about what a call produces.
+///
+/// The parentheses are kept, unlike in [`get_receiver_before_dot`], and that is
+/// the point of having a second function rather than changing that one: `Point`
+/// is a class and `Point()` is a `Point`, and the heuristics cannot tell those
+/// apart because they decide by spelling. This can, so it must not throw away
+/// the evidence on the way.
+///
+/// A path that does not start at a name — `"abc".`, `xs[0].` — is `None`
+/// rather than an approximation. The heuristics already read literals, and this
+/// is not a parser.
+fn receiver_path(source: &str, pos: Position) -> Option<String> {
+    let line = source.lines().nth(pos.line as usize)?;
+    let col = (pos.character as usize).min(line.len());
+    let before: Vec<char> = line[..col].trim_end().strip_suffix('.')?.trim_end().chars().collect();
+
+    let is_name_char = |c: char| c == '_' || c.is_alphanumeric();
+    let mut segments: Vec<String> = Vec::new();
+    let mut cursor = before.len();
+
+    loop {
+        // An argument list, skipped over as a whole so that a call on something
+        // nested — `f(g(x)).` — still finds the name in front of it.
+        let call = cursor > 0 && before[cursor - 1] == ')';
+        if call {
+            let mut depth = 0;
+            loop {
+                if cursor == 0 {
+                    return None;
+                }
+                cursor -= 1;
+                match before[cursor] {
+                    ')' => depth += 1,
+                    '(' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let end = cursor;
+        while cursor > 0 && is_name_char(before[cursor - 1]) {
+            cursor -= 1;
+        }
+        if cursor == end {
+            return None;
+        }
+        let mut segment: String = before[cursor..end].iter().collect();
+        if call {
+            segment.push_str("()");
+        }
+        segments.push(segment);
+
+        if cursor > 0 && before[cursor - 1] == '.' {
+            cursor -= 1;
+        } else {
+            break;
+        }
+    }
+
+    segments.reverse();
+    Some(segments.join("."))
 }
 
 fn infer_receiver_class(source: &str, receiver: &str, pos: Position) -> Option<String> {
@@ -841,6 +971,34 @@ fn collect_dot_completions_for_class(
     }
 }
 
+/// What a module offers after its dot.
+///
+/// Read off the module's own member list, which is the same list `import`
+/// binds from — so a member added to the library is offered without this file
+/// being touched, and one removed stops being offered for the same reason.
+fn collect_module_completions(module: &str, items: &mut Vec<CompletionItem>) {
+    let Some(module) = quince::stdlib::module_named(module) else {
+        return;
+    };
+    for (name, member) in module.members {
+        let (kind, detail) = match member {
+            quince::stdlib::Member::Fn(native) => {
+                (CompletionItemKind::FUNCTION, signature_of(native))
+            }
+            quince::stdlib::Member::Const(_) => (
+                CompletionItemKind::CONSTANT,
+                format!("{}.{name}", module.name),
+            ),
+        };
+        items.push(CompletionItem {
+            label: name.to_string(),
+            kind: Some(kind),
+            detail: Some(detail),
+            ..Default::default()
+        });
+    }
+}
+
 fn collect_ast_completions(source: &str, stmts: &[Stmt], pos: Position, items: &mut Vec<CompletionItem>) {
     for stmt in stmts {
         let stmt_pos = offset_to_position(source, stmt.span.start as usize);
@@ -996,38 +1154,61 @@ fn get_hover(state: Option<&DocumentState>, pos: Position) -> Option<Hover> {
         });
     }
 
-    // Check user declarations in AST
-    if let Some(ast) = &state.ast
-        && let Some(info) = find_decl_hover(ast, &word)
-    {
-        return Some(Hover {
-            contents: HoverContents::Scalar(MarkedString::LanguageString(LanguageString {
-                language: "quince".to_string(),
-                value: info,
-            })),
-            range: None,
-        });
-    }
+    // What the name was declared as, and what the pass made of what it holds.
+    // Two different questions, and a binding needs both: `let total` says which
+    // keyword bound the name and nothing whatever about the value, which is the
+    // half a reader hovering over it is usually after.
+    let declaration = state
+        .ast
+        .as_deref()
+        .and_then(|ast| find_decl_hover(ast, &word));
+    let inferred = state
+        .types
+        .as_ref()
+        .map(|types| types.of_name(&word, position_to_offset(&state.text, pos)))
+        .unwrap_or_default();
 
-    None
+    let value = match (declaration, &inferred) {
+        // A module answers for itself whatever else was found: there is no
+        // class to name, and which module it is is the whole of the answer.
+        (_, Type::Module(module)) => format!("module {module}"),
+        (Some((line, true)), _) => line,
+        (Some((line, false)), Type::Class(class)) => format!("{line}: {class}"),
+        (Some((line, false)), Type::Unknown) => line,
+        (None, Type::Class(class)) => format!("{word}: {class}"),
+        (None, Type::Unknown) => return None,
+    };
+
+    Some(Hover {
+        contents: HoverContents::Scalar(MarkedString::LanguageString(LanguageString {
+            language: "quince".to_string(),
+            value,
+        })),
+        range: None,
+    })
 }
 
-fn find_decl_hover(stmts: &[Stmt], target: &str) -> Option<String> {
+/// A one-line declaration for `target`, and whether that line already says what
+/// the name holds.
+///
+/// A `fn` or a `class` line does — appending `: function` to `fn scaled(k)`
+/// would be noise. A binding line does not, which is exactly where the inferred
+/// type earns its place.
+fn find_decl_hover(stmts: &[Stmt], target: &str) -> Option<(String, bool)> {
     for stmt in stmts {
         match &stmt.kind {
             StmtKind::Fn { decl, .. } if decl.name == target => {
                 let params: Vec<_> = decl.params.iter().map(|p| p.name.as_str()).collect();
-                return Some(format!("fn {}({})", decl.name, params.join(", ")));
+                return Some((format!("fn {}({})", decl.name, params.join(", ")), true));
             }
             StmtKind::Class { name, parent, .. } if name == target => {
-                if let Some(p) = parent {
-                    return Some(format!("class {name} extends {}", p.name));
-                } else {
-                    return Some(format!("class {name}"));
-                }
+                return match parent {
+                    Some(p) => Some((format!("class {name} extends {}", p.name), true)),
+                    None => Some((format!("class {name}"), true)),
+                };
             }
             StmtKind::Let { name, bind, .. } if name == target => {
-                return Some(format!("{} {name}", bind.word()));
+                return Some((format!("{} {name}", bind.word()), false));
             }
             _ => {}
         }
@@ -1828,6 +2009,22 @@ fn extract_params_from_line(line: &str) -> Vec<String> {
         .collect()
 }
 
+/// The byte offset an LSP position names, which is what a `Span` is measured in.
+fn position_to_offset(source: &str, pos: Position) -> u32 {
+    let mut offset = 0usize;
+    for (index, line) in source.split('\n').enumerate() {
+        if index == pos.line as usize {
+            let col = line
+                .char_indices()
+                .nth(pos.character as usize)
+                .map_or(line.len(), |(index, _)| index);
+            return (offset + col) as u32;
+        }
+        offset += line.len() + 1;
+    }
+    source.len() as u32
+}
+
 fn offset_to_position(source: &str, offset: usize) -> Position {
     let offset = offset.min(source.len());
     let line = source[..offset].matches('\n').count() as u32;
@@ -1846,10 +2043,7 @@ mod tests {
     #[test]
     fn signature_help_extracts_class_constructor_params() {
         let code = "class Point {\n    op init(x, y) {\n        self.x = x\n        self.y = y\n    }\n}\n\nlet p = Point(3, ";
-        let state = DocumentState {
-            text: code.to_string(),
-            ast: parse_ast_lenient(code),
-        };
+        let state = DocumentState::new(code.to_string(), None);
         let pos = Position { line: 7, character: 17 }; // Cursor right after `, `
         let help = get_signature_help(Some(&state), pos).expect("Expected signature help");
         assert_eq!(help.signatures.len(), 1);
@@ -1860,10 +2054,7 @@ mod tests {
     #[test]
     fn signature_help_extracts_method_params() {
         let code = "class Point {\n    fn scaled(k) {\n        return Point(self.x * k, self.y * k)\n    }\n}\n\nlet p = Point(3, 4)\np.scaled(";
-        let state = DocumentState {
-            text: code.to_string(),
-            ast: parse_ast_lenient(code),
-        };
+        let state = DocumentState::new(code.to_string(), None);
         let pos = Position { line: 7, character: 9 };
         let help = get_signature_help(Some(&state), pos).expect("Expected signature help");
         assert_eq!(help.signatures.len(), 1);
@@ -1874,10 +2065,7 @@ mod tests {
     #[test]
     fn signature_help_extracts_builtin_method_params() {
         let code = "let text = \"hello world\"\ntext.split(";
-        let state = DocumentState {
-            text: code.to_string(),
-            ast: parse_ast_lenient(code),
-        };
+        let state = DocumentState::new(code.to_string(), None);
         let pos = Position { line: 1, character: 11 };
         let help = get_signature_help(Some(&state), pos).expect("Expected signature help");
         assert_eq!(help.signatures.len(), 1);
@@ -1888,10 +2076,7 @@ mod tests {
     #[test]
     fn signature_help_extracts_literal_string_method_params() {
         let code = "\"test\".split(";
-        let state = DocumentState {
-            text: code.to_string(),
-            ast: parse_ast_lenient(code),
-        };
+        let state = DocumentState::new(code.to_string(), None);
         let pos = Position { line: 0, character: 13 };
         let help = get_signature_help(Some(&state), pos).expect("Expected signature help for literal string method");
         assert_eq!(help.signatures.len(), 1);
@@ -1902,10 +2087,7 @@ mod tests {
     #[test]
     fn signature_help_extracts_error_class_params() {
         let code = "TypeError(";
-        let state = DocumentState {
-            text: code.to_string(),
-            ast: parse_ast_lenient(code),
-        };
+        let state = DocumentState::new(code.to_string(), None);
         let pos = Position { line: 0, character: 10 };
         let help = get_signature_help(Some(&state), pos).expect("Expected signature help for TypeError");
         assert_eq!(help.signatures.len(), 1);
@@ -1916,10 +2098,7 @@ mod tests {
     #[test]
     fn completion_excludes_symbols_defined_after_cursor() {
         let code = "let defined_above = 1\n\nlet defined_below = 2";
-        let state = DocumentState {
-            text: code.to_string(),
-            ast: parse_ast_lenient(code),
-        };
+        let state = DocumentState::new(code.to_string(), None);
         let pos = Position { line: 1, character: 0 };
         let items = get_completions(Some(&state), pos);
         let labels: Vec<String> = items.into_iter().map(|i| i.label).collect();
@@ -1930,10 +2109,7 @@ mod tests {
     #[test]
     fn signature_help_extracts_inherited_constructor_params() {
         let code = "class Animal {\n    op init(name) {\n        self.name = name\n    }\n}\nclass Cat extends Animal {}\nCat(";
-        let state = DocumentState {
-            text: code.to_string(),
-            ast: parse_ast_lenient(code),
-        };
+        let state = DocumentState::new(code.to_string(), None);
         let pos = Position { line: 6, character: 4 };
         let help = get_signature_help(Some(&state), pos).expect("Expected signature help for inherited constructor");
         assert_eq!(help.signatures.len(), 1);
@@ -1944,14 +2120,162 @@ mod tests {
     #[test]
     fn signature_help_extracts_super_method_params() {
         let code = "class Animal {\n    op init(name) {\n        self.name = name\n    }\n}\nclass Dog extends Animal {\n    op init(name, breed) {\n        super.init(";
-        let state = DocumentState {
-            text: code.to_string(),
-            ast: parse_ast_lenient(code),
-        };
+        let state = DocumentState::new(code.to_string(), None);
         let pos = Position { line: 7, character: 19 };
         let help = get_signature_help(Some(&state), pos).expect("Expected signature help for super.init");
         assert_eq!(help.signatures.len(), 1);
         assert_eq!(help.signatures[0].label, "fn init(name)");
         assert_eq!(help.active_parameter, Some(0));
+    }
+
+    /// The position just past the end of `code`, which is where the cursor is
+    /// when someone has just typed the last character of it.
+    fn end_of(code: &str) -> Position {
+        let line = code.matches('\n').count() as u32;
+        let start = code.rfind('\n').map_or(0, |index| index + 1);
+        Position {
+            line,
+            character: code[start..].chars().count() as u32,
+        }
+    }
+
+    fn path_at(code: &str) -> Option<String> {
+        receiver_path(code, end_of(code))
+    }
+
+    /// A document typed rather than opened: each string is the whole text after
+    /// one edit.
+    ///
+    /// Which is the only honest way to test a completion after a `.`, because
+    /// the `.` is what stops the document parsing — a state built from the
+    /// final text alone would be testing a document nobody ever has.
+    fn typed(edits: &[&str]) -> DocumentState {
+        let mut state = None;
+        for text in edits {
+            state = Some(DocumentState::new(text.to_string(), state));
+        }
+        state.expect("at least one edit")
+    }
+
+    /// The labels a completion request comes back with, after typing the `.`.
+    fn completions_after(before: &str) -> Vec<String> {
+        let code = format!("{before}.");
+        let state = typed(&[before, &code]);
+        let mut labels: Vec<String> = get_completions(Some(&state), end_of(&code))
+            .into_iter()
+            .map(|item| item.label)
+            .collect();
+        labels.sort();
+        labels.dedup();
+        labels
+    }
+
+    #[test]
+    fn a_receiver_path_keeps_the_parentheses_the_heuristics_throw_away() {
+        assert_eq!(path_at("p.").as_deref(), Some("p"));
+        assert_eq!(path_at("o.inner.").as_deref(), Some("o.inner"));
+        assert_eq!(path_at("Point().").as_deref(), Some("Point()"));
+        // The arguments say nothing about the type, so they are normalised
+        // away rather than parsed.
+        assert_eq!(path_at("Point(3, 4).").as_deref(), Some("Point()"));
+        assert_eq!(path_at("f(g(x)).").as_deref(), Some("f()"));
+        assert_eq!(path_at("let q = b.twin().").as_deref(), Some("b.twin()"));
+
+        // Not a path, and not approximated into one — the heuristics read
+        // literals, and this is not a parser.
+        assert_eq!(path_at("\"abc\"."), None);
+        assert_eq!(path_at("xs[0]."), None);
+        assert_eq!(path_at("p"), None);
+    }
+
+    #[test]
+    fn a_position_and_an_offset_name_the_same_byte() {
+        let code = "let a = 1\nfn f() {\n  return 2\n}\n";
+        for offset in 0..=code.len() {
+            let position = offset_to_position(code, offset);
+            assert_eq!(
+                position_to_offset(code, position) as usize,
+                offset,
+                "offset {offset} did not survive the round trip"
+            );
+        }
+    }
+
+    #[test]
+    fn dot_completion_offers_the_class_the_pass_worked_out() {
+        // The receiver is a constructor call, which the capital-letter
+        // heuristic gets right by accident and the pass gets right by reading
+        // the declaration. What the heuristic cannot do is the second half:
+        // `made` holds a `Box` because that is what `make` returns.
+        let labels = completions_after("class Box {\n    op init() {\n        self.n = 1\n    }\n    fn only_on_box() {\n        return 1\n    }\n}\nfn make() {\n    return Box()\n}\nlet made = make()\nmade");
+        assert!(labels.contains(&"only_on_box".to_string()), "{labels:?}");
+        assert!(labels.contains(&"n".to_string()), "{labels:?}");
+    }
+
+    #[test]
+    fn dot_completion_offers_a_modules_members() {
+        // Nothing offered these before: a module is not a class, so the
+        // class-shaped heuristic had nothing to say about `math.` at all.
+        let labels = completions_after("import math\nmath");
+        assert!(labels.contains(&"floor".to_string()), "{labels:?}");
+        assert!(labels.contains(&"pi".to_string()), "{labels:?}");
+        // And only that module's, which is the point of `import` — `read` is
+        // `io`'s and has no business here.
+        assert!(!labels.contains(&"read".to_string()), "{labels:?}");
+    }
+
+    #[test]
+    fn hover_over_a_binding_says_what_it_holds() {
+        let code = "let total = 1 + 2\n";
+        let state = DocumentState::new(code.to_string(), None);
+        let pos = Position { line: 0, character: 5 };
+        let hover = get_hover(Some(&state), pos).expect("a binding hovers");
+        let HoverContents::Scalar(MarkedString::LanguageString(shown)) = hover.contents else {
+            panic!("expected a quince code block");
+        };
+        assert_eq!(shown.value, "let total: int");
+    }
+
+    #[test]
+    fn hover_over_a_declaration_does_not_repeat_itself() {
+        // `fn make()` already says what the name holds, so nothing is appended.
+        let code = "fn make() {\n    return 1\n}\n";
+        let state = DocumentState::new(code.to_string(), None);
+        let pos = Position { line: 0, character: 4 };
+        let hover = get_hover(Some(&state), pos).expect("a function hovers");
+        let HoverContents::Scalar(MarkedString::LanguageString(shown)) = hover.contents else {
+            panic!("expected a quince code block");
+        };
+        assert_eq!(shown.value, "fn make()");
+    }
+
+    #[test]
+    fn hover_says_nothing_where_nothing_is_known() {
+        // A parameter carries no information, and there is no declaration line
+        // for one either. Saying nothing is the honest answer.
+        let code = "fn f(x) {\n    return x\n}\n";
+        let state = DocumentState::new(code.to_string(), None);
+        let pos = Position { line: 1, character: 11 };
+        assert!(get_hover(Some(&state), pos).is_none());
+    }
+
+    /// A native's result is what the native says it is.
+    ///
+    /// This asserted the opposite until `Native` grew a `returns` field: the
+    /// pass had nothing to read, the heuristics answered, and they read the
+    /// literal at the front of the line and called a list a string. `words` is
+    /// a list, and the editor now offers a list's methods on it.
+    #[test]
+    fn a_natives_result_is_what_the_native_says_it_is() {
+        let labels = completions_after("let words = \"a,b,c\".split(\",\")\nwords");
+        assert!(labels.contains(&"push".to_string()), "{labels:?}");
+        assert!(!labels.contains(&"lower".to_string()), "{labels:?}");
+
+        // And the other direction. `join` is a string's method taking the list,
+        // so this crosses from a list back to a string — which the heuristics
+        // got wrong the same way, by reading the `[` and stopping.
+        let labels = completions_after("let sep = \", \"\nlet line = sep.join([\"a\", \"b\"])\nline");
+        assert!(labels.contains(&"upper".to_string()), "{labels:?}");
+        assert!(!labels.contains(&"push".to_string()), "{labels:?}");
     }
 }

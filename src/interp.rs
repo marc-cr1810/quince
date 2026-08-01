@@ -3621,6 +3621,8 @@ pub static BUILTINS: &[&Native] = &[&PRINT, &LEN, &TYPE];
 static PRINT: Native = Native {
     name: "print",
     arity: None,
+    returns: Some(Builtin::Nil),
+    doc: "Writes its arguments to standard output, separated by spaces, and ends the line.",
     func: |interp, args, _span| {
         // Every argument is rendered before anything is written, so a failure
         // part-way through prints nothing rather than half a line. Printing is
@@ -3637,6 +3639,8 @@ static PRINT: Native = Native {
 static LEN: Native = Native {
     name: "len",
     arity: Some(1),
+    returns: Some(Builtin::Int),
+    doc: "How many characters are in a string, items in a list, or entries in a dict. A class may answer for itself with `op len`.",
     // Not a method, so it does not come through `call_method`'s substitution and
     // has to unwrap for itself. The error names the class rather than its base:
     // `len` failing on a `Box` should say `Box`.
@@ -3677,6 +3681,8 @@ static LEN: Native = Native {
 pub static REVERSE: Native = Native {
     name: "reverse",
     arity: Some(1),
+    returns: Some(Builtin::List),
+    doc: "A new list with the items in the opposite order. The receiver is left alone.",
     func: |interp, args, span| {
         let source = receiver_list("reverse", args, &interp.heap, span)?;
         let mut items = interp.heap.list(source).to_vec();
@@ -3694,6 +3700,8 @@ pub static REVERSE: Native = Native {
 pub static FIND: Native = Native {
     name: "find",
     arity: Some(2),
+    returns: Some(Builtin::Int),
+    doc: "Where `item` first appears in the list, or `-1` if it is not there.",
     func: |interp, args, span| {
         let source = receiver_list("find", args, &interp.heap, span)?;
         let mut index = 0;
@@ -3726,6 +3734,8 @@ pub static FIND: Native = Native {
 pub static SUM: Native = Native {
     name: "sum",
     arity: Some(1),
+    returns: None,
+    doc: "The items added together with `+`, left to right, so its type is whatever adding them gives. An empty list sums to `0`.",
     func: |interp, args, span| {
         let source = receiver_list("sum", args, &interp.heap, span)?;
         let mark = interp.temps.len();
@@ -3828,6 +3838,8 @@ fn walk_list(
 pub static MAP: Native = Native {
     name: "map",
     arity: Some(2),
+    returns: Some(Builtin::List),
+    doc: "A new list holding `f` applied to each item.",
     func: |interp, args, span| {
         walk_list(interp, "map", args, span, |interp, item, out| {
             let mapped = interp.call(args[1].clone(), vec![item], span)?;
@@ -3848,6 +3860,8 @@ pub static MAP: Native = Native {
 pub static FILTER: Native = Native {
     name: "filter",
     arity: Some(2),
+    returns: Some(Builtin::List),
+    doc: "A new list holding the items `f` answered truthily for.",
     func: |interp, args, span| {
         walk_list(interp, "filter", args, span, |interp, item, out| {
             let verdict = interp.call(args[1].clone(), vec![item.clone()], span)?;
@@ -3878,6 +3892,8 @@ pub static FILTER: Native = Native {
 pub static SORT: Native = Native {
     name: "sort",
     arity: Some(1),
+    returns: Some(Builtin::List),
+    doc: "A new list with the items in ascending order. Stable, and it asks `op lt` or `op cmp` where a class defines one.",
     func: |interp, args, span| {
         let source = receiver_list("sort", args, &interp.heap, span)?;
         let mark = interp.temps.len();
@@ -3934,6 +3950,8 @@ fn merge_sort(
 pub static PUSH: Native = Native {
     name: "push",
     arity: Some(2),
+    returns: Some(Builtin::Nil),
+    doc: "Adds `item` to the end of the list.",
     func: |interp, args, span| match &args[0] {
         Value::List(id) => {
             let pushed = interp
@@ -3957,6 +3975,8 @@ pub static PUSH: Native = Native {
 pub static KEYS: Native = Native {
     name: "keys",
     arity: Some(1),
+    returns: Some(Builtin::List),
+    doc: "The dict's keys, in insertion order.",
     func: |interp, args, span| match &args[0] {
         Value::Dict(id) => {
             let keys: Vec<_> = interp.heap.dict(*id).keys().collect();
@@ -3976,6 +3996,8 @@ pub static KEYS: Native = Native {
 pub static VALUES: Native = Native {
     name: "values",
     arity: Some(1),
+    returns: Some(Builtin::List),
+    doc: "The dict's values, in insertion order.",
     func: |interp, args, span| match &args[0] {
         Value::Dict(id) => {
             let values: Vec<_> = interp.heap.dict(*id).values().cloned().collect();
@@ -4007,6 +4029,8 @@ pub static VALUES: Native = Native {
 pub static GET: Native = Native {
     name: "get",
     arity: Some(3),
+    returns: None,
+    doc: "The value stored under `key`, or `default` if there is none — so its type is whatever the dict holds.",
     func: |interp, args, span| match args[0].base(&interp.heap) {
         Value::Dict(id) => {
             let key = key_of(&interp.heap, &args[1], span)?;
@@ -4031,6 +4055,8 @@ pub static GET: Native = Native {
 pub static REMOVE: Native = Native {
     name: "remove",
     arity: Some(2),
+    returns: None,
+    doc: "Takes `key` out of the dict and answers with what it held. Raises if the key is not there.",
     func: |interp, args, span| match &args[0] {
         Value::Dict(id) => {
             let key = key_of(&interp.heap, &args[1], span)?;
@@ -4102,6 +4128,8 @@ fn text_arg(
 pub static REPEAT: Native = Native {
     name: "repeat",
     arity: Some(2),
+    returns: Some(Builtin::Str),
+    doc: "The string written `n` times, end to end.",
     func: |interp, args, span| {
         let Value::Int(count) = args[1].base(&interp.heap) else {
             return Err(QuinceError::new(
@@ -4130,24 +4158,32 @@ pub static REPEAT: Native = Native {
 pub static UPPER: Native = Native {
     name: "upper",
     arity: Some(1),
+    returns: Some(Builtin::Str),
+    doc: "The string with every character in upper case.",
     func: |_interp, args, _span| Ok(Value::Str(Rc::from(text(args).to_uppercase()))),
 };
 
 pub static LOWER: Native = Native {
     name: "lower",
     arity: Some(1),
+    returns: Some(Builtin::Str),
+    doc: "The string with every character in lower case.",
     func: |_interp, args, _span| Ok(Value::Str(Rc::from(text(args).to_lowercase()))),
 };
 
 pub static TRIM: Native = Native {
     name: "trim",
     arity: Some(1),
+    returns: Some(Builtin::Str),
+    doc: "The string without leading or trailing whitespace.",
     func: |_interp, args, _span| Ok(Value::Str(Rc::from(text(args).trim()))),
 };
 
 pub static STARTS_WITH: Native = Native {
     name: "starts_with",
     arity: Some(2),
+    returns: Some(Builtin::Bool),
+    doc: "Whether the string begins with `prefix`.",
     func: |interp, args, span| {
         let prefix = text_arg(&interp.heap, args, 1, "starts_with", span)?;
         Ok(Value::Bool(text(args).starts_with(prefix.as_ref())))
@@ -4157,6 +4193,8 @@ pub static STARTS_WITH: Native = Native {
 pub static ENDS_WITH: Native = Native {
     name: "ends_with",
     arity: Some(2),
+    returns: Some(Builtin::Bool),
+    doc: "Whether the string ends with `suffix`.",
     func: |interp, args, span| {
         let suffix = text_arg(&interp.heap, args, 1, "ends_with", span)?;
         Ok(Value::Bool(text(args).ends_with(suffix.as_ref())))
@@ -4166,6 +4204,8 @@ pub static ENDS_WITH: Native = Native {
 pub static REPLACE: Native = Native {
     name: "replace",
     arity: Some(3),
+    returns: Some(Builtin::Str),
+    doc: "The string with every `from` replaced by `to`.",
     func: |interp, args, span| {
         let from = text_arg(&interp.heap, args, 1, "replace", span)?;
         if from.is_empty() {
@@ -4189,6 +4229,8 @@ pub static REPLACE: Native = Native {
 pub static SPLIT: Native = Native {
     name: "split",
     arity: Some(2),
+    returns: Some(Builtin::List),
+    doc: "The string cut at every `separator`, as a list of strings. The separator is not kept, and it may not be empty — use `chars`.",
     func: |interp, args, span| {
         let sep = text_arg(&interp.heap, args, 1, "split", span)?;
         if sep.is_empty() {
@@ -4209,6 +4251,8 @@ pub static SPLIT: Native = Native {
 pub static CHARS: Native = Native {
     name: "chars",
     arity: Some(1),
+    returns: Some(Builtin::List),
+    doc: "The string's characters, each as a string of its own.",
     func: |interp, args, _span| {
         let chars: Vec<Value> = text(args)
             .chars()
@@ -4223,6 +4267,8 @@ pub static CHARS: Native = Native {
 pub static JOIN: Native = Native {
     name: "join",
     arity: Some(2),
+    returns: Some(Builtin::Str),
+    doc: "The list's items rendered and joined with the string between them.",
     func: |interp, args, span| {
         let Value::List(id) = &args[1] else {
             return Err(QuinceError::new(
@@ -4258,6 +4304,8 @@ pub static JOIN: Native = Native {
 static TYPE: Native = Native {
     name: "type",
     arity: Some(1),
+    returns: Some(Builtin::Str),
+    doc: "The name of the value's type, as a string.",
     func: |interp, args, _span| Ok(Value::Str(Rc::from(args[0].type_name(&interp.heap)))),
 };
 
@@ -4329,6 +4377,8 @@ fn checked_trunc(f: f64, span: Span) -> Result<i64, QuinceError> {
 pub static INT_INIT: Native = Native {
     name: "int",
     arity: Some(1),
+    returns: Some(Builtin::Int),
+    doc: "An int made from `value`. A float truncates toward zero, a string is parsed, and a bool is `1` or `0`.",
     // Dispatching on the base, so a class extending `int` converts as the int it
     // is, while the message still names the class the line was written with.
     func: |interp, args, span| match &args[0].base(&interp.heap).clone() {
@@ -4357,6 +4407,8 @@ pub static INT_INIT: Native = Native {
 pub static FLOAT_INIT: Native = Native {
     name: "float",
     arity: Some(1),
+    returns: Some(Builtin::Float),
+    doc: "A float made from `value`.",
     func: |interp, args, span| match &args[0].base(&interp.heap).clone() {
         Value::Float(f) => Ok(Value::Float(*f)),
         Value::Int(n) => Ok(Value::Float(*n as f64)),
@@ -4377,6 +4429,8 @@ pub static FLOAT_INIT: Native = Native {
 pub static STR_INIT: Native = Native {
     name: "string",
     arity: Some(1),
+    returns: Some(Builtin::Str),
+    doc: "The value rendered as a string, the same way `print` writes it. A class may answer for itself with `op string`.",
     func: |interp, args, _span| {
         let text = interp.display(&args[0], Ask::Class)?;
         Ok(Value::Str(Rc::from(text)))
@@ -4387,6 +4441,8 @@ pub static STR_INIT: Native = Native {
 pub static BOOL_INIT: Native = Native {
     name: "bool",
     arity: Some(1),
+    returns: Some(Builtin::Bool),
+    doc: "Whether `value` is truthy. A class may answer for itself with `op bool`.",
     func: |interp, args, _span| Ok(Value::Bool(interp.is_truthy(&args[0])?)),
 };
 
@@ -4397,6 +4453,8 @@ pub static BOOL_INIT: Native = Native {
 pub static LIST_INIT: Native = Native {
     name: "list",
     arity: None,
+    returns: Some(Builtin::List),
+    doc: "A new list, empty or holding what `value` iterates to.",
     func: |interp, args, span| match args {
         [] => Ok(Value::List(interp.heap.alloc(Object::List(Vec::new())))),
         [only] => match only.base(&interp.heap).clone() {
@@ -4419,6 +4477,8 @@ pub static LIST_INIT: Native = Native {
 pub static DICT_INIT: Native = Native {
     name: "dict",
     arity: None,
+    returns: Some(Builtin::Dict),
+    doc: "A new dict, empty or built from `value`.",
     func: |interp, args, span| match args {
         [] => Ok(Value::Dict(interp.heap.alloc(Object::Dict(Dict::new())))),
         [only] => match only.base(&interp.heap).clone() {

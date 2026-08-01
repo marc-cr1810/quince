@@ -5,6 +5,7 @@ pub mod dict;
 pub mod env;
 pub mod error;
 pub mod heap;
+pub mod infer;
 pub mod interp;
 pub mod lexer;
 pub mod parser;

@@ -300,3 +300,237 @@ fn the_binary_runs_a_program_end_to_end() {
     );
     assert_eq!(String::from_utf8_lossy(&output.stdout), "hello, world\n");
 }
+
+/// What the pass claims about a program is what the program does.
+///
+/// The corpus is the only place these two can be put beside each other. A unit
+/// test asserts that the pass says `int`; this asserts that the value which
+/// ends up under that name *is* an int, over a hundred programs nobody wrote
+/// with a type checker in mind. A pass that is allowed to answer "unknown" has
+/// exactly one way to be wrong — answering something else — and this is what
+/// looks for it.
+///
+/// Only globals, and only cases that ran to the end: a program that raised
+/// stopped with its names in whatever state it stopped in, and a local is gone
+/// by the time there is anything to read it from.
+#[test]
+fn what_the_pass_claims_is_what_the_programs_produce() {
+    quince::interp::with_stack(check_inference);
+}
+
+fn check_inference() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cases");
+    let mut checked = 0;
+    let mut claims = 0;
+    let mut failures = Vec::new();
+
+    let mut entries: Vec<_> = std::fs::read_dir(&dir)
+        .expect("tests/cases should exist")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension().is_some_and(|ext| ext == "qn") || path.join("main.qn").is_file()
+        })
+        .collect();
+    entries.sort();
+
+    for path in entries {
+        let name = path.file_stem().unwrap().to_string_lossy().to_string();
+        let entry = match path.is_dir() {
+            true => path.join("main.qn"),
+            false => path.clone(),
+        };
+        let source = std::fs::read_to_string(&entry).expect("case should be readable");
+        // A case that does not compile is one of the error cases, and has no
+        // program to run or to infer over.
+        let Ok(program) = quince::compile(&source) else {
+            continue;
+        };
+        let types = quince::infer::infer(&program);
+
+        let input = std::fs::read_to_string(path.with_extension("in")).unwrap_or_default();
+        let mut interp = Interp::with_io(
+            Box::new(Captured::default()),
+            Box::new(std::io::Cursor::new(input.into_bytes())),
+        );
+        interp.set_path(entry);
+        if interp.run(&program).is_err() {
+            continue;
+        }
+        checked += 1;
+
+        for (global, value) in interp.get_globals() {
+            // Asked from the end of the file, which is where an editor asks
+            // about a top-level name and where the program has just stopped.
+            let claimed = types.of_name(&global, source.len() as u32);
+            let Some(claimed) = claimed.class_name() else {
+                continue;
+            };
+            claims += 1;
+            let actual = value.type_name(&interp.heap);
+            if claimed != actual {
+                failures.push(format!(
+                    "{name}: `{global}` was inferred as `{claimed}` and is a `{actual}`"
+                ));
+            }
+        }
+    }
+
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    assert!(checked > 40, "only {checked} cases ran");
+    assert!(claims > 150, "only {claims} names were claimed, so this proves little");
+}
+
+/// Every native that declares what it returns, called, with the answer checked.
+///
+/// `Native::returns` is read by the inference pass and believed, so a wrong
+/// entry is not a missing feature — it is the editor confidently naming the
+/// wrong type, which is worse than the `Unknown` it replaced. Nothing in the
+/// type system can check the field, because a native's body is Rust and its
+/// return is a `Value` built at run time. So it is checked the only way it can
+/// be: by calling the thing and asking what came back.
+///
+/// The table below is the one hand-written part, and the completeness assertion
+/// at the end is what keeps it honest — a native that declares a return and has
+/// no call here fails the test rather than going unchecked.
+#[test]
+fn every_declared_return_is_what_the_native_actually_returns() {
+    quince::interp::with_stack(check_returns);
+}
+
+fn check_returns() {
+    // A scratch file for `io`, whose members are the only ones that need the
+    // world to exist before they can be called.
+    let scratch = std::env::temp_dir().join("quince_returns_check.txt");
+    let path = scratch.to_string_lossy().replace('\\', "\\\\");
+    let _ = std::fs::write(&scratch, "one\ntwo\n");
+
+    // `label` names where the native lives, so that two natives called `int`
+    // are told apart. `expr` is a call that reaches it.
+    let calls: &[(&str, String)] = &[
+        ("math.floor", "math.floor(2.5)".into()),
+        ("math.ceil", "math.ceil(2.5)".into()),
+        ("math.round", "math.round(2.5)".into()),
+        ("math.sqrt", "math.sqrt(4)".into()),
+        ("math.pow", "math.pow(2, 3)".into()),
+        ("io.read", format!("io.read(\"{path}\")")),
+        ("io.write", format!("io.write(\"{path}\", \"one\\ntwo\\n\")")),
+        ("io.append", format!("io.append(\"{path}\", \"\")")),
+        ("io.exists", format!("io.exists(\"{path}\")")),
+        ("io.lines", format!("io.lines(\"{path}\")")),
+        ("time.now", "time.now()".into()),
+        ("time.sleep", "time.sleep(0)".into()),
+        ("random.seed", "random.seed(1)".into()),
+        ("random.int", "random.int(1, 2)".into()),
+        ("random.float", "random.float()".into()),
+        ("global.print", "print()".into()),
+        ("global.len", "len(\"ab\")".into()),
+        ("global.type", "type(1)".into()),
+        ("list.reverse", "[1, 2].reverse()".into()),
+        ("list.find", "[1, 2].find(2)".into()),
+        ("list.map", "[1, 2].map(twice)".into()),
+        ("list.filter", "[1, 2].filter(big)".into()),
+        ("list.sort", "[2, 1].sort()".into()),
+        ("list.push", "[1].push(2)".into()),
+        ("dict.keys", "{\"a\": 1}.keys()".into()),
+        ("dict.values", "{\"a\": 1}.values()".into()),
+        ("string.repeat", "\"ab\".repeat(2)".into()),
+        ("string.upper", "\"ab\".upper()".into()),
+        ("string.lower", "\"AB\".lower()".into()),
+        ("string.trim", "\" a \".trim()".into()),
+        ("string.starts_with", "\"ab\".starts_with(\"a\")".into()),
+        ("string.ends_with", "\"ab\".ends_with(\"b\")".into()),
+        ("string.replace", "\"ab\".replace(\"a\", \"c\")".into()),
+        ("string.split", "\"a,b\".split(\",\")".into()),
+        ("string.chars", "\"ab\".chars()".into()),
+        ("string.join", "\",\".join([\"a\", \"b\"])".into()),
+        ("new.int", "int(\"4\")".into()),
+        ("new.float", "float(1)".into()),
+        ("new.string", "string(1)".into()),
+        ("new.bool", "bool(1)".into()),
+        ("new.list", "list()".into()),
+        ("new.dict", "dict()".into()),
+    ];
+
+    let mut source = String::from(
+        "import math\nimport io\nimport time\nimport random\n\
+         fn twice(n) { return n * 2 }\nfn big(n) { return n > 1 }\n",
+    );
+    for (label, expr) in calls {
+        source.push_str(&format!("print(\"{label}\" + \" \" + type({expr}))\n"));
+    }
+
+    let captured = Captured::default();
+    let mut interp = Interp::with_output(Box::new(captured.clone()));
+    let program = quince::compile(&source).expect("the generated program should compile");
+    interp
+        .run(&program)
+        .unwrap_or_else(|err| panic!("the generated program should run: {}", err.message));
+    let _ = std::fs::remove_file(&scratch);
+
+    let mut failures = Vec::new();
+    let mut checked = 0;
+    for line in captured.contents().lines() {
+        // `print()` writes a blank line of its own before its label arrives, so
+        // anything that is not a pair is not an answer.
+        let Some((label, actual)) = line.split_once(' ') else {
+            continue;
+        };
+        let native = native_named(label)
+            .unwrap_or_else(|| panic!("`{label}` does not name a native"));
+        checked += 1;
+        match native.returns {
+            Some(declared) if declared.name() != actual => failures.push(format!(
+                "`{label}` declares it returns `{}` and returned a `{actual}`",
+                declared.name()
+            )),
+            _ => {}
+        }
+    }
+
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    assert_eq!(checked, calls.len(), "not every call reported");
+
+    // And that the table above covers everything that makes a claim. A native
+    // declaring a return with no call here would otherwise be believed by the
+    // editor and checked by nothing.
+    let labelled: Vec<&str> = calls.iter().map(|(label, _)| *label).collect();
+    for (label, native) in every_native() {
+        if native.returns.is_some() && !labelled.contains(&label.as_str()) {
+            failures.push(format!("`{label}` declares a return and is never called here"));
+        }
+        assert!(!native.doc.is_empty(), "`{label}` has no documentation");
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+/// Every native a program can reach, with the label this test names it by.
+fn every_native() -> Vec<(String, &'static quince::value::Native)> {
+    let mut found = Vec::new();
+    for module in quince::stdlib::MODULES {
+        for (name, member) in module.members {
+            if let quince::stdlib::Member::Fn(native) = member {
+                found.push((format!("{}.{name}", module.name), *native));
+            }
+        }
+    }
+    for builtin in quince::class::BUILTINS {
+        let seed = builtin.seed();
+        for (name, native) in seed.methods {
+            found.push((format!("{}.{name}", seed.name), *native));
+        }
+        if let Some(init) = seed.init {
+            found.push((format!("new.{}", seed.name), init));
+        }
+    }
+    for native in quince::interp::BUILTINS {
+        found.push((format!("global.{}", native.name), *native));
+    }
+    found
+}
+
+fn native_named(label: &str) -> Option<&'static quince::value::Native> {
+    every_native()
+        .into_iter()
+        .find_map(|(name, native)| (name == label).then_some(native))
+}

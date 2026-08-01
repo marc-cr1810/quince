@@ -22,6 +22,7 @@ use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::env::Globals;
+use crate::class::Builtin;
 use crate::error::{ErrorKind, QuinceError};
 use crate::heap::{Heap, ObjId, Object};
 use crate::token::Span;
@@ -118,6 +119,8 @@ fn number(name: &str, args: &[Value], heap: &crate::heap::Heap, span: Span) -> R
 static FLOOR: Native = Native {
     name: "floor",
     arity: Some(1),
+    returns: Some(Builtin::Int),
+    doc: "The largest integer that is not greater than `n`.",
     func: |interp, args, span| {
         Ok(Value::Int(
             number("floor", args, &interp.heap, span)?.floor() as i64
@@ -128,6 +131,8 @@ static FLOOR: Native = Native {
 static CEIL: Native = Native {
     name: "ceil",
     arity: Some(1),
+    returns: Some(Builtin::Int),
+    doc: "The smallest integer that is not less than `n`.",
     func: |interp, args, span| {
         Ok(Value::Int(
             number("ceil", args, &interp.heap, span)?.ceil() as i64
@@ -138,6 +143,8 @@ static CEIL: Native = Native {
 static ROUND: Native = Native {
     name: "round",
     arity: Some(1),
+    returns: Some(Builtin::Int),
+    doc: "`n` rounded to the nearest integer, halves away from zero.",
     func: |interp, args, span| {
         Ok(Value::Int(
             number("round", args, &interp.heap, span)?.round() as i64
@@ -148,6 +155,8 @@ static ROUND: Native = Native {
 static ABS: Native = Native {
     name: "abs",
     arity: Some(1),
+    returns: None,
+    doc: "The magnitude of `n`, keeping the type it was given: an int stays an int.",
     func: |interp, args, span| match args[0].base(&interp.heap) {
         Value::Int(n) => Ok(Value::Int(n.abs())),
         _ => Ok(Value::Float(number("abs", args, &interp.heap, span)?.abs())),
@@ -157,6 +166,8 @@ static ABS: Native = Native {
 static SQRT: Native = Native {
     name: "sqrt",
     arity: Some(1),
+    returns: Some(Builtin::Float),
+    doc: "The square root of `n`. Refused for a negative `n` rather than answered with a NaN.",
     func: |interp, args, span| {
         let n = number("sqrt", args, &interp.heap, span)?;
         // Refused rather than answered with a NaN. There is no complex number to
@@ -185,6 +196,8 @@ static SQRT: Native = Native {
 static POW: Native = Native {
     name: "pow",
     arity: Some(2),
+    returns: Some(Builtin::Float),
+    doc: "`base` raised to `exponent`, always as a float.",
     func: |interp, args, span| {
         let base = number("pow", args, &interp.heap, span)?;
         let exponent = number("pow", &args[1..], &interp.heap, span)?;
@@ -199,12 +212,16 @@ static POW: Native = Native {
 static MIN: Native = Native {
     name: "min",
     arity: Some(2),
+    returns: None,
+    doc: "The smaller of two numbers, keeping the type of whichever won.",
     func: |interp, args, span| pick(args, &interp.heap, span, "min"),
 };
 
 static MAX: Native = Native {
     name: "max",
     arity: Some(2),
+    returns: None,
+    doc: "The larger of two numbers, keeping the type of whichever won.",
     func: |interp, args, span| pick(args, &interp.heap, span, "max"),
 };
 
@@ -272,6 +289,8 @@ fn io_error(what: &str, path: &str, err: std::io::Error, span: Span) -> QuinceEr
 static READ: Native = Native {
     name: "read",
     arity: Some(1),
+    returns: Some(Builtin::Str),
+    doc: "The whole contents of the file at `path`, as one string.",
     func: |interp, args, span| {
         let path = text("read", args, &interp.heap, span)?.to_string();
         match std::fs::read_to_string(&path) {
@@ -284,6 +303,8 @@ static READ: Native = Native {
 static WRITE: Native = Native {
     name: "write",
     arity: Some(2),
+    returns: Some(Builtin::Nil),
+    doc: "Writes `contents` to `path`, replacing what was there.",
     func: |interp, args, span| {
         let path = text("write", args, &interp.heap, span)?.to_string();
         let contents = text("write", &args[1..], &interp.heap, span)?.to_string();
@@ -297,6 +318,8 @@ static WRITE: Native = Native {
 static APPEND: Native = Native {
     name: "append",
     arity: Some(2),
+    returns: Some(Builtin::Nil),
+    doc: "Adds `contents` to the end of `path`, creating the file if it is not there.",
     func: |interp, args, span| {
         use std::io::Write as _;
         let path = text("append", args, &interp.heap, span)?.to_string();
@@ -317,6 +340,8 @@ static APPEND: Native = Native {
 static EXISTS: Native = Native {
     name: "exists",
     arity: Some(1),
+    returns: Some(Builtin::Bool),
+    doc: "Whether there is anything at `path`. The one member that answers rather than raising.",
     func: |interp, args, span| {
         let path = text("exists", args, &interp.heap, span)?;
         Ok(Value::Bool(std::path::Path::new(path).exists()))
@@ -326,6 +351,8 @@ static EXISTS: Native = Native {
 static LINES: Native = Native {
     name: "lines",
     arity: Some(1),
+    returns: Some(Builtin::List),
+    doc: "The lines of the file at `path`, without their line endings.",
     func: |interp, args, span| {
         let path = text("lines", args, &interp.heap, span)?.to_string();
         let contents = match std::fs::read_to_string(&path) {
@@ -353,6 +380,8 @@ static LINES: Native = Native {
 static LINE: Native = Native {
     name: "line",
     arity: Some(0),
+    returns: None,
+    doc: "One line from standard input, or `nil` once input has run out. A blank line is an empty string, which is why the end is `nil` and not one.",
     func: |interp, _args, span| {
         let mut line = String::new();
         match interp.read_line(&mut line) {
@@ -383,6 +412,8 @@ static TIME: Module = Module {
 static NOW: Native = Native {
     name: "now",
     arity: Some(0),
+    returns: Some(Builtin::Float),
+    doc: "Seconds since the Unix epoch, as a float.",
     func: |_interp, _args, span| {
         let since = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|_| {
             QuinceError::new("the system clock is set before the epoch", span)
@@ -395,6 +426,8 @@ static NOW: Native = Native {
 static SLEEP: Native = Native {
     name: "sleep",
     arity: Some(1),
+    returns: Some(Builtin::Nil),
+    doc: "Pauses for `seconds`.",
     func: |interp, args, span| {
         let seconds = number("sleep", args, &interp.heap, span)?;
         if seconds < 0.0 {
@@ -454,6 +487,8 @@ pub fn next_u64(state: &mut u64) -> u64 {
 static SEED: Native = Native {
     name: "seed",
     arity: Some(1),
+    returns: Some(Builtin::Nil),
+    doc: "Sets the generator's starting point, so a run can be repeated exactly.",
     func: |interp, args, span| {
         let n = number("seed", args, &interp.heap, span)?;
         interp.set_seed(n as i64 as u64);
@@ -466,6 +501,8 @@ static SEED: Native = Native {
 static RAND_INT: Native = Native {
     name: "int",
     arity: Some(2),
+    returns: Some(Builtin::Int),
+    doc: "A random integer between `low` and `high`, including both ends.",
     func: |interp, args, span| {
         let low = integer("int", args, &interp.heap, span)?;
         let high = integer("int", &args[1..], &interp.heap, span)?;
@@ -491,6 +528,8 @@ static RAND_INT: Native = Native {
 static RAND_FLOAT: Native = Native {
     name: "float",
     arity: Some(0),
+    returns: Some(Builtin::Float),
+    doc: "A random float in `[0, 1)`.",
     func: |interp, _args, _span| {
         // The top 53 bits, which is exactly the mantissa a float has. Taking the
         // low ones instead is the classic way to end up with a generator whose
@@ -503,6 +542,8 @@ static RAND_FLOAT: Native = Native {
 static CHOICE: Native = Native {
     name: "choice",
     arity: Some(1),
+    returns: None,
+    doc: "One item picked from `items`, so its type is whatever the list holds.",
     func: |interp, args, span| {
         let Value::List(id) = args[0].base(&interp.heap) else {
             return Err(QuinceError::new(
