@@ -2488,6 +2488,55 @@ impl Interp {
         None
     }
 
+    /// Every method callable on a value of class `id`, with what it resolves to.
+    ///
+    /// The same two walks [`Interp::find_method`] makes and in the same order,
+    /// so what this lists is exactly what a call would reach: the class and its
+    /// ancestors first, then the extensions beside them. A name declared twice
+    /// appears once, as the one that would run.
+    ///
+    /// For the REPL, which has values rather than source and so can answer
+    /// about a receiver exactly instead of inferring. Before this existed it
+    /// rebuilt half of it by hand into a `HashMap<String, Vec<String>>` and
+    /// missed extensions entirely — `extend list { fn second() … }` was
+    /// callable and never offered.
+    pub fn methods_of(&self, id: ObjId) -> Vec<(String, Value)> {
+        let mut found: Vec<(String, Value)> = Vec::new();
+        let push = |name: &String, value: Value, found: &mut Vec<(String, Value)>| {
+            if !found.iter().any(|(seen, _)| seen == name) {
+                found.push((name.clone(), value));
+            }
+        };
+
+        let mut class = Some(id);
+        while let Some(current) = class {
+            let object = self.heap.class(current);
+            let mut names: Vec<&String> = object.methods.keys().collect();
+            names.sort();
+            for name in names {
+                push(name, object.methods[name].clone(), &mut found);
+            }
+            class = object.parent;
+        }
+
+        let mut class = Some(id);
+        while let Some(current) = class {
+            let mut extensions: Vec<(&String, &Value)> = self
+                .extensions
+                .iter()
+                .filter(|((owner, _), _)| *owner == current)
+                .map(|((_, name), value)| (name, value))
+                .collect();
+            extensions.sort_by_key(|(name, _)| (*name).clone());
+            for (name, value) in extensions {
+                push(name, value.clone(), &mut found);
+            }
+            class = self.heap.class(current).parent;
+        }
+
+        found
+    }
+
     /// Whether `extend` may add `name` to the class `id`.
     ///
     /// Two refusals, and the same reason under both: an extension that replaced

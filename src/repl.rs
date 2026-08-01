@@ -7,10 +7,13 @@ use rustyline::hint::Hinter;
 use rustyline::validate::Validator;
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
 use std::time::Instant;
 
+use crate::cursor;
 use quince::class;
 use quince::color::Style;
+use quince::infer::{Kind, Symbol, Type};
 use quince::interp::Interp;
 use quince::show::Ask;
 use quince::lexer::Lexer;
@@ -21,115 +24,277 @@ const META_COMMANDS: &[&str] = &[
     ":help", ":vars", ":type", ":ast", ":tokens", ":clear", ":load", ":time",
 ];
 
-/// Every method name any builtin type has, read off the type tables rather than
-/// restated, so completion cannot offer a method the language does not have.
-fn method_names() -> Vec<&'static str> {
-    let mut names: Vec<&'static str> = class::BUILTINS
-        .iter()
-        .flat_map(|builtin| builtin.seed().methods.iter().map(|(name, _)| *name))
-        .collect();
-    names.sort_unstable();
-    names.dedup();
-    names
+/// What the interpreter knows right now, as symbols.
+///
+/// Rebuilt after every entry, from the live objects. That is the REPL's whole
+/// advantage over the editor and it was being thrown away: a bound name has a
+/// value, and a value has a class, so there is nothing here to infer. What the
+/// receiver is, is a fact.
+///
+/// This replaces three hand-maintained maps — globals as `(String, String)`,
+/// methods as `HashMap<String, Vec<String>>`, fields as another — which between
+/// them could not say what a member returned, missed every `extend`ed method,
+/// and fell back to offering every method of every type when the receiver was
+/// not a plain global.
+#[derive(Clone, Default)]
+pub struct Snapshot {
+    /// Every global, with the class of the value actually bound to it.
+    globals: Vec<Symbol>,
+    /// What a dot reaches on a value of each class.
+    members: HashMap<String, Vec<Symbol>>,
 }
 
-use std::collections::HashMap;
-
-fn method_names_for_type(
-    type_name: &str,
-    custom_methods: &HashMap<String, Vec<String>>,
-) -> Vec<String> {
-    if let Some(methods) = custom_methods.get(type_name) {
-        let mut names = methods.clone();
-        names.sort();
-        names.dedup();
-        return names;
+impl Snapshot {
+    /// Reads the interpreter's globals and the classes they reach.
+    fn of(interp: &Interp) -> Snapshot {
+        let mut snapshot = Snapshot::default();
+        for (name, value) in interp.get_globals() {
+            let class = value.type_name(&interp.heap).to_string();
+            let mut symbol = Symbol::new(&name, kind_of(&value), Type::class(&class));
+            // Calling a class makes one of it, which is what `Point(` needs to
+            // know to offer the parameters of `Point`'s `init`.
+            match &value {
+                // Calling a class makes one of it, which is what `Point(`
+                // needs in order to offer `Point`'s `init` parameters.
+                Value::Class(id) => {
+                    symbol.returns = Type::class(interp.heap.class(*id).name.clone())
+                }
+                // A module is not a class, so it is keyed apart from one — a
+                // program may perfectly well declare `class math`.
+                Value::Module(id) => {
+                    symbol.ty =
+                        Type::class(format!("module {}", interp.heap.globals(*id).name().unwrap_or_default()))
+                }
+                _ => {}
+            }
+            snapshot.globals.push(symbol);
+            snapshot.learn(interp, &value);
+        }
+        // The builtin types, so `"abc".` and `[1, 2].` are answerable before a
+        // program has bound anything of that class.
+        for builtin in class::BUILTINS {
+            let id = interp.heap.builtin_class(*builtin);
+            snapshot.learn_class(interp, builtin.name(), id);
+        }
+        snapshot
     }
 
-    for builtin in class::BUILTINS {
-        if builtin.name() == type_name {
-            let mut names: Vec<String> = builtin
-                .seed()
-                .methods
-                .iter()
-                .map(|(name, _)| name.to_string())
-                .collect();
-            names.sort();
-            names.dedup();
-            return names;
+    /// Records what a dot reaches on `value`, and on the class it names.
+    fn learn(&mut self, interp: &Interp, value: &Value) {
+        let class = value.type_name(&interp.heap).to_string();
+        match value {
+            // A class object: its instances are what anyone asks about.
+            Value::Class(id) => {
+                let named = interp.heap.class(*id).name.clone();
+                self.learn_class(interp, &named, *id);
+            }
+            // A module's names come out of the scope object it is, which is the
+            // same object `import` produced — there is no second list.
+            Value::Module(id) => {
+                let named = format!("module {}", interp.heap.globals(*id).name().unwrap_or_default());
+                if !self.members.contains_key(&named) {
+                    let members = interp
+                        .heap
+                        .globals(*id)
+                        .iter()
+                        .map(|(member, held)| match held {
+                            Value::Native(native) => {
+                                let mut symbol =
+                                    quince::infer::symbol_of_native(native, Kind::Function);
+                                symbol.name = member.to_string();
+                                symbol
+                            }
+                            _ => Symbol::new(
+                                member,
+                                Kind::Variable,
+                                Type::class(held.type_name(&interp.heap)),
+                            ),
+                        })
+                        .collect();
+                    self.members.insert(named, members);
+                }
+            }
+            Value::Instance(id) => {
+                let instance = interp.heap.instance(*id);
+                self.learn_class(interp, &class, instance.class);
+                // Fields exist because something assigned them, so they are read
+                // off the instance rather than guessed from the class body.
+                let fields: Vec<Symbol> = instance
+                    .fields
+                    .iter()
+                    .filter_map(|(key, held)| match key.to_value() {
+                        Value::Str(name) => Some(Symbol::new(
+                            name.to_string(),
+                            Kind::Field,
+                            Type::class(held.type_name(&interp.heap)),
+                        )),
+                        _ => None,
+                    })
+                    .collect();
+                let known = self.members.entry(class).or_default();
+                for field in fields {
+                    if !known.iter().any(|seen| seen.name == field.name) {
+                        known.push(field);
+                    }
+                }
+            }
+            _ => {
+                let id = value.class(&interp.heap);
+                self.learn_class(interp, &class, id);
+            }
         }
     }
 
-    let mut names: Vec<String> = method_names().into_iter().map(String::from).collect();
-    for methods in custom_methods.values() {
-        names.extend(methods.clone());
+    /// Records the methods callable on a value of the class `id`.
+    ///
+    /// Through `Interp::methods_of`, which makes the same two walks dispatch
+    /// makes — so an `extend` block's methods are offered, which they never
+    /// were before.
+    fn learn_class(&mut self, interp: &Interp, name: &str, id: quince::heap::ObjId) {
+        if self.members.contains_key(name) {
+            return;
+        }
+        let members = interp
+            .methods_of(id)
+            .into_iter()
+            .map(|(method, value)| match &value {
+                Value::Native(native) => {
+                    let mut symbol = quince::infer::symbol_of_native(native, Kind::Method);
+                    symbol.name = method;
+                    symbol
+                }
+                Value::Function(handle) => {
+                    let decl = &interp.heap.function(*handle).decl;
+                    let mut symbol = Symbol::new(&method, Kind::Method, Type::class("function"));
+                    symbol.doc = decl.doc.clone();
+                    symbol.params = decl
+                        .params
+                        .iter()
+                        .filter(|param| !param.receiver)
+                        .map(|param| param.name.clone())
+                        .collect();
+                    symbol
+                }
+                _ => Symbol::new(&method, Kind::Method, Type::class("function")),
+            })
+            .collect();
+        self.members.insert(name.to_string(), members);
     }
-    names.sort();
-    names.dedup();
-    names
+
+    /// What the text before a dot evaluates to.
+    ///
+    /// A dotted path resolved a segment at a time against what is bound, and
+    /// failing that a literal read by the lexer. The same two questions the
+    /// editor asks, answered from values instead of from a tree.
+    fn type_of(&self, before: &str) -> Type {
+        let Some(path) = cursor::path_ending_at(before) else {
+            return cursor::trailing_literal_type(before);
+        };
+        let mut segments = path.split('.');
+        let Some(first) = segments.next() else {
+            return Type::Unknown;
+        };
+        let call = first.strip_suffix("()");
+        let mut ty = match self
+            .globals
+            .iter()
+            .find(|symbol| symbol.name == call.unwrap_or(first))
+        {
+            // Calling a name makes what it returns; naming it holds it. A class
+            // named and not called is the exception: `Dog.bark` reaches the
+            // method, so a dot on the class object finds what its instances
+            // have — which the language allows and this has to follow.
+            Some(symbol) if call.is_some() || symbol.kind == Kind::Class => {
+                symbol.returns.clone()
+            }
+            Some(symbol) => symbol.ty.clone(),
+            None => return cursor::trailing_literal_type(before),
+        };
+        for segment in segments {
+            let Some(class) = ty.class_name() else {
+                return Type::Unknown;
+            };
+            let call = segment.strip_suffix("()");
+            let name = call.unwrap_or(segment);
+            let found = self
+                .members
+                .get(class)
+                .and_then(|members| members.iter().find(|symbol| symbol.name == name));
+            ty = match (found, call) {
+                (Some(symbol), Some(_)) => symbol.returns.clone(),
+                (Some(symbol), None) => symbol.ty.clone(),
+                (None, _) => return Type::Unknown,
+            };
+        }
+        ty
+    }
+
+    /// Everything a dot after `before` reaches.
+    ///
+    /// A class object gets methods and no fields. `Dog.bark` finds the method
+    /// and `Dog.breed` finds nothing — a field exists because an instance
+    /// assigned it, and the class never did.
+    fn members_after(&self, before: &str) -> Vec<Symbol> {
+        let on_class_object = cursor::path_ending_at(before)
+            .filter(|path| !path.contains('.') && !path.ends_with("()"))
+            .and_then(|name| self.globals.iter().find(|symbol| symbol.name == name))
+            .is_some_and(|symbol| symbol.kind == Kind::Class);
+
+        match self.type_of(before).class_name() {
+            Some(class) => self
+                .members
+                .get(class)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|symbol| !(on_class_object && symbol.kind == Kind::Field))
+                .collect(),
+            None => Vec::new(),
+        }
+    }
 }
 
-fn extract_var_before_dot(line: &str, dot_pos: usize) -> Option<&str> {
-    if dot_pos == 0 {
+/// What a value is, for a completion list that has to draw it.
+fn kind_of(value: &Value) -> Kind {
+    match value {
+        Value::Class(_) => Kind::Class,
+        Value::Function(_) | Value::Native(_) | Value::BoundMethod(_) => Kind::Function,
+        Value::Module(_) => Kind::Module,
+        _ => Kind::Variable,
+    }
+}
+
+/// The text before the dot the cursor sits after, if it does.
+fn before_dot(line: &str, start: usize) -> Option<&str> {
+    if start == 0 || line.as_bytes().get(start - 1) != Some(&b'.') {
         return None;
     }
-    let prefix = &line[..dot_pos];
-    let start = prefix
-        .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
-        .map(|i| i + 1)
-        .unwrap_or(0);
-    let var_name = prefix[start..].trim();
-    if var_name.is_empty() {
-        None
-    } else {
-        Some(var_name)
-    }
-}
-
-fn get_dot_candidates(
-    line: &str,
-    dot_pos: usize,
-    globals: &[(String, String)],
-    custom_map: &HashMap<String, Vec<String>>,
-    var_fields_map: &HashMap<String, Vec<String>>,
-) -> Vec<String> {
-    let mut set = Vec::new();
-    if let Some(var_name) = extract_var_before_dot(line, dot_pos) {
-        if let Some((_, type_name)) = globals.iter().find(|(k, _)| k == var_name) {
-            set.extend(method_names_for_type(type_name, custom_map));
-        } else if let Some(methods) = custom_map.get(var_name) {
-            set.extend(methods.clone());
-        } else {
-            set.extend(method_names().into_iter().map(String::from));
-            for methods in custom_map.values() {
-                set.extend(methods.clone());
-            }
-        }
-
-        if let Some(fields) = var_fields_map.get(var_name) {
-            set.extend(fields.clone());
-        } else {
-            for fields in var_fields_map.values() {
-                set.extend(fields.clone());
-            }
-        }
-    } else {
-        set.extend(method_names().into_iter().map(String::from));
-        for methods in custom_map.values() {
-            set.extend(methods.clone());
-        }
-    }
-    set.sort();
-    set.dedup();
-    set
+    Some(line[..start - 1].trim_end())
 }
 
 #[derive(Clone)]
 pub struct QuinceHelper {
     pub use_color: bool,
-    pub globals: Arc<Mutex<Vec<(String, String)>>>,
-    pub custom_methods: Arc<Mutex<HashMap<String, Vec<String>>>>,
-    pub var_fields: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    /// What the interpreter knew after the last entry.
+    pub snapshot: Arc<Mutex<Snapshot>>,
+}
+
+impl QuinceHelper {
+    /// Everything a dot after `before` reaches, from the last snapshot.
+    fn members(&self, before: &str) -> Vec<Symbol> {
+        self.snapshot
+            .lock()
+            .map(|snapshot| snapshot.members_after(before))
+            .unwrap_or_default()
+    }
+
+    /// Every name bound so far.
+    fn in_scope(&self) -> Vec<Symbol> {
+        self.snapshot
+            .lock()
+            .map(|snapshot| snapshot.globals.clone())
+            .unwrap_or_default()
+    }
 }
 
 impl Helper for QuinceHelper {}
@@ -158,40 +323,24 @@ impl Completer for QuinceHelper {
             return Ok((start, matches));
         }
 
-        if start > 0 && line.as_bytes().get(start - 1) == Some(&b'.') {
-            let custom_map = self
-                .custom_methods
-                .lock()
-                .map(|m| m.clone())
-                .unwrap_or_default();
-            let var_fields_map = self
-                .var_fields
-                .lock()
-                .map(|m| m.clone())
-                .unwrap_or_default();
-            let globals = self
-                .globals
-                .lock()
-                .map(|g| g.clone())
-                .unwrap_or_default();
-            let methods =
-                get_dot_candidates(line, start - 1, &globals, &custom_map, &var_fields_map);
-
-            for method in methods {
-                if method.starts_with(word) {
+        // After a dot, what the receiver *is* decides the list, and the
+        // receiver is a value the interpreter is holding. Where it cannot be
+        // identified nothing is offered — this used to answer with every method
+        // of every type, which is a list of forty names of which two apply.
+        if let Some(before) = before_dot(line, start) {
+            for member in self.members(before) {
+                if member.name.starts_with(word) {
                     matches.push(Pair {
-                        display: method.clone(),
-                        replacement: method,
+                        display: member.signature(),
+                        replacement: member.name,
                     });
                 }
             }
+            matches.sort_by(|a, b| a.replacement.cmp(&b.replacement));
             return Ok((start, matches));
         }
 
-        let mut string_candidates = Vec::new();
-        if let Ok(globals) = self.globals.lock() {
-            string_candidates = globals.iter().map(|(k, _)| k.clone()).collect();
-        }
+        let string_candidates: Vec<String> = self.in_scope().into_iter().map(|s| s.name).collect();
 
         for cand in KEYWORDS {
             if cand.starts_with(word) && *cand != word {
@@ -243,32 +392,13 @@ impl Hinter for QuinceHelper {
         let mut candidates = Vec::new();
         if word.starts_with(':') {
             candidates.extend(META_COMMANDS.iter().copied().map(String::from));
-        } else if start > 0 && line.as_bytes().get(start - 1) == Some(&b'.') {
-            let custom_map = self
-                .custom_methods
-                .lock()
-                .map(|m| m.clone())
-                .unwrap_or_default();
-            let var_fields_map = self
-                .var_fields
-                .lock()
-                .map(|m| m.clone())
-                .unwrap_or_default();
-            let globals = self
-                .globals
-                .lock()
-                .map(|g| g.clone())
-                .unwrap_or_default();
-            let methods =
-                get_dot_candidates(line, start - 1, &globals, &custom_map, &var_fields_map);
-            candidates.extend(methods);
+        } else if let Some(before) = before_dot(line, start) {
+            candidates.extend(self.members(before).into_iter().map(|member| member.name));
         } else {
             candidates.extend(KEYWORDS.iter().copied().map(String::from));
-            if let Ok(globals) = self.globals.lock() {
-                for (g, _) in globals.iter() {
-                    if g.starts_with(word) && g != word {
-                        return Some(g[word.len()..].to_string());
-                    }
+            for symbol in self.in_scope() {
+                if symbol.name.starts_with(word) && symbol.name != word {
+                    return Some(symbol.name[word.len()..].to_string());
                 }
             }
         }
@@ -652,102 +782,21 @@ pub fn run_repl(use_color_stdout: bool, use_color_stderr: bool) -> Result<()> {
 
     let config = rustyline::Config::builder().auto_add_history(true).build();
     let mut rl = rustyline::Editor::with_config(config)?;
-    let globals_store: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
-    let custom_methods_store: Arc<Mutex<HashMap<String, Vec<String>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-    let var_fields_store: Arc<Mutex<HashMap<String, Vec<String>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let snapshot = Arc::new(Mutex::new(Snapshot::default()));
 
     rl.set_helper(Some(QuinceHelper {
         use_color: use_color_stdout,
-        globals: Arc::clone(&globals_store),
-        custom_methods: Arc::clone(&custom_methods_store),
-        var_fields: Arc::clone(&var_fields_store),
+        snapshot: Arc::clone(&snapshot),
     }));
 
     let mut interp = Interp::new();
     let mut buffer = String::new();
 
     loop {
-        // Sync global variables, custom class methods, and instance fields for tab autocompletion
-        if let Ok(mut store) = globals_store.lock() {
-            let mut vars = Vec::new();
-            let mut custom_map = HashMap::new();
-            let mut fields_map: HashMap<String, Vec<String>> = HashMap::new();
-
-            for (k, v) in interp.get_globals() {
-                match &v {
-                    Value::Class(id) => {
-                        let class_obj = interp.heap.class(*id);
-                        vars.push((k.clone(), class_obj.name.clone()));
-                        let mut methods = Vec::new();
-                        let mut current_id = Some(*id);
-                        while let Some(cls_id) = current_id {
-                            let cls = interp.heap.class(cls_id);
-                            for m in cls.methods.keys() {
-                                methods.push(m.clone());
-                            }
-                            current_id = cls.parent;
-                        }
-                        methods.sort();
-                        methods.dedup();
-                        custom_map.insert(class_obj.name.clone(), methods);
-                    }
-                    Value::Instance(id) => {
-                        let type_name = v.type_name(&interp.heap).to_string();
-                        vars.push((k.clone(), type_name.clone()));
-                        let inst = interp.heap.instance(*id);
-                        let fields: Vec<String> = inst
-                            .fields
-                            .iter()
-                            .filter_map(|(key, _)| match key.to_value() {
-                                Value::Str(s) => Some(s.to_string()),
-                                _ => None,
-                            })
-                            .collect();
-                        fields_map.insert(k.clone(), fields);
-
-                        if let std::collections::hash_map::Entry::Vacant(e) = custom_map.entry(type_name) {
-                            let mut methods = Vec::new();
-                            let mut current_id = Some(inst.class);
-                            while let Some(cls_id) = current_id {
-                                let cls = interp.heap.class(cls_id);
-                                for m in cls.methods.keys() {
-                                    methods.push(m.clone());
-                                }
-                                current_id = cls.parent;
-                            }
-                            methods.sort();
-                            methods.dedup();
-                            e.insert(methods);
-                        }
-                    }
-                    Value::Dict(id) => {
-                        let type_name = v.type_name(&interp.heap).to_string();
-                        vars.push((k.clone(), type_name));
-                        let dict = interp.heap.dict(*id);
-                        let fields: Vec<String> = dict
-                            .iter()
-                            .filter_map(|(key, _)| match key.to_value() {
-                                Value::Str(s) => Some(s.to_string()),
-                                _ => None,
-                            })
-                            .collect();
-                        fields_map.insert(k.clone(), fields);
-                    }
-                    _ => {
-                        let type_name = v.type_name(&interp.heap).to_string();
-                        vars.push((k.clone(), type_name));
-                    }
-                }
-            }
-            *store = vars;
-            if let Ok(mut methods_store) = custom_methods_store.lock() {
-                *methods_store = custom_map;
-            }
-            if let Ok(mut fields_store) = var_fields_store.lock() {
-                *fields_store = fields_map;
-            }
+        // What the interpreter knows, re-read after every entry. One call,
+        // because the answer is in the objects rather than in a copy of them.
+        if let Ok(mut held) = snapshot.lock() {
+            *held = Snapshot::of(&interp);
         }
 
         let open_braces = count_open_braces(&buffer);
@@ -1098,29 +1147,84 @@ fn handle_meta_command(
 mod tests {
     use super::*;
 
+    /// A REPL that has already run `code`, and the snapshot it would offer from.
+    fn after(code: &str) -> Snapshot {
+        let mut interp = Interp::new();
+        let program = quince::compile(code).expect("the test program compiles");
+        interp.run_repl(&program).expect("it runs");
+        Snapshot::of(&interp)
+    }
+
+    /// What a dot after `before` would offer, by name.
+    fn offered(snapshot: &Snapshot, before: &str) -> Vec<String> {
+        let mut names: Vec<String> = snapshot
+            .members_after(before)
+            .into_iter()
+            .map(|symbol| symbol.name)
+            .collect();
+        names.sort();
+        names
+    }
+
     #[test]
     fn completion_offers_the_methods_that_exist_and_no_others() {
         // The list this replaced was written from memory: it offered `pop`,
         // `insert`, `clear`, `slice`, `contains`, and Rust's `to_uppercase`,
         // none of which are Quince methods, and omitted `chars`, `upper`, and
-        // `lower`, which are. Deriving it makes that unrepresentable; this
-        // fails if anyone hand-writes the list again.
-        let names = method_names();
+        // `lower`, which are. It now comes off the live class objects, so a
+        // method the language does not have cannot be offered at all.
+        let names = offered(&after("let s = \"a\""), "s");
 
-        for real in ["chars", "upper", "lower", "push", "keys", "remove", "join"] {
-            assert!(names.contains(&real), "{real} should be offered");
+        for real in ["chars", "upper", "lower", "join", "split"] {
+            assert!(names.contains(&real.to_string()), "{real} should be offered");
         }
-        for fake in [
-            "pop",
-            "insert",
-            "clear",
-            "slice",
-            "contains",
-            "to_uppercase",
-            "len",
-        ] {
-            assert!(!names.contains(&fake), "{fake} is not a method");
+        for fake in ["pop", "insert", "clear", "to_uppercase", "len", "push"] {
+            assert!(!names.contains(&fake.to_string()), "{fake} is not a string method");
         }
+    }
+
+    #[test]
+    fn completion_answers_from_the_value_that_is_actually_bound() {
+        // The REPL's whole advantage over the editor: `words` is a list because
+        // the value under that name is one, which is not a guess and cannot be
+        // wrong.
+        let snapshot = after("let words = \"a,b\".split(\",\")");
+        let names = offered(&snapshot, "words");
+        assert!(names.contains(&"push".to_string()), "{names:?}");
+        assert!(!names.contains(&"lower".to_string()), "{names:?}");
+    }
+
+    #[test]
+    fn completion_follows_a_chain_through_what_a_method_returns() {
+        let snapshot = after("let words = [\"b\", \"a\"]");
+        let names = offered(&snapshot, "words.sort()");
+        assert!(names.contains(&"map".to_string()), "{names:?}");
+    }
+
+    #[test]
+    fn completion_types_a_literal_without_anything_being_bound() {
+        let snapshot = after("let unused = 1");
+        assert!(offered(&snapshot, "\"abc\"").contains(&"upper".to_string()));
+        assert!(offered(&snapshot, "[1, 2]").contains(&"push".to_string()));
+    }
+
+    #[test]
+    fn completion_offers_an_extensions_methods() {
+        // `extend` puts its methods beside a class rather than in it, so they
+        // were callable and never offered — the old map read `Class::methods`
+        // and stopped there.
+        let snapshot = after("extend list {\n  fn second() { return self[1] }\n}\nlet xs = [1, 2]");
+        let names = offered(&snapshot, "xs");
+        assert!(names.contains(&"second".to_string()), "{names:?}");
+        assert!(names.contains(&"push".to_string()), "{names:?}");
+    }
+
+    #[test]
+    fn completion_offers_nothing_for_a_receiver_it_cannot_identify() {
+        // This used to answer with every method of every type — forty names of
+        // which two applied, which is a list nobody can read.
+        let snapshot = after("let unused = 1");
+        assert!(offered(&snapshot, "mystery").is_empty());
     }
 
     #[test]
@@ -1204,27 +1308,47 @@ mod tests {
     }
 
     #[test]
-    fn context_aware_method_completion_filters_by_type() {
-        let custom_map = HashMap::from([(
-            "Point".to_string(),
-            vec!["distance".to_string(), "move".to_string()],
-        )]);
+    fn completion_offers_a_modules_members() {
+        let snapshot = after("import math");
+        let names = offered(&snapshot, "math");
+        assert!(names.contains(&"floor".to_string()), "{names:?}");
+        assert!(names.contains(&"pi".to_string()), "{names:?}");
+        // And only that module's. `read` belongs to `io`.
+        assert!(!names.contains(&"read".to_string()), "{names:?}");
+    }
 
-        let string_methods = method_names_for_type("string", &HashMap::new());
-        assert!(string_methods.contains(&"upper".to_string()));
-        assert!(string_methods.contains(&"lower".to_string()));
-        assert!(!string_methods.contains(&"push".to_string()));
-        assert!(!string_methods.contains(&"keys".to_string()));
-
-        let list_methods = method_names_for_type("list", &HashMap::new());
-        assert!(list_methods.contains(&"push".to_string()));
-        assert!(!list_methods.contains(&"upper".to_string()));
-
-        let point_methods = method_names_for_type("Point", &custom_map);
-        assert_eq!(
-            point_methods,
-            vec!["distance".to_string(), "move".to_string()]
+    #[test]
+    fn a_class_object_offers_methods_and_no_fields() {
+        // `Dog.bark` reaches the method — `print(Dog.bark)` writes `<fn bark>`
+        // — so a dot on the class lists them. `Dog.breed` reaches nothing: a
+        // field exists because an instance assigned it.
+        let snapshot = after(
+            "class Dog {\n  op init() { self.breed = \"collie\" }\n  fn bark() { return \"woof\" }\n}\nlet d = Dog()",
         );
+        let on_class = offered(&snapshot, "Dog");
+        assert!(on_class.contains(&"bark".to_string()), "{on_class:?}");
+        assert!(!on_class.contains(&"breed".to_string()), "{on_class:?}");
+
+        let on_instance = offered(&snapshot, "d");
+        assert!(on_instance.contains(&"bark".to_string()), "{on_instance:?}");
+        assert!(on_instance.contains(&"breed".to_string()), "{on_instance:?}");
+    }
+
+    #[test]
+    fn context_aware_method_completion_filters_by_type() {
+        let snapshot = after("let s = \"a\"\nlet xs = [1]\nlet d = {\"k\": 1}");
+        let strings = offered(&snapshot, "s");
+        assert!(strings.contains(&"upper".to_string()));
+        assert!(!strings.contains(&"push".to_string()));
+        assert!(!strings.contains(&"keys".to_string()));
+
+        let lists = offered(&snapshot, "xs");
+        assert!(lists.contains(&"push".to_string()));
+        assert!(!lists.contains(&"upper".to_string()));
+
+        let dicts = offered(&snapshot, "d");
+        assert!(dicts.contains(&"keys".to_string()));
+        assert!(!dicts.contains(&"push".to_string()));
     }
 
     #[test]
@@ -1242,109 +1366,34 @@ mod tests {
             }
             let d = Dog()
         "#;
-        let program = quince::compile(code).unwrap();
-        interp.run_repl(&program).unwrap();
-
-        let globals_store = Arc::new(Mutex::new(Vec::new()));
-        let custom_methods_store = Arc::new(Mutex::new(HashMap::new()));
-        let var_fields_store = Arc::new(Mutex::new(HashMap::new()));
-
-        let mut vars = Vec::new();
-        let mut custom_map: HashMap<String, Vec<String>> = HashMap::new();
-        let mut fields_map: HashMap<String, Vec<String>> = HashMap::new();
-
-        for (k, v) in interp.get_globals() {
-            match &v {
-                Value::Class(id) => {
-                    let class_obj = interp.heap.class(*id);
-                    vars.push((k.clone(), class_obj.name.clone()));
-                    let mut methods = Vec::new();
-                    let mut current_id = Some(*id);
-                    while let Some(cls_id) = current_id {
-                        let cls = interp.heap.class(cls_id);
-                        for m in cls.methods.keys() {
-                            methods.push(m.clone());
-                        }
-                        current_id = cls.parent;
-                    }
-                    methods.sort();
-                    methods.dedup();
-                    custom_map.insert(class_obj.name.clone(), methods);
-                }
-                Value::Instance(id) => {
-                    let type_name = v.type_name(&interp.heap).to_string();
-                    vars.push((k.clone(), type_name.clone()));
-                    let inst = interp.heap.instance(*id);
-                    let fields: Vec<String> = inst
-                        .fields
-                        .iter()
-                        .filter_map(|(key, _)| match key.to_value() {
-                            Value::Str(s) => Some(s.to_string()),
-                            _ => None,
-                        })
-                        .collect();
-                    fields_map.insert(k.clone(), fields);
-
-                    if let std::collections::hash_map::Entry::Vacant(e) = custom_map.entry(type_name) {
-                        let mut methods = Vec::new();
-                        let mut current_id = Some(inst.class);
-                        while let Some(cls_id) = current_id {
-                            let cls = interp.heap.class(cls_id);
-                            for m in cls.methods.keys() {
-                                methods.push(m.clone());
-                            }
-                            current_id = cls.parent;
-                        }
-                        methods.sort();
-                        methods.dedup();
-                        e.insert(methods);
-                    }
-                }
-                _ => {
-                    let type_name = v.type_name(&interp.heap).to_string();
-                    vars.push((k.clone(), type_name));
-                }
-            }
-        }
-        *globals_store.lock().unwrap() = vars;
-        *custom_methods_store.lock().unwrap() = custom_map;
-        *var_fields_store.lock().unwrap() = fields_map;
+        let program = quince::compile(code).expect("the test program compiles");
+        interp.run_repl(&program).expect("it runs");
 
         let helper = QuinceHelper {
             use_color: false,
-            globals: globals_store,
-            custom_methods: custom_methods_store,
-            var_fields: var_fields_store,
+            snapshot: Arc::new(Mutex::new(Snapshot::of(&interp))),
         };
-
         let history = rustyline::history::MemHistory::new();
-        let dummy_ctx = rustyline::Context::new(&history);
+        let context = rustyline::Context::new(&history);
 
-        // Test completion on instance variable `d.`
-        let (start, matches) = helper.complete("d.", 2, &dummy_ctx).unwrap();
+        // An instance offers its own methods, its parent's, and the fields the
+        // `init` that ran actually assigned.
+        let (start, matches) = helper.complete("d.", 2, &context).expect("completion works");
         assert_eq!(start, 2);
-        let match_displays: Vec<String> = matches.into_iter().map(|p| p.display).collect();
-        assert!(match_displays.contains(&"bark".to_string()), "should offer subclass method bark");
-        assert!(match_displays.contains(&"speak".to_string()), "should offer superclass method speak");
-        assert!(match_displays.contains(&"breed".to_string()), "should offer instance variable breed");
+        let offered: Vec<String> = matches.into_iter().map(|pair| pair.replacement).collect();
+        for expected in ["bark", "speak", "breed"] {
+            assert!(offered.contains(&expected.to_string()), "{offered:?}");
+        }
 
-        // Test hinter on `d.b`
-        let hint_b = helper.hint("d.b", 3, &dummy_ctx);
-        assert_eq!(hint_b, Some("ark".to_string()));
+        assert_eq!(helper.hint("d.b", 3, &context), Some("ark".to_string()));
+        assert_eq!(helper.hint("d.s", 3, &context), Some("peak".to_string()));
+        assert_eq!(helper.hint("d.br", 4, &context), Some("eed".to_string()));
 
-        // Test hinter on `d.s`
-        let hint_s = helper.hint("d.s", 3, &dummy_ctx);
-        assert_eq!(hint_s, Some("peak".to_string()));
-
-        // Test hinter on `d.br`
-        let hint_br = helper.hint("d.br", 4, &dummy_ctx);
-        assert_eq!(hint_br, Some("eed".to_string()));
-
-        // Test completion directly on Class object `Dog.`
-        let (_, dog_matches) = helper.complete("Dog.", 4, &dummy_ctx).unwrap();
-        let dog_displays: Vec<String> = dog_matches.into_iter().map(|p| p.display).collect();
-        assert!(dog_displays.contains(&"bark".to_string()));
-        assert!(dog_displays.contains(&"speak".to_string()));
+        // And a class object answers about the instances it makes.
+        let (_, matches) = helper.complete("Dog.", 4, &context).expect("completion works");
+        let offered: Vec<String> = matches.into_iter().map(|pair| pair.replacement).collect();
+        assert!(offered.contains(&"bark".to_string()), "{offered:?}");
+        assert!(offered.contains(&"speak".to_string()), "{offered:?}");
     }
 
     #[test]

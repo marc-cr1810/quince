@@ -1,4 +1,5 @@
 mod cli;
+mod cursor;
 mod lsp;
 mod repl;
 

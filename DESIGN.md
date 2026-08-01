@@ -2398,6 +2398,32 @@ you cannot, fail loudly when the copy is wrong. Three guards came out of this tr
 every keyword explains itself, every native names the parameters its arity implies, and
 every declared return is what the native actually returns.
 
+### The REPL answers from values, not from source
+
+The REPL was in a better position than the editor the whole time and was throwing it away.
+A bound name has a *value*, and a value has a class — there is nothing to infer. What it
+had instead was three hand-maintained maps rebuilt after every entry: globals as
+`(String, String)`, methods as `HashMap<String, Vec<String>>`, fields as another. Between
+them they could not say what a member returned, missed every `extend`ed method, and fell
+back to offering every method of every type when the receiver was not a plain global —
+forty names of which two applied.
+
+One `Snapshot` replaced all three. It reads the live objects: globals with the class of
+what is actually bound, members through `Interp::methods_of`, which makes the same two
+walks dispatch makes so an extension is offered exactly when it is callable. Fields come
+off the instance, because a field exists when something assigned it and not before.
+
+The two surfaces now share `cursor.rs` — the last place either one touches raw text, and
+deliberately incapable of guessing. It answers where a name begins, whether parentheses
+balance, and which token the text ends on, then hands over to the pass or to the
+interpreter. Both surfaces used to answer that question for themselves, which is how one
+came to decide a class by its first letter and the other to give up and offer everything.
+
+**`Dog.bark` reaches the method**, which neither surface knew. Checking rather than
+assuming settled it — `print(Dog.bark)` writes `<fn bark>` — so a dot on a class object
+lists its methods, and not its fields, because only an instance ever assigned one. The
+editor had been offering nothing at all there.
+
 ### The editor keeps the last thing it understood
 
 The pass needs a tree and typing a `.` is what stops a document having one — which would

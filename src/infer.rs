@@ -155,7 +155,8 @@ pub struct Symbol {
 }
 
 impl Symbol {
-    fn new(name: impl Into<String>, kind: Kind, ty: Type) -> Symbol {
+    /// A symbol with nothing known about it beyond its name and what it holds.
+    pub fn new(name: impl Into<String>, kind: Kind, ty: Type) -> Symbol {
         Symbol {
             name: name.into(),
             kind,
@@ -330,6 +331,19 @@ impl Types {
         .is_some()
     }
 
+    /// Whether `path` names a class object rather than an instance of one.
+    ///
+    /// `Dog` does and `Dog()` does not, and the difference decides whether a
+    /// dot reaches fields: a field exists because an instance assigned it, and
+    /// the class never did.
+    pub fn names_a_class(&self, path: &str, offset: u32) -> bool {
+        !path.contains('.')
+            && !path.ends_with("()")
+            && self
+                .symbol(path, offset)
+                .is_some_and(|symbol| symbol.kind == Kind::Class)
+    }
+
     /// Whether the program declared a class by this name.
     pub fn declares(&self, class: &str) -> bool {
         self.classes.contains_key(class)
@@ -464,7 +478,14 @@ impl Types {
                     self.of_function(name)
                 }
             }
-            None => self.of_name(first, offset),
+            // A class named and not called is a class object — and `Dog.bark`
+            // reaches the method, so a dot on one finds what its instances
+            // have. That is the language's answer, checked rather than assumed:
+            // `print(Dog.bark)` writes `<fn bark>`.
+            None => match self.symbol(first, offset) {
+                Some(symbol) if symbol.kind == Kind::Class => symbol.returns,
+                _ => self.of_name(first, offset),
+            },
         };
 
         for segment in segments {
@@ -1930,7 +1951,13 @@ mod tests {
         let src = "class Box {\n  op init() { self.n = 1 }\n  fn twin() { return Box() }\n}\nlet b = Box()\n";
         let types = types(src);
         let end = src.len() as u32;
-        assert_eq!(types.of_path("Box", end).class_name(), Some("class"));
+        // A class object reaches what its instances have, because the
+        // language lets it: `print(Box.twin)` writes `<fn twin>`. What it does
+        // not reach is a field, which only an instance ever assigned.
+        assert_eq!(types.of_path("Box", end).class_name(), Some("Box"));
+        assert!(types.names_a_class("Box", end));
+        assert!(!types.names_a_class("Box()", end));
+        assert!(!types.names_a_class("b", end));
         assert_eq!(types.of_path("Box()", end).class_name(), Some("Box"));
         assert_eq!(types.of_path("b.twin", end).class_name(), Some("function"));
         assert_eq!(types.of_path("b.twin()", end).class_name(), Some("Box"));
