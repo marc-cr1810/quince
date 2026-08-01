@@ -463,6 +463,49 @@ fn infer_receiver_class(source: &str, receiver: &str, pos: Position) -> Option<S
         return current_class;
     }
 
+    if clean_recv == "super" {
+        let mut current_parent = None;
+        let mut brace_depth = 0;
+        let mut class_brace_depth = 0;
+
+        for (line_idx, line) in source.lines().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("class ") {
+                let parts: Vec<_> = trimmed.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    if let Some(extends_idx) = parts.iter().position(|&p| p == "extends") {
+                        if extends_idx + 1 < parts.len() {
+                            let pname = parts[extends_idx + 1].split('{').next().unwrap_or("").trim();
+                            if !pname.is_empty() {
+                                current_parent = Some(pname.to_string());
+                                class_brace_depth = brace_depth;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if line_idx == pos.line as usize {
+                return current_parent;
+            }
+
+            for c in line.chars() {
+                if c == '{' {
+                    brace_depth += 1;
+                } else if c == '}' {
+                    if brace_depth > 0 {
+                        brace_depth -= 1;
+                    }
+                    if current_parent.is_some() && brace_depth <= class_brace_depth {
+                        current_parent = None;
+                    }
+                }
+            }
+        }
+        return current_parent;
+    }
+
+
     let max_line = (pos.line as usize).min(source.lines().count().saturating_sub(1));
     for line_idx in (0..=max_line).rev() {
         if let Some(line) = source.lines().nth(line_idx) {
@@ -561,6 +604,34 @@ fn infer_method_return_class(source: &str, class_name: &str, method_name: &str) 
     None
 }
 
+fn collect_ast_dot_completions_for_class(
+    stmts: &[Stmt],
+    target_class: &str,
+    seen: &mut std::collections::HashSet<String>,
+    items: &mut Vec<CompletionItem>,
+) {
+    for stmt in stmts {
+        if let StmtKind::Class { name, parent, methods, .. } = &stmt.kind {
+            if name == target_class {
+                for m in methods {
+                    if !seen.contains(&m.name) {
+                        seen.insert(m.name.clone());
+                        items.push(CompletionItem {
+                            label: m.name.clone(),
+                            kind: Some(CompletionItemKind::METHOD),
+                            detail: Some(format!("method {name}.{}()", m.name)),
+                            ..Default::default()
+                        });
+                    }
+                }
+                if let Some(pvar) = parent {
+                    collect_ast_dot_completions_for_class(stmts, &pvar.name, seen, items);
+                }
+            }
+        }
+    }
+}
+
 fn collect_dot_completions_for_class(
     source: &str,
     ast: Option<&[Stmt]>,
@@ -568,6 +639,7 @@ fn collect_dot_completions_for_class(
     target_class: Option<&str>,
     items: &mut Vec<CompletionItem>,
 ) {
+
     let mut seen = std::collections::HashSet::new();
 
     // 0. Dynamically populate built-in type methods directly from engine runtime tables (crate::class::BUILTINS)
@@ -593,9 +665,11 @@ fn collect_dot_completions_for_class(
 
     // 1. Try AST-based class methods if AST is present
     if let Some(stmts) = ast {
-        for stmt in stmts {
-            if let StmtKind::Class { name, methods, .. } = &stmt.kind {
-                if target_class.is_none() || target_class == Some(name.as_str()) {
+        if let Some(tc) = target_class {
+            collect_ast_dot_completions_for_class(stmts, tc, &mut seen, items);
+        } else {
+            for stmt in stmts {
+                if let StmtKind::Class { name, methods, .. } = &stmt.kind {
                     for m in methods {
                         if !seen.contains(&m.name) {
                             seen.insert(m.name.clone());
@@ -611,6 +685,7 @@ fn collect_dot_completions_for_class(
             }
         }
     }
+
 
     // 2. Text-based scan for class methods & fields matching target_class
     let mut inside_class = false;
@@ -1547,8 +1622,10 @@ fn find_ast_signature(
                     });
                 }
             }
-            StmtKind::Class { name, methods, .. } => {
-                if target_class.is_none() && name == callee {
+            StmtKind::Class { name, parent, methods, .. } => {
+                let is_constructor_call = target_class.map_or(name == callee, |tc| tc == name && callee == name);
+
+                if is_constructor_call {
                     for m in methods {
                         if m.name == "init" {
                             let params: Vec<String> = m.params.iter().filter(|p| !p.receiver && p.name != "self").map(|p| p.name.clone()).collect();
@@ -1566,6 +1643,13 @@ fn find_ast_signature(
                                 parameters: Some(param_infos),
                                 active_parameter: None,
                             });
+                        }
+                    }
+                    if let Some(pvar) = parent {
+                        if let Some(mut parent_sig) = find_ast_signature(stmts, &pvar.name, Some(&pvar.name)) {
+                            let params_str = parent_sig.label.split('(').nth(1).unwrap_or(")");
+                            parent_sig.label = format!("{name}({params_str}");
+                            return Some(parent_sig);
                         }
                     }
                     return Some(SignatureInformation {
@@ -1596,8 +1680,15 @@ fn find_ast_signature(
                             });
                         }
                     }
+                    if let Some(pvar) = parent {
+                        if let Some(parent_sig) = find_ast_signature(stmts, callee, Some(&pvar.name)) {
+                            return Some(parent_sig);
+                        }
+                    }
                 }
             }
+
+
             _ => {}
         }
     }
@@ -1679,6 +1770,33 @@ fn find_text_signature(
         }
     }
 
+    if let Some(tc) = target_class {
+        for line in source.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("class ") {
+                let parts: Vec<_> = trimmed.split_whitespace().collect();
+                if parts.len() >= 2 && parts[1].split('{').next().unwrap_or("").trim() == tc {
+                    if let Some(ext_idx) = parts.iter().position(|&p| p == "extends") {
+                        if ext_idx + 1 < parts.len() {
+                            let parent_name = parts[ext_idx + 1].split('{').next().unwrap_or("").trim();
+                            if callee == tc {
+                                if let Some(mut parent_sig) = find_text_signature(source, parent_name, Some(parent_name)) {
+                                    let params_str = parent_sig.label.split('(').nth(1).unwrap_or(")");
+                                    parent_sig.label = format!("{tc}({params_str}");
+                                    return Some(parent_sig);
+                                }
+                            } else {
+                                if let Some(parent_sig) = find_text_signature(source, callee, Some(parent_name)) {
+                                    return Some(parent_sig);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     if callee.chars().next().map_or(false, |c| c.is_uppercase()) {
         return Some(SignatureInformation {
             label: format!("{}()", callee),
@@ -1687,6 +1805,7 @@ fn find_text_signature(
             active_parameter: None,
         });
     }
+
 
     None
 }
@@ -1809,10 +1928,32 @@ mod tests {
         assert!(labels.contains(&"defined_above".to_string()));
         assert!(!labels.contains(&"defined_below".to_string()));
     }
+
+    #[test]
+    fn signature_help_extracts_inherited_constructor_params() {
+        let code = "class Animal {\n    op init(name) {\n        self.name = name\n    }\n}\nclass Cat extends Animal {}\nCat(";
+        let state = DocumentState {
+            text: code.to_string(),
+            ast: parse_ast_lenient(code),
+        };
+        let pos = Position { line: 6, character: 4 };
+        let help = get_signature_help(Some(&state), pos).expect("Expected signature help for inherited constructor");
+        assert_eq!(help.signatures.len(), 1);
+        assert_eq!(help.signatures[0].label, "Cat(name)");
+        assert_eq!(help.active_parameter, Some(0));
+    }
+
+    #[test]
+    fn signature_help_extracts_super_method_params() {
+        let code = "class Animal {\n    op init(name) {\n        self.name = name\n    }\n}\nclass Dog extends Animal {\n    op init(name, breed) {\n        super.init(";
+        let state = DocumentState {
+            text: code.to_string(),
+            ast: parse_ast_lenient(code),
+        };
+        let pos = Position { line: 7, character: 19 };
+        let help = get_signature_help(Some(&state), pos).expect("Expected signature help for super.init");
+        assert_eq!(help.signatures.len(), 1);
+        assert_eq!(help.signatures[0].label, "fn init(name)");
+        assert_eq!(help.active_parameter, Some(0));
+    }
 }
-
-
-
-
-
-
