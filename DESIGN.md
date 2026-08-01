@@ -2903,19 +2903,67 @@ Retaining them is a change to the token stream that everything downstream reads,
 sequenced first if the formatter is done at all, and it is the piece to cut if the milestone
 runs long.
 
-**v0.7 — gradual type annotations (`T?`), container generics (`list[T]`), visibility (`pub`, `private`, `protected`), and LSP tooling**
+**v0.7 — gradual type annotations (`T?`), container generics (`list[T]`), visibility (`public`, `private`, `protected`), and LSP tooling**
 
-This milestone introduces gradual optional type annotations, generic container bounds, out-parameter references, member/module visibility access control, and rich LSP editor tooling to Quince.
+This began as one document and is four milestones. It reached twenty-two features while
+still being called "annotations and visibility", and the split was made on one test: is a
+feature *about* types, or does it merely *read* them? What stayed is the first kind.
 
-- **Annotations & Explicit Nullability (`T?`)**: Optional type annotations on variable bindings (`let x: int = 8`), parameters (`fn example(x: int, opt: int?)`), and function return signatures (`: string?`). Types are non-nullable by default; `nil` is rejected unless specified with `?`. Reassigning an annotated variable to a non-matching type triggers a `TypeError`. Unannotated bindings (`let x = 8`) remain dynamically typed.
-- **Typed Generic Containers (`list[T]`, `dict[K, V]`)**: Enforces element/key/value type bounds on collections (`let nums: list[int] = [1, 2]`). `nums.push("hi")` raises a runtime `TypeError`.
-- **Reference Parameters (`ref`, `final ref`, `const ref`)**: Enables out-parameter mutation (`fn inc(ref y: int)`). Plain `ref` requires a mutable `let` lvalue. `final ref` prevents reassignment inside the callee. `const ref` provides read-only references accepting `let`, `final`, or frozen `const` variables.
-- **Class Member Visibility (`public`, `private`, `protected`) & Field Declarations**: Class body field declarations with type bounds. `private` restricts access to the declaring class, `protected` permits subclass access, and `public` allows external access. Operator declarations (`op`) must be `public`.
-- **Module Visibility & Exports (`pub`)**: Module declarations default to private. Top-level variables, functions, and classes marked with `pub` (`pub fn`, `pub class`) are exported for module consumers.
-- **Operator (`op`) Type Contract Validation**: Operator declarations must adhere to built-in protocol return types (e.g. `op string(): int` is rejected as a compile-time resolution error).
-- **LSP Type Tooling**: Adds LSP Inlay Hints (`textDocument/inlayHint`) to display inferred/annotated types inline in VS Code, auto-completes type names after `:`, and underlines type mismatch/visibility diagnostics live.
+- **Annotations & explicit nullability (`T?`)**: annotations on bindings (`let x: int = 8`), parameters (`fn example(x: int, opt: int?)`), and returns (`: string?`). Non-nullable by default; `nil` is refused unless `?` says otherwise. Unannotated bindings stay dynamic. `any` and `_` name the top type, and are *not* the same as leaving the annotation off.
+- **Typed containers (`list[T]`, `dict[K, V]`, `dict[K]`)**: element, key, and value bounds enforced when a collection is built and when it is modified. `d[key]` answers `V?` rather than raising — the milestone's one breaking change.
+- **Class member visibility (`public`, `private`, `protected`) and typed fields**: `private` restricts to the declaring class, `protected` admits subclasses, `public` is the default. An `op` may not be private or protected. Blank `final` fields are assigned once, in `init`.
+- **Module visibility**: top-level declarations marked `public` are exported. Enforced at run time, because a file module's contents are not known until it is loaded.
+- **`const T`**: frozen parameters and returns, at the boundary the `const` binding already freezes at.
+- **`op` return contract validation**: `op string(): int` is refused at resolution, against the same table the run-time check reads. Bitwise slots join `OPS` here.
+- **Null safety and type guarding**: `?.`, `??`, and `is` with block-scoped smart casts — made unavoidable by `d[key]` answering `V?`.
+- **Type aliases**, and **LSP type tooling**: inlay hints, type completion after `:`, smart-cast-aware and visibility-aware completion, live diagnostics.
 
-See `V0_7_TYPE_SYSTEM_DESIGN.md` for full design specifications and type matching rules.
+Reference parameters (`ref`, `final ref`, `const ref`) were in the first draft and are
+**deferred** — they are a change to the calling convention rather than a feature.
+
+See `V0_7_TYPE_SYSTEM_DESIGN.md`, whose §10 keeps the one question the split did not settle:
+how `T?` relates to v0.10's `option[T]`.
+
+**v0.8 — declaration modifiers and typed dispatch**
+
+Everything that reads v0.7's parameter types without being part of the type system. Uniform
+in shape: a modifier a declaration may carry, and a rule the resolver enforces about it.
+
+- **`const fn` / `const op`**: purity enforced by the resolver — no field assignment, no index mutation, no non-const call on `self`, no global reassignment. `print`, `throw`, and early `return` stay legal, because the restriction is on state, not effects.
+- **`override` and `final` on members**: overriding must be declared, and may be forbidden. `override` where nothing is overridden is refused too.
+- **Implicit constructor coercion, and `explicit` to refuse it**: `let i: CustomInt = 10` reaches a single-parameter `op init`. One step only — coercion does not chain.
+- **Default constructor auto-initialization**: `let logger: Logger`, with an implicit `op init()` synthesized for a class that declares none.
+- **Typed `fn` and `op` overloading**: several definitions sharing a name, dispatched on run-time argument types, with ambiguity refused where it is declared rather than where it is called.
+
+See `V0_8_DECLARATIONS_AND_DISPATCH_DESIGN.md`. Overloading is the risky item and is
+sequenced last, being the only one that changes dispatch.
+
+**v0.9 — user-defined generics, tuples, and parameter packs**
+
+v0.7 gave `Type` parameters and built `list[T]` on them; this opens that machinery to user
+code. One milestone with no cut line, because a generic system that handles `Stack[T]` but
+not bounds is the half-built mechanism v0.6's trade names.
+
+- **Generic classes**: `class Stack[T]`, inferred from the annotation, explicitly instantiable, defaulting to dynamic when neither is written.
+- **Bounds** (`T: Bound`), checked by ordinary matching rather than a second subtyping relation.
+- **Const generic value parameters** (`const N: int`) — `int`, `bool`, `string`, not `float`.
+- **Variadic packs** (`Ts...`), one per list, in last position.
+- **`tuple[T1, …, TN]`**: immutable, arity in the type, with destructuring and tail unpacking. It ships here rather than with v0.7's containers because its checking *is* pack checking. This is also what finally unblocks a dict iterating as pairs.
+- **`extend list[int]`**, and **generic type aliases**.
+
+See `V0_9_GENERICS_DESIGN.md`.
+
+**v0.10 — enums, pattern matching, and the containers that were waiting**
+
+- **`enum`**: unit and payload-carrying variants, generic, closed, with methods and operators.
+- **`option[T]` and `result[T, E]`**: built-in generic enums, with `?` for propagation. `T?` becomes a spelling of `option[T]` — which null pointer optimization makes free, the two being the same bits already.
+- **`match` and `if let`**: exhaustive pattern matching as an expression, over enums, tuples, and primitives.
+- **`range`**: the first value in the language meaning "a to b" — which is what `Op::Get` has been refusing to slice for want of. It **replaces `x[a:b]` with `x[a..b]`**, because `:` cannot survive a first-class range value once `{…}` spells both dicts and sets: `{1: 10}` would be a dict literal and a set of one range at the same time. `..` is left-associative and `range` overloads it, so the step is just the operator again: `0..10..2` is `(0..10)..2`, desugaring to `(0..10).step(2)`.
+- **A lazy iteration protocol (`op next`)**, which `range` forces and which reverses the eager `op iter` decision recorded above. `op iter`'s list contract is kept as a fallback, so nothing in the corpus breaks.
+- **`array[T, N]`, `bytes`, `set[T]`**: fixed-size storage, raw binary, and hashed uniqueness.
+
+See `V0_10_ENUMS_AND_MATCHING_DESIGN.md`. It comes after v0.9 because `option[T]` is a
+generic enum and cannot be built before generics exist.
 
 **Later**
 Bytecode VM, async/await, sized integer types — all things Zephyr has, deferred until the
