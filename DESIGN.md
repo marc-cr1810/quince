@@ -148,6 +148,7 @@ Flat `src/*.rs`, matching the wrapt layout.
 | `dict.rs` | insertion-ordered map, and the values admitted as keys |
 | `class.rs` | the type every value belongs to, and where its behaviour is found |
 | `error.rs` | `QuinceError` with spans, user-facing diagnostics |
+| `lsp.rs` | the language server — diagnostics, completion, hover, symbols |
 
 Hand-written lexer and parser, no parser-generator dependency. For a language whose
 syntax we control and will change often, hand-rolled recursive descent stays easier to
@@ -2327,6 +2328,62 @@ protocol, reify, arena, safe point — never appears in a message a Quince progr
 reads, because a diagnostic is read by someone who has not read `class.rs`. Where a closed
 set is involved, list its members instead of naming the category: `op` can define: init
 is more use than any noun for what `init` is.
+
+The language server landed inside this milestone without the roadmap ever listing it, and
+it belongs here for the reason the REPL does: it is a surface the language is used through
+before it is finished, and a diagnostic nobody sees until they run the file is a diagnostic
+that arrives too late. It runs the same lexer, parser, and resolver the CLI runs and
+publishes the same `QuinceError`, so there is one account of what is wrong with a program
+and not a second one written for editors. Everything downstream of `KEYWORDS` — the
+completer, the highlighter, the token map — reads the one list, which is what made adding
+`complete` and `sealed` four edits in `token.rs`.
+
+What it does *not* do is type inference. A document mid-keystroke usually does not parse,
+and an editor that goes blank between two valid states is worse than one that guesses, so
+`lsp.rs` falls back to reading lines as text — `fn ` at the start of a line is a function —
+whenever the AST is unavailable. Those paths are heuristics and are marked as such in the
+function names; they are a floor under the AST paths, not a second implementation of them.
+The day a real type checker exists it should take both.
+
+**v0.6 — tooling and a library**
+A language server that knows rather than guesses, and enough library to write a program
+that does something.
+
+The milestone is chosen because the limit on using Quince is no longer the language. v0.5
+closed the expressiveness gaps that were worth closing — a class can answer for anything a
+builtin can, an error is a value, a diagnostic points at the right token. What stops someone
+writing a real program now is that there is nothing to call: `print`, `len`, `type`, seven
+type constructors, and the methods on the four builtin types. No file IO, no time, no
+random, no math beyond the operators, no way to read an argument the program was run with.
+
+The library and the inference pass are one milestone rather than two because they check each
+other. A standard library is the first corpus large enough for the LSP's guesses to be
+visibly wrong, and inference is what makes a library discoverable — a completion list for
+`f.` is worth more than any amount of documentation for the same method.
+
+**What inference has to be.** The heuristics in `lsp.rs` — `fn ` at the start of a line is a
+function, the class of a receiver is whatever the nearest assignment looked like — are a
+floor for a document that does not parse, and they should stay exactly that. What sits above
+them is a pass that walks the AST and answers "what class is this expression" for the cases
+that are decidable: a literal, a constructor call, a method whose body returns one class, a
+parameter with no information at all. It belongs beside the resolver, which already walks
+every name and already knows what binds where, and it must be allowed to answer "unknown"
+without that being a failure — most of a dynamically-typed program is unknown, and a checker
+that guesses to avoid saying so is the thing being replaced.
+
+**The constraint the library is under.** There is no module system, so there is nowhere for a
+library to live except the global scope, and every name added is a name a program cannot use.
+That bounds what belongs in v0.6 to what is worth being global forever — which is a real
+bound and not a temporary one, because `print` will still be global after modules land. The
+honest reading is that this milestone builds the part of the library that would be builtin in
+any case, and that a `math.floor` waits for a `math` to put it in.
+
+**A formatter is listed and not promised.** It needs the lexer to keep comments, which it
+discards today — `skip_trivia` throws them away before the parser ever sees
+one — and a formatter that deletes every comment in a file is not a tool anyone runs twice.
+Retaining them is a change to the token stream that everything downstream reads, so it is
+sequenced first if the formatter is done at all, and it is the piece to cut if the milestone
+runs long.
 
 **Later**
 Bytecode VM, async/await, module system, sized integer types — all things Zephyr has,
