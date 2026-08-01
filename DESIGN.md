@@ -2623,6 +2623,20 @@ Retaining them is a change to the token stream that everything downstream reads,
 sequenced first if the formatter is done at all, and it is the piece to cut if the milestone
 runs long.
 
+**v0.7 — gradual type annotations (`T?`), container generics (`list[T]`), visibility (`pub`, `private`, `protected`), and LSP tooling**
+
+This milestone introduces gradual optional type annotations, generic container bounds, out-parameter references, member/module visibility access control, and rich LSP editor tooling to Quince.
+
+- **Annotations & Explicit Nullability (`T?`)**: Optional type annotations on variable bindings (`let x: int = 8`), parameters (`fn example(x: int, opt: int?)`), and function return signatures (`: string?`). Types are non-nullable by default; `nil` is rejected unless specified with `?`. Reassigning an annotated variable to a non-matching type triggers a `TypeError`. Unannotated bindings (`let x = 8`) remain dynamically typed.
+- **Typed Generic Containers (`list[T]`, `dict[K, V]`)**: Enforces element/key/value type bounds on collections (`let nums: list[int] = [1, 2]`). `nums.push("hi")` raises a runtime `TypeError`.
+- **Reference Parameters (`ref`, `final ref`, `const ref`)**: Enables out-parameter mutation (`fn inc(ref y: int)`). Plain `ref` requires a mutable `let` lvalue. `final ref` prevents reassignment inside the callee. `const ref` provides read-only references accepting `let`, `final`, or frozen `const` variables.
+- **Class Member Visibility (`public`, `private`, `protected`) & Field Declarations**: Class body field declarations with type bounds. `private` restricts access to the declaring class, `protected` permits subclass access, and `public` allows external access. Operator declarations (`op`) must be `public`.
+- **Module Visibility & Exports (`pub`)**: Module declarations default to private. Top-level variables, functions, and classes marked with `pub` (`pub fn`, `pub class`) are exported for module consumers.
+- **Operator (`op`) Type Contract Validation**: Operator declarations must adhere to built-in protocol return types (e.g. `op string(): int` is rejected as a compile-time resolution error).
+- **LSP Type Tooling**: Adds LSP Inlay Hints (`textDocument/inlayHint`) to display inferred/annotated types inline in VS Code, auto-completes type names after `:`, and underlines type mismatch/visibility diagnostics live.
+
+See `V0_7_TYPE_SYSTEM_DESIGN.md` for full design specifications and type matching rules.
+
 **Later**
 Bytecode VM, async/await, sized integer types — all things Zephyr has, deferred until the
 core is solid. The module system was on this list and came forward into v0.6; what is
