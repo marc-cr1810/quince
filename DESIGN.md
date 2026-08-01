@@ -2338,6 +2338,23 @@ and not a second one written for editors. Everything downstream of `KEYWORDS` �
 completer, the highlighter, the token map — reads the one list, which is what made adding
 `complete` and `sealed` four edits in `token.rs`.
 
+The extension carries the language's version rather than one of its own. It is not a separate
+product with its own release cycle: its semantic token scopes name what `lsp.rs` emits, its
+grammar spells out the words the lexer reserves, and it launches a binary built from the same
+tree — so a version of its own would be a number changing for reasons the number cannot
+express. The cost is a marketplace release for every language release, including ones where
+nothing under `editors/` changed; that is cheaper than a bug reported against "extension
+0.1.0" with no way to say which language it was matching.
+
+The TextMate grammar is the one thing downstream of the keywords that cannot read `KEYWORDS`,
+because a `.tmLanguage.json` is data VS Code reads without ever running our code, and it had
+drifted exactly as far as that predicts: `extend`, `complete`, and `sealed` were reserved by
+the lexer and unknown to the highlighter, so three keywords rendered as plain identifiers in
+the editor the language ships an extension for. The list is now correct and it is still a
+copy, which means it will drift again. Generating it from `KEYWORDS` at build time is the
+fix, and it waits for v0.6 — the milestone that owns the tooling — rather than being smuggled
+into a release commit.
+
 What it does *not* do is type inference. A document mid-keystroke usually does not parse,
 and an editor that goes blank between two valid states is worse than one that guesses, so
 `lsp.rs` falls back to reading lines as text — `fn ` at the start of a line is a function —
