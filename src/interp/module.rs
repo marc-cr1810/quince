@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use crate::builtins::{BUILTINS, stdlib};
-use crate::error::{ErrorKind, ModuleSource, QuinceError};
+use crate::error::{ErrorKind, ModuleSource, QuinceError, Raised, Result};
 use crate::interp::{Interp, ModuleState, file_name};
 use crate::runtime::class::BUILTINS as BUILTIN_TYPES;
 use crate::runtime::env::{self, Globals};
@@ -28,7 +28,7 @@ impl Interp {
     /// must not quietly take over a name the language ships. The reserved set is
     /// small, fixed, and listed in `stdlib::MODULES`, which is what makes that a
     /// rule someone can hold in their head rather than a trap.
-    pub(super) fn load_module(&mut self, name: &str, env: ObjId, span: Span) -> Result<ObjId, QuinceError> {
+    pub(super) fn load_module(&mut self, name: &str, env: ObjId, span: Span) -> Result<ObjId> {
         if let Some(id) = self.stdlib_modules.get(name) {
             return Ok(*id);
         }
@@ -66,7 +66,7 @@ impl Interp {
     /// runs the same from anywhere. The REPL has no file, so it resolves against
     /// the working directory — the only sensible answer for input that came from
     /// a terminal.
-    pub(super) fn resolve_import(&self, name: &str, env: ObjId, span: Span) -> Result<PathBuf, QuinceError> {
+    pub(super) fn resolve_import(&self, name: &str, env: ObjId, span: Span) -> Result<PathBuf> {
         let importer = env::module_of(&self.heap, env);
         let base = match self.heap.globals(importer).path() {
             Some(path) => path.parent().map(Path::to_path_buf).unwrap_or_default(),
@@ -99,7 +99,7 @@ impl Interp {
     }
 
     /// Compiles and runs a file as a module, and hands back its scope.
-    pub(super) fn run_module(&mut self, name: &str, path: PathBuf, text: String) -> Result<ObjId, QuinceError> {
+    pub(super) fn run_module(&mut self, name: &str, path: PathBuf, text: String) -> Result<ObjId> {
         let source = Rc::new(ModuleSource {
             // The file's name and not the path it was found at, so a report is
             // the same on every machine. The starting file already has this
@@ -216,7 +216,7 @@ impl Interp {
     }
 
     /// `a.qn` imports `b.qn` imports `a.qn`, reported as the path it took.
-    pub(super) fn import_cycle(&self, path: &Path, span: Span) -> QuinceError {
+    pub(super) fn import_cycle(&self, path: &Path, span: Span) -> Raised {
         let start = self
             .loading
             .iter()
@@ -256,7 +256,7 @@ impl Interp {
     ///
     /// [`ErrorKind::Attr`] because that is what this is: a scope that exists,
     /// asked for something it does not have.
-    pub(super) fn not_in_module(&self, module: &str, name: &str, span: Span, loaded: ObjId) -> QuinceError {
+    pub(super) fn not_in_module(&self, module: &str, name: &str, span: Span, loaded: ObjId) -> Raised {
         let mut err = QuinceError::new(format!("`{module}` declares nothing called `{name}`"), span)
             .with_kind(ErrorKind::Attr);
         let declared: Vec<String> = self

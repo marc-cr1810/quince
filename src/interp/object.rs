@@ -8,7 +8,7 @@
 
 use std::rc::Rc;
 
-use crate::error::{ErrorKind, QuinceError};
+use crate::error::{ErrorKind, QuinceError, Raised, Result};
 use crate::interp::error::an;
 use crate::interp::{Attr, Interp};
 use crate::runtime::dict::Key;
@@ -31,7 +31,7 @@ impl Interp {
         target_span: Span,
         name_span: Span,
         expr_span: Span,
-    ) -> Result<Attr, QuinceError> {
+    ) -> Result<Attr> {
         if let Value::Instance(id) = receiver
             && let Some(value) = self
                 .heap
@@ -163,7 +163,7 @@ impl Interp {
     /// library that has to keep growing without breaking callers. Quince has nine
     /// builtin types with single-digit method counts, so the loud answer is
     /// affordable here and would not be there.
-    pub(super) fn may_extend(&self, id: ObjId, decl: &FnDecl, span: Span) -> Result<(), QuinceError> {
+    pub(super) fn may_extend(&self, id: ObjId, decl: &FnDecl, span: Span) -> Result<()> {
         let name = &decl.name;
         let type_name = || self.heap.class(id).name.clone();
         // First, because it is the only one of the three that is about the type
@@ -230,7 +230,7 @@ impl Interp {
     /// Separate from the receiver, which comes from the enclosing method's
     /// parameters — the two halves of `super` live in different scopes, and
     /// neither is searched for by name.
-    pub(super) fn super_class(&mut self, parent: &Var, env: ObjId, span: Span) -> Result<ObjId, QuinceError> {
+    pub(super) fn super_class(&mut self, parent: &Var, env: ObjId, span: Span) -> Result<ObjId> {
         match self.read(parent, env, span)? {
             Value::Class(id) => Ok(id),
             _ => unreachable!("`super` is only ever bound to a class"),
@@ -240,7 +240,7 @@ impl Interp {
     /// Looks `name` up starting *at* the superclass, which is what stops an
     /// override from calling itself: `Dog.speak` reaching for `super.speak`
     /// must not find `Dog.speak` again.
-    pub(super) fn super_method(&mut self, id: ObjId, name: &str, span: Span) -> Result<Value, QuinceError> {
+    pub(super) fn super_method(&mut self, id: ObjId, name: &str, span: Span) -> Result<Value> {
         match self.find_method(id, name) {
             Some(method) => Ok(method),
             None => Err(QuinceError::new(
@@ -257,7 +257,7 @@ impl Interp {
     /// `super.init` — but it works on names in one pass, so `final S = string`
     /// followed by `class X extends S` gets past it. This is what that costs, and
     /// it is a report rather than the panic a native would otherwise hit.
-    pub(super) fn no_payload(&self, id: ObjId, span: Span) -> QuinceError {
+    pub(super) fn no_payload(&self, id: ObjId, span: Span) -> Raised {
         let class = self.heap.instance(id).class;
         let name = self.heap.class(class).name.clone();
         // A native is only ever found on an instance by walking the class chain to
@@ -286,7 +286,7 @@ impl Interp {
         target_span: Span,
         name_span: Span,
         expr_span: Span,
-    ) -> QuinceError {
+    ) -> Raised {
         // An instance can grow fields at run time, so a missing name there is a
         // different mistake from a missing method on a builtin type.
         let what = match receiver {

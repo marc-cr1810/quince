@@ -1,6 +1,6 @@
 //! `io` — reading and writing files, and reading a line of the program's input.
 
-use crate::error::{ErrorKind, QuinceError};
+use crate::error::{ErrorKind, QuinceError, Raised, Result};
 use crate::runtime::class::Builtin;
 use crate::runtime::heap::{Heap, Object};
 use crate::runtime::value::{Native, Value};
@@ -33,7 +33,7 @@ pub static IO: Module = Module {
 };
 
 /// The string `name` was given, refusing anything else.
-fn text<'a>(name: &str, args: &'a [Value], heap: &'a Heap, span: Span) -> Result<&'a str, QuinceError> {
+fn text<'a>(name: &str, args: &'a [Value], heap: &'a Heap, span: Span) -> Result<&'a str> {
     match args[0].base(heap) {
         Value::Str(s) => Ok(s),
         other => Err(QuinceError::new(
@@ -51,7 +51,7 @@ fn text<'a>(name: &str, args: &'a [Value], heap: &'a Heap, span: Span) -> Result
 ///
 /// Never a panic: a file that is not there is an ordinary thing to happen to a
 /// running program, and is catchable like any other error.
-fn io_error(what: &str, path: &str, err: std::io::Error, span: Span) -> QuinceError {
+fn io_error(what: &str, path: &str, err: std::io::Error, span: Span) -> Raised {
     QuinceError::new(format!("could not {what} `{path}`: {err}"), span).with_kind(ErrorKind::Io)
 }
 

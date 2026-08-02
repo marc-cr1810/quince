@@ -16,7 +16,7 @@
 //! value cannot be held across that.
 
 use crate::color::Style;
-use crate::error::QuinceError;
+use crate::error::Result;
 use crate::interp::Interp;
 use crate::runtime::value::Value;
 use crate::syntax::ast::Op;
@@ -46,7 +46,7 @@ pub enum Ask {
 
 impl Interp {
     /// How a value prints, which a class may answer with `op string`.
-    pub fn display(&mut self, value: &Value, ask: Ask) -> Result<String, QuinceError> {
+    pub fn display(&mut self, value: &Value, ask: Ask) -> Result<String> {
         self.display_styled(value, false, ask)
     }
 
@@ -56,7 +56,7 @@ impl Interp {
         value: &Value,
         color: bool,
         ask: Ask,
-    ) -> Result<String, QuinceError> {
+    ) -> Result<String> {
         // Asked before the payload is unwrapped, because the class is what holds
         // the answer: an `op string` on a subclass of `string` has to beat the
         // string it carries, or declaring it would do nothing.
@@ -157,7 +157,7 @@ impl Interp {
         value: &Value,
         color: bool,
         ask: Ask,
-    ) -> Result<String, QuinceError> {
+    ) -> Result<String> {
         // A class that says how it prints says so in every position, so the
         // quoting below is reached only when nothing answered. Checked before the
         // payload for the same reason `display_styled` checks first: a class
@@ -185,7 +185,7 @@ impl Interp {
         value: &Value,
         color: bool,
         ask: Ask,
-    ) -> Result<String, QuinceError> {
+    ) -> Result<String> {
         let unstyled = self.display_styled(value, false, ask)?;
         if unstyled.len() <= MAX_WIDTH && !unstyled.contains('\n') {
             return self.display_styled(value, color, ask);
@@ -202,7 +202,7 @@ impl Interp {
         color: bool,
         indent: usize,
         ask: Ask,
-    ) -> Result<String, QuinceError> {
+    ) -> Result<String> {
         let pad = INDENT.repeat(indent);
         let inner_pad = INDENT.repeat(indent + 1);
         let base = value.base(&self.heap).clone();

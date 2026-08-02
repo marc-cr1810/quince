@@ -3,13 +3,13 @@
 //! Bindings, control flow, `try`/`throw`, and a bare expression. v0.10's `match`
 //! and `if let` are statement-position forms and belong here beside `if`.
 
-use crate::error::QuinceError;
+use crate::error::Result;
 use crate::syntax::ast::{BindKind, Stmt, StmtKind};
 use crate::syntax::parser::Parser;
 use crate::syntax::token::TokenKind;
 
 impl Parser {
-    pub(super) fn let_stmt(&mut self) -> Result<Stmt, QuinceError> {
+    pub(super) fn let_stmt(&mut self) -> Result<Stmt> {
         let keyword = self.advance();
         let doc = Self::doc_of(&keyword, "a binding")?;
         let bind = match keyword.kind {
@@ -36,7 +36,7 @@ impl Parser {
             span,
         })
     }
-    pub(super) fn if_stmt(&mut self) -> Result<Stmt, QuinceError> {
+    pub(super) fn if_stmt(&mut self) -> Result<Stmt> {
         let start = self.advance().span;
         let cond = self.expression()?;
         let then = self.block()?;
@@ -68,7 +68,7 @@ impl Parser {
         })
     }
 
-    pub(super) fn while_stmt(&mut self) -> Result<Stmt, QuinceError> {
+    pub(super) fn while_stmt(&mut self) -> Result<Stmt> {
         let start = self.advance().span;
         let cond = self.expression()?;
         let body = self.block()?;
@@ -79,7 +79,7 @@ impl Parser {
         })
     }
 
-    pub(super) fn for_stmt(&mut self) -> Result<Stmt, QuinceError> {
+    pub(super) fn for_stmt(&mut self) -> Result<Stmt> {
         let start = self.advance().span;
         let (var, _) = self.expect_ident("after `for`")?;
         self.expect(TokenKind::In, "after the loop variable")?;
@@ -97,7 +97,7 @@ impl Parser {
         })
     }
 
-    pub(super) fn return_stmt(&mut self) -> Result<Stmt, QuinceError> {
+    pub(super) fn return_stmt(&mut self) -> Result<Stmt> {
         let start = self.advance().span;
         let value = if self.at_statement_end() {
             None
@@ -116,7 +116,7 @@ impl Parser {
     ///
     /// `catch e` takes no parentheses, matching `if cond {` and `for x in xs {` —
     /// nothing else in the grammar parenthesises a header and this does not start.
-    pub(super) fn try_stmt(&mut self) -> Result<Stmt, QuinceError> {
+    pub(super) fn try_stmt(&mut self) -> Result<Stmt> {
         let start = self.advance().span;
         let body = self.block()?;
         self.expect(TokenKind::Catch, "after the `try` block")?;
@@ -134,7 +134,7 @@ impl Parser {
         })
     }
 
-    pub(super) fn throw_stmt(&mut self) -> Result<Stmt, QuinceError> {
+    pub(super) fn throw_stmt(&mut self) -> Result<Stmt> {
         let start = self.advance().span;
         let value = self.expression()?;
         let span = start.to(value.span);
@@ -145,7 +145,7 @@ impl Parser {
         })
     }
 
-    pub(super) fn expr_stmt(&mut self) -> Result<Stmt, QuinceError> {
+    pub(super) fn expr_stmt(&mut self) -> Result<Stmt> {
         let expr = self.expression()?;
         let span = expr.span;
         self.end_of_statement()?;

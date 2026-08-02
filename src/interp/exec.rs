@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::error::{ErrorKind, QuinceError};
+use crate::error::{ErrorKind, QuinceError, Result};
 use crate::interp::error::an;
 use crate::interp::{Flow, Interp, resolved};
 use crate::runtime::class::Class;
@@ -20,7 +20,7 @@ use crate::runtime::value::{Function, Value};
 use crate::syntax::ast::{Block, Expr, ImportNames, Op, Slot, Stmt, StmtKind};
 
 impl Interp {
-    pub(super) fn exec(&mut self, stmt: &Stmt, env: ObjId) -> Result<Flow, QuinceError> {
+    pub(super) fn exec(&mut self, stmt: &Stmt, env: ObjId) -> Result<Flow> {
         // The one safe point in the evaluator. Every statement passes through
         // here, and nothing above it on the Rust stack holds an unrooted value.
         self.collect_if_needed();
@@ -354,7 +354,7 @@ impl Interp {
         handler: &Block,
         slot: &Option<Slot>,
         env: ObjId,
-    ) -> Result<Flow, QuinceError> {
+    ) -> Result<Flow> {
         let err = match self.exec_block(body, env) {
             // A `return` inside a `try` travels as `Flow::Return`, a value in the
             // `Ok` channel, and errors travel in the `Err` channel. It passes
@@ -390,7 +390,7 @@ impl Interp {
         iter: &Expr,
         body: &Block,
         env: ObjId,
-    ) -> Result<Flow, QuinceError> {
+    ) -> Result<Flow> {
         let iterable = self.eval(iter, env)?;
 
         // A class says what it iterates as by answering with a list — eager, and
@@ -445,7 +445,7 @@ impl Interp {
         items: Vec<Value>,
         body: &Block,
         env: ObjId,
-    ) -> Result<Flow, QuinceError> {
+    ) -> Result<Flow> {
         let index = match resolved(slot) {
             Slot::Local { index, .. } => index,
             Slot::Global => unreachable!("a loop variable is always a local"),
@@ -464,7 +464,7 @@ impl Interp {
         Ok(Flow::Normal)
     }
 
-    pub(super) fn exec_block(&mut self, block: &Block, env: ObjId) -> Result<Flow, QuinceError> {
+    pub(super) fn exec_block(&mut self, block: &Block, env: ObjId) -> Result<Flow> {
         let scope = self
             .heap
             .alloc(Object::Env(Env::new(Some(env), block.slot_count)));
@@ -488,14 +488,14 @@ impl Interp {
     /// Every scope is created and entered here, which is what makes the root
     /// set complete — a scope allocated anywhere else would be collected out
     /// from under the frame using it.
-    pub(super) fn exec_scoped(&mut self, stmts: &[Stmt], scope: ObjId) -> Result<Flow, QuinceError> {
+    pub(super) fn exec_scoped(&mut self, stmts: &[Stmt], scope: ObjId) -> Result<Flow> {
         self.scopes.push(scope);
         let result = self.exec_stmts(stmts, scope);
         self.scopes.pop();
         result
     }
 
-    pub(super) fn exec_stmts(&mut self, stmts: &[Stmt], env: ObjId) -> Result<Flow, QuinceError> {
+    pub(super) fn exec_stmts(&mut self, stmts: &[Stmt], env: ObjId) -> Result<Flow> {
         for stmt in stmts {
             if let Flow::Return(value) = self.exec(stmt, env)? {
                 return Ok(Flow::Return(value));

@@ -1,6 +1,6 @@
 //! `math` — the numeric functions, and the two that pick between values.
 
-use crate::error::{ErrorKind, QuinceError};
+use crate::error::{ErrorKind, QuinceError, Result};
 use crate::runtime::class::Builtin;
 use crate::runtime::heap::Heap;
 use crate::runtime::value::{Native, Value};
@@ -30,7 +30,7 @@ pub static MATH: Module = Module {
 /// Ints are accepted everywhere a float is, which is the same latitude `+` gives
 /// them. The payload is unwrapped first, so a `class Celsius extends float` can
 /// be handed to `math.floor` and get an answer about the float it is.
-pub(super) fn number(name: &str, args: &[Value], heap: &Heap, span: Span) -> Result<f64, QuinceError> {
+pub(super) fn number(name: &str, args: &[Value], heap: &Heap, span: Span) -> Result<f64> {
     match args[0].base(heap) {
         Value::Int(n) => Ok(*n as f64),
         Value::Float(n) => Ok(*n),
@@ -169,7 +169,7 @@ static MAX: Native = Native {
 
 /// Keeps the int-ness of whichever argument wins, so `math.min(1, 2)` is an int
 /// and not `1.0`.
-fn pick(args: &[Value], heap: &Heap, span: Span, name: &str) -> Result<Value, QuinceError> {
+fn pick(args: &[Value], heap: &Heap, span: Span, name: &str) -> Result<Value> {
     let left = number(name, args, heap, span)?;
     let right = number(name, &args[1..], heap, span)?;
     let take_left = if name == "min" {

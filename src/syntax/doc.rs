@@ -17,7 +17,7 @@
 //! an error naming the three that exist rather than a line silently swallowed
 //! into the prose above it.
 
-use crate::error::{ErrorKind, QuinceError};
+use crate::error::{ErrorKind, QuinceError, Raised, Result};
 use crate::syntax::ast::Param;
 use crate::syntax::token::{DocBlock, Span};
 
@@ -119,7 +119,7 @@ pub struct Doc {
 ///
 /// The same kind the resolver raises, and for the same reason: by the time this
 /// runs the text is well-formed and what is left to get wrong is names.
-fn doc_error(message: impl Into<String>, span: Span) -> QuinceError {
+fn doc_error(message: impl Into<String>, span: Span) -> Raised {
     QuinceError::new(message, span).with_kind(ErrorKind::Declaration)
 }
 
@@ -129,7 +129,7 @@ impl Doc {
     /// A line that does not begin with `@` continues whatever came before it,
     /// which is what lets a tag's text run to a second line without repeating
     /// the tag.
-    pub fn parse(block: &DocBlock) -> Result<Doc, QuinceError> {
+    pub fn parse(block: &DocBlock) -> Result<Doc> {
         let mut doc = Doc {
             summary: String::new(),
             params: Vec::new(),
@@ -239,7 +239,7 @@ impl Doc {
     /// caught by a test rather than surfaced as a diagnostic. What this buys is
     /// one renderer: `print` and a function someone wrote are drawn by the same
     /// code, from the same shape.
-    pub fn parse_text(text: &str) -> Result<Doc, QuinceError> {
+    pub fn parse_text(text: &str) -> Result<Doc> {
         let block = DocBlock {
             lines: text
                 .lines()
@@ -261,7 +261,7 @@ impl Doc {
     /// mistake. Refusing it would mean a half-documented function cannot be
     /// written at all, and what people do about a rule like that is delete the
     /// documentation.
-    pub fn check(&self, params: &[Param]) -> Result<(), QuinceError> {
+    pub fn check(&self, params: &[Param]) -> Result<()> {
         for documented in &self.params {
             if !params
                 .iter()
@@ -289,7 +289,7 @@ impl Doc {
     /// Refuses the tags that need a signature, for a declaration that has none.
     ///
     /// A `let` and a `class` get a summary and nothing else.
-    pub fn check_has_no_signature(&self, what: &str) -> Result<(), QuinceError> {
+    pub fn check_has_no_signature(&self, what: &str) -> Result<()> {
         let offender = self
             .params
             .first()

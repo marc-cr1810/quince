@@ -10,7 +10,7 @@
 
 use std::rc::Rc;
 
-use crate::error::{ErrorKind, QuinceError};
+use crate::error::{ErrorKind, QuinceError, Raised, Result};
 use crate::interp::Interp;
 use crate::interp::error::type_error;
 use crate::interp::index::key_of;
@@ -26,7 +26,7 @@ impl Interp {
     /// For `sort`, which needs an ordering it can call rather than an expression
     /// to evaluate. The same path `<` takes, so a class defining `op lt` or
     /// `op cmp` sorts by what it said.
-    pub(crate) fn less_than(&mut self, lhs: &Value, rhs: &Value, span: Span) -> Result<bool, QuinceError> {
+    pub(crate) fn less_than(&mut self, lhs: &Value, rhs: &Value, span: Span) -> Result<bool> {
         let answer = self.binary(BinaryOp::Lt, lhs.clone(), rhs.clone(), span, span, span)?;
         match answer.base(&self.heap) {
             Value::Bool(b) => Ok(*b),
@@ -73,7 +73,7 @@ impl Interp {
         method: Value,
         receiver: &Value,
         args: Vec<Value>,
-    ) -> Result<Value, QuinceError> {
+    ) -> Result<Value> {
         let span = match &method {
             Value::Function(id) => self.heap.function(*id).decl.body.span,
             // `Class::builtin` fills exactly one slot from a seed table, so a
@@ -108,7 +108,7 @@ impl Interp {
         receiver: &Value,
         expected: &str,
         got: &Value,
-    ) -> QuinceError {
+    ) -> Raised {
         // Reached only after that op answered, so the slot is filled and holds a
         // function — see `call_op` for why a native cannot be here.
         let span = match self.slot(receiver, op) {
@@ -128,7 +128,7 @@ impl Interp {
     }
 
     /// Whether a value counts as true, which a class may answer with `op bool`.
-    pub fn is_truthy(&mut self, value: &Value) -> Result<bool, QuinceError> {
+    pub fn is_truthy(&mut self, value: &Value) -> Result<bool> {
         let Some(method) = self.slot(value, Op::Bool) else {
             return Ok(value.is_truthy_base(&self.heap));
         };
@@ -178,7 +178,7 @@ impl Interp {
     /// slots, shared with the renderer, and tracked as its own piece of work
     /// rather than patched in the middle of this one. The fix is Python's: record
     /// the pair being compared and answer `true` on reaching it again.
-    pub fn equals(&mut self, lhs: &Value, rhs: &Value) -> Result<bool, QuinceError> {
+    pub fn equals(&mut self, lhs: &Value, rhs: &Value) -> Result<bool> {
         // Asked before the payload is unwrapped, so a subclass of `string` that
         // declares `op eq` beats the string it carries. Either side may answer,
         // because `==` cannot depend on which order it was written in.
@@ -251,7 +251,7 @@ impl Interp {
     /// run a program's `op eq`, which is free to mutate either list. `get` is
     /// what makes a list that shrank mid-comparison end the comparison rather
     /// than panic — and having shrunk, it is no longer the same length.
-    pub(super) fn lists_equal(&mut self, a: ObjId, b: ObjId) -> Result<bool, QuinceError> {
+    pub(super) fn lists_equal(&mut self, a: ObjId, b: ObjId) -> Result<bool> {
         if self.heap.list(a).len() != self.heap.list(b).len() {
             return Ok(false);
         }
@@ -273,7 +273,7 @@ impl Interp {
     /// By key, which cannot ask a class anything — a [`Key`] holds no handle, so
     /// two keys are equal exactly when `key_of` maps them to the same one. Only
     /// the values are compared through `equals`.
-    pub(super) fn dicts_equal(&mut self, a: ObjId, b: ObjId) -> Result<bool, QuinceError> {
+    pub(super) fn dicts_equal(&mut self, a: ObjId, b: ObjId) -> Result<bool> {
         if self.heap.dict(a).len() != self.heap.dict(b).len() {
             return Ok(false);
         }
@@ -302,7 +302,7 @@ impl Interp {
 
     // -- operators ---------------------------------------------------------
 
-    pub(super) fn unary(&mut self, op: UnaryOp, value: Value, span: Span) -> Result<Value, QuinceError> {
+    pub(super) fn unary(&mut self, op: UnaryOp, value: Value, span: Span) -> Result<Value> {
         // `not` asks only for truthiness, which unwraps a payload for itself.
         if let UnaryOp::Not = op {
             let truthy = self.is_truthy(&value)?;
@@ -340,7 +340,7 @@ impl Interp {
         lhs_span: Span,
         rhs_span: Span,
         expr_span: Span,
-    ) -> Result<Value, QuinceError> {
+    ) -> Result<Value> {
         use BinaryOp::*;
 
         // Equality is defined for every pair of types, which is why there is no
@@ -429,7 +429,7 @@ impl Interp {
         lhs: &Value,
         rhs: &Value,
         spans: (Span, Span, Span),
-    ) -> Result<Option<Value>, QuinceError> {
+    ) -> Result<Option<Value>> {
         let span = spans.2;
         let specific = match op {
             BinaryOp::Lt => Some(Op::Lt),
@@ -500,7 +500,7 @@ impl Interp {
         lhs: &Value,
         rhs: &Value,
         span: Span,
-    ) -> Result<(), QuinceError> {
+    ) -> Result<()> {
         let symbol = match op {
             BinaryOp::Le => "<=",
             BinaryOp::Ge => ">=",
@@ -549,7 +549,7 @@ impl Interp {
         lhs: &Value,
         rhs: &Value,
         spans: (Span, Span, Span),
-    ) -> Result<Option<Value>, QuinceError> {
+    ) -> Result<Option<Value>> {
         let slot = match op {
             BinaryOp::Add => Op::Add,
             BinaryOp::Sub => Op::Sub,
@@ -579,7 +579,7 @@ impl Interp {
         lhs: &Value,
         rhs: &Value,
         spans: (Span, Span, Span),
-    ) -> Result<(), QuinceError> {
+    ) -> Result<()> {
         // Only the right, since the left having it is how we would not be here.
         if self.slot(rhs, slot).is_none() {
             return Ok(());
@@ -624,7 +624,7 @@ impl Interp {
         haystack: &Value,
         needle: &Value,
         span: Span,
-    ) -> Result<Value, QuinceError> {
+    ) -> Result<Value> {
         // The haystack's class first. `op contains` is the other half of `in`:
         // [`Op::Eq`] decides what a *list* holds by comparing items, and this
         // decides for a class that does its own looking — a range that answers
@@ -714,7 +714,7 @@ pub(crate) fn floor_div(a: i64, b: i64) -> Option<i64> {
 }
 
 /// Integer arithmetic. Reports overflow rather than wrapping.
-pub(crate) fn int_op(op: BinaryOp, a: i64, b: i64, span: Span) -> Result<Value, QuinceError> {
+pub(crate) fn int_op(op: BinaryOp, a: i64, b: i64, span: Span) -> Result<Value> {
     use BinaryOp::*;
     let overflow = || QuinceError::new("integer overflow", span).with_kind(ErrorKind::Overflow);
 
@@ -755,7 +755,7 @@ pub(crate) fn int_op(op: BinaryOp, a: i64, b: i64, span: Span) -> Result<Value, 
     Ok(value)
 }
 
-pub(crate) fn float_op(op: BinaryOp, a: f64, b: f64, span: Span) -> Result<Value, QuinceError> {
+pub(crate) fn float_op(op: BinaryOp, a: f64, b: f64, span: Span) -> Result<Value> {
     use BinaryOp::*;
     let value = match op {
         Add => Value::Float(a + b),

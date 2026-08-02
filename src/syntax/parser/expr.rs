@@ -4,7 +4,7 @@
 //! [`infix_op`] is the whole precedence table. v0.7 adds `??`, `is`, and `?.`
 //! to it and v0.10 adds `..`; each is a row here rather than a new production.
 
-use crate::error::QuinceError;
+use crate::error::Result;
 use crate::syntax::ast::{self, BinaryOp, Expr, ExprKind, LogicalOp, UnaryOp, Var};
 use crate::syntax::parser::{Parser, syntax};
 use crate::syntax::token::TokenKind;
@@ -43,13 +43,13 @@ fn infix_op(kind: &TokenKind) -> Option<(InfixOp, u8, u8)> {
 }
 
 impl Parser {
-    pub(super) fn expression(&mut self) -> Result<Expr, QuinceError> {
+    pub(super) fn expression(&mut self) -> Result<Expr> {
         self.assignment()
     }
 
     /// Assignment binds loosest and associates rightwards, so `a = b = c` is
     /// `a = (b = c)`.
-    pub(super) fn assignment(&mut self) -> Result<Expr, QuinceError> {
+    pub(super) fn assignment(&mut self) -> Result<Expr> {
         let lhs = self.binary(0)?;
         if !self.eat(&TokenKind::Assign) {
             return Ok(lhs);
@@ -73,7 +73,7 @@ impl Parser {
         })
     }
 
-    pub(super) fn binary(&mut self, min_bp: u8) -> Result<Expr, QuinceError> {
+    pub(super) fn binary(&mut self, min_bp: u8) -> Result<Expr> {
         let mut lhs = self.unary()?;
 
         while let Some((op, lbp, rbp)) = infix_op(&self.peek().kind) {
@@ -101,7 +101,7 @@ impl Parser {
         Ok(lhs)
     }
 
-    pub(super) fn unary(&mut self) -> Result<Expr, QuinceError> {
+    pub(super) fn unary(&mut self) -> Result<Expr> {
         let op = match self.peek().kind {
             TokenKind::Minus => UnaryOp::Neg,
             TokenKind::Not => UnaryOp::Not,
@@ -119,7 +119,7 @@ impl Parser {
         })
     }
 
-    pub(super) fn postfix(&mut self) -> Result<Expr, QuinceError> {
+    pub(super) fn postfix(&mut self) -> Result<Expr> {
         let mut expr = self.primary()?;
 
         loop {
@@ -197,7 +197,7 @@ impl Parser {
         }
     }
 
-    pub(super) fn primary(&mut self) -> Result<Expr, QuinceError> {
+    pub(super) fn primary(&mut self) -> Result<Expr> {
         let token = self.advance();
         let kind = match token.kind {
             TokenKind::Int(n) => ExprKind::Int(n),

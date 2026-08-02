@@ -5,7 +5,7 @@
 //! `override`, and `explicit`, v0.9's `[T]` parameter lists, v0.10's `enum`.
 
 
-use crate::error::QuinceError;
+use crate::error::Result;
 use crate::syntax::ast::{
     self, FnDecl, ImportName, ImportNames, Op, Openness, Param, Stmt, StmtKind, Var,
 };
@@ -14,7 +14,7 @@ use crate::syntax::parser::{Parser, declaration, syntax};
 use crate::syntax::token::{Token, TokenKind};
 
 impl Parser {
-    pub(super) fn fn_stmt(&mut self) -> Result<Stmt, QuinceError> {
+    pub(super) fn fn_stmt(&mut self) -> Result<Stmt> {
         let start = self.peek().span;
         let decl = self.fn_decl(false)?;
         Ok(Stmt {
@@ -37,7 +37,7 @@ impl Parser {
     /// An `op` is validated here rather than in the resolver because everything
     /// the check needs is local: the name, the span, and the parameters, all in
     /// hand before the body is parsed.
-    pub(super) fn fn_decl(&mut self, method: bool) -> Result<FnDecl, QuinceError> {
+    pub(super) fn fn_decl(&mut self, method: bool) -> Result<FnDecl> {
         let token = self.advance();
         let doc = Self::doc_of(&token, "a function")?;
         let keyword = token.kind.clone();
@@ -139,7 +139,7 @@ impl Parser {
     /// A `fn` is the one form with a signature, so it is the one form that
     /// checks nothing here and everything later: its `@param`s are checked
     /// against the parameter list once that has been read.
-    pub(super) fn doc_of(token: &Token, what: &str) -> Result<Option<Doc>, QuinceError> {
+    pub(super) fn doc_of(token: &Token, what: &str) -> Result<Option<Doc>> {
         let Some(block) = &token.doc else {
             return Ok(None);
         };
@@ -166,7 +166,7 @@ impl Parser {
         declared: &[std::rc::Rc<FnDecl>],
         decl: &FnDecl,
         whose: &str,
-    ) -> Result<(), QuinceError> {
+    ) -> Result<()> {
         if !declared.iter().any(|seen| seen.name == decl.name) {
             return Ok(());
         }
@@ -184,7 +184,7 @@ impl Parser {
     ///
     /// The span starts at the modifier when there is one, so a report about the
     /// declaration underlines the header the program wrote rather than the half
-    pub(super) fn class_stmt(&mut self) -> Result<Stmt, QuinceError> {
+    pub(super) fn class_stmt(&mut self) -> Result<Stmt> {
         let start = self.peek().span;
         // The modifier when there is one, since that is the first token of the
         // header and so the one the documentation attached to.
@@ -251,7 +251,7 @@ impl Parser {
     /// Shaped like a class body with the two halves a class has and an extension
     /// does not: no name to bind, and no `extends` clause, because an extension
     /// declares no type for anything to descend from.
-    pub(super) fn extend_stmt(&mut self) -> Result<Stmt, QuinceError> {
+    pub(super) fn extend_stmt(&mut self) -> Result<Stmt> {
         let start = self.advance().span;
         let (target, target_span) = self.expect_ident("after `extend`")?;
 
@@ -291,7 +291,7 @@ impl Parser {
     /// One function for both, because they are one statement written two ways —
     /// the module is named either side of the `import`, and which side it lands
     /// on decides only what gets bound.
-    pub(super) fn import_stmt(&mut self) -> Result<Stmt, QuinceError> {
+    pub(super) fn import_stmt(&mut self) -> Result<Stmt> {
         let start = self.peek().span;
         let from = self.advance().kind != TokenKind::Import;
 
@@ -348,7 +348,7 @@ impl Parser {
     /// A path syntax has to answer what it is relative to, what a package is,
     /// and how a search order works — all decisions that want a language with
     /// modules already in use.
-    pub(super) fn refuse_path(&mut self, module: &str) -> Result<(), QuinceError> {
+    pub(super) fn refuse_path(&mut self, module: &str) -> Result<()> {
         if !self.check(&TokenKind::Slash) && !self.check(&TokenKind::Dot) {
             return Ok(());
         }

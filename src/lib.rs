@@ -22,13 +22,13 @@ pub mod runtime;
 pub mod sema;
 pub mod syntax;
 
-use crate::error::QuinceError;
+use crate::error::Result;
 use crate::syntax::ast::Stmt;
 use crate::syntax::lexer::Lexer;
 use crate::syntax::parser::Parser;
 
 /// Lexes, parses, and resolves a whole source file.
-pub fn compile(source: &str) -> Result<Vec<Stmt>, QuinceError> {
+pub fn compile(source: &str) -> Result<Vec<Stmt>> {
     compile_tokens(Lexer::new(source).tokenize()?)
 }
 
@@ -39,7 +39,7 @@ pub fn compile(source: &str) -> Result<Vec<Stmt>, QuinceError> {
 /// came to be missing from the binary while every test still passed.
 pub fn compile_tokens(
     tokens: Vec<crate::syntax::token::Token>,
-) -> Result<Vec<Stmt>, QuinceError> {
+) -> Result<Vec<Stmt>> {
     let mut program = Parser::new(tokens).parse()?;
     sema::resolve::resolve(&mut program)?;
     Ok(program)

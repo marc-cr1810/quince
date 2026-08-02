@@ -6,7 +6,7 @@
 
 use std::rc::Rc;
 
-use crate::error::{ErrorKind, QuinceError};
+use crate::error::{ErrorKind, QuinceError, Raised, Result};
 use crate::interp::{Interp, KIND, MESSAGE};
 use crate::runtime::class::Instance;
 use crate::runtime::dict::{Dict, Key};
@@ -29,7 +29,7 @@ impl Interp {
     /// Returns the error to raise rather than raising it, because the caller is
     /// the one that owes an `Err` either way — evaluating the operand can fail on
     /// its own, and those two failures must not be confused for each other.
-    pub(super) fn throw(&mut self, raised: Value, span: Span) -> QuinceError {
+    pub(super) fn throw(&mut self, raised: Value, span: Span) -> Raised {
         let Value::Instance(id) = raised else {
             return QuinceError::new(
                 format!(
@@ -137,7 +137,7 @@ impl Interp {
 /// exactly one cause in the language and the reader's next question is always
 /// what did this. The value it names may be several steps from the `const` that
 /// froze it — that is what "deeply" means.
-pub(crate) fn frozen(heap: &Heap, value: &Value, span: Span) -> QuinceError {
+pub(crate) fn frozen(heap: &Heap, value: &Value, span: Span) -> Raised {
     QuinceError::new(
         format!("cannot modify `const` {}", value.type_name(heap)),
         span,
@@ -153,7 +153,7 @@ pub(crate) fn type_error(
     lhs_span: Span,
     rhs_span: Span,
     expr_span: Span,
-) -> QuinceError {
+) -> Raised {
     use BinaryOp::*;
     let verb = match op {
         Add => "add",
@@ -190,7 +190,7 @@ pub(crate) fn type_error(
     ))
 }
 
-pub(crate) fn check_arity(name: &str, expected: usize, found: usize, span: Span) -> Result<(), QuinceError> {
+pub(crate) fn check_arity(name: &str, expected: usize, found: usize, span: Span) -> Result<()> {
     if expected == found {
         return Ok(());
     }

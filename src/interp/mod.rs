@@ -43,7 +43,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use crate::builtins::{BUILTINS, stdlib};
-use crate::error::{ERROR_KINDS, ErrorKind, ModuleSource, QuinceError};
+use crate::error::{ERROR_KINDS, ErrorKind, ModuleSource, Result};
 use crate::runtime::class::BUILTINS as BUILTIN_TYPES;
 use crate::runtime::env::Globals;
 use crate::runtime::heap::{Heap, ObjId, Object};
@@ -448,7 +448,7 @@ impl Interp {
             })
     }
 
-    pub fn run(&mut self, program: &[Stmt]) -> Result<(), QuinceError> {
+    pub fn run(&mut self, program: &[Stmt]) -> Result<()> {
         for stmt in program {
             self.exec(stmt, self.globals)?;
         }
@@ -457,7 +457,7 @@ impl Interp {
 
     /// Evaluates a program, returning the value of a trailing expression so the
     /// REPL can echo it.
-    pub fn run_repl(&mut self, program: &[Stmt]) -> Result<Option<Value>, QuinceError> {
+    pub fn run_repl(&mut self, program: &[Stmt]) -> Result<Option<Value>> {
         let mark = self.temps.len();
         let mut last = None;
         for stmt in program {

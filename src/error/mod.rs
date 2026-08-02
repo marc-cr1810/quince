@@ -110,6 +110,22 @@ pub struct QuinceError {
     pub origin: Option<Rc<ModuleSource>>,
 }
 
+/// An error on its way up, boxed.
+///
+/// [`QuinceError`] is ~128 bytes and every stage of the pipeline returns one in
+/// a `Result`, which means the evaluator's hot path moved the whole struct on
+/// paths that overwhelmingly succeed. Boxing puts a pointer there instead, and
+/// pays the allocation only when something actually goes wrong — which is the
+/// same trade the struct's own doc comment makes about deferring rendering.
+///
+/// The builders take `Box<Self>`, so a raise site writes what it always wrote:
+/// `QuinceError::new(…).with_kind(…)` builds a `Raised` directly and no call
+/// site says `Box` out loud.
+pub type Raised = Box<QuinceError>;
+
+/// What every fallible stage of the pipeline answers with.
+pub type Result<T> = std::result::Result<T, Raised>;
+
 /// The text of one module, and what to call it in a report.
 ///
 /// Shared rather than copied per error: one module is imported once and may
@@ -122,8 +138,8 @@ pub struct ModuleSource {
 }
 
 impl QuinceError {
-    pub fn new(message: impl Into<String>, span: Span) -> Self {
-        QuinceError {
+    pub fn new(message: impl Into<String>, span: Span) -> Raised {
+        Box::new(QuinceError {
             message: message.into(),
             span,
             kind: ErrorKind::Runtime,
@@ -132,7 +148,7 @@ impl QuinceError {
             help: None,
             labels: Vec::new(),
             origin: None,
-        }
+        })
     }
 
     /// Records which module's text this error's spans belong to.
@@ -143,7 +159,7 @@ impl QuinceError {
     /// in; the frame it unwinds through knows exactly. The first one to set it
     /// wins, and that is the innermost, so an error crossing three modules is
     /// reported against the one that actually raised it.
-    pub fn in_module(mut self, source: Rc<ModuleSource>) -> Self {
+    pub fn in_module(mut self: Raised, source: Rc<ModuleSource>) -> Raised {
         if self.origin.is_none() {
             self.origin = Some(source);
         }
@@ -151,7 +167,7 @@ impl QuinceError {
     }
 
     /// Classifies an error, as a builder so a raise site adds one line.
-    pub fn with_kind(mut self, kind: ErrorKind) -> Self {
+    pub fn with_kind(mut self: Raised, kind: ErrorKind) -> Raised {
         self.kind = kind;
         self
     }
@@ -159,19 +175,19 @@ impl QuinceError {
     /// Attaches advice, as a builder for the same reason as [`with_kind`].
     ///
     /// [`with_kind`]: QuinceError::with_kind
-    pub fn with_help(mut self, help: impl Into<String>) -> Self {
+    pub fn with_help(mut self: Raised, help: impl Into<String>) -> Raised {
         self.help = Some(help.into());
         self
     }
 
     /// Attaches a sub-labeled span for diagnostic tree annotations.
-    pub fn with_label(mut self, span: Span, label: impl Into<String>) -> Self {
+    pub fn with_label(mut self: Raised, span: Span, label: impl Into<String>) -> Raised {
         self.labels.push(LabeledSpan::new(span, label));
         self
     }
 
     /// Attaches multiple sub-labeled spans.
-    pub fn with_labels(mut self, labels: impl IntoIterator<Item = LabeledSpan>) -> Self {
+    pub fn with_labels(mut self: Raised, labels: impl IntoIterator<Item = LabeledSpan>) -> Raised {
         self.labels.extend(labels);
         self
     }
@@ -185,8 +201,8 @@ impl QuinceError {
         class: impl Into<String>,
         message: impl Into<String>,
         span: Span,
-    ) -> Self {
-        QuinceError {
+    ) -> Raised {
+        Box::new(QuinceError {
             message: message.into(),
             span,
             kind: ErrorKind::Thrown,
@@ -195,7 +211,7 @@ impl QuinceError {
             help: None,
             labels: Vec::new(),
             origin: None,
-        }
+        })
     }
 }
 
@@ -210,4 +226,24 @@ mod tests {
         assert_eq!(err.payload, None);
     }
 
+    /// The reason [`Raised`] exists, stated as a number.
+    ///
+    /// A `Result` is as large as its larger arm, and this one is returned from
+    /// every stage of the pipeline on paths that overwhelmingly succeed — so the
+    /// error arm sets what the success path pays. Unboxed, [`QuinceError`] was
+    /// over 128 bytes and every one of those `Result`s carried it.
+    ///
+    /// Asserted rather than described because the cost is invisible at the call
+    /// sites that pay it: nothing in `eval` mentions the error's size, and a
+    /// field added to [`QuinceError`] in good faith would put it back without
+    /// anything complaining. This is what complains.
+    #[test]
+    fn the_error_travels_as_a_pointer_rather_than_a_struct() {
+        assert_eq!(size_of::<Raised>(), size_of::<*const ()>());
+        assert!(
+            size_of::<Result<()>>() <= 16,
+            "the pipeline's Result grew to {} bytes — has the error stopped being boxed?",
+            size_of::<Result<()>>()
+        );
+    }
 }

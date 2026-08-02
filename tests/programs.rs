@@ -35,7 +35,7 @@ use std::io::Write;
 use std::path::Path;
 use std::rc::Rc;
 
-use quince::error::QuinceError;
+use quince::error::Result;
 use quince::interp::Interp;
 
 /// A writer the test can read back afterwards.
@@ -63,7 +63,7 @@ impl Write for Captured {
 ///
 /// The whole error rather than its message, because `.report` needs the spans
 /// and labels that `message` throws away.
-fn run(source: &str, path: &Path, input: String) -> Result<String, QuinceError> {
+fn run(source: &str, path: &Path, input: String) -> Result<String> {
     let program = quince::compile(source)?;
     let captured = Captured::default();
     let mut interp = Interp::with_io(
@@ -251,15 +251,28 @@ fn the_recursion_limit_fires_on_a_stack_too_small_to_reach_it() {
     );
 }
 
-/// A count of calls is not what the limit is really about.
+/// An expensive recursion shape is refused, by whichever guard sees it first.
 ///
 /// `MAX_DEPTH` was calibrated against the cheapest recursion there is, a call in
 /// a `return`. A call inside a printed value carries the renderer on the stack as
-/// well, and 250 of those do not fit the stack that 250 of the cheap kind fit
-/// comfortably — the counter cannot see the difference, and this used to abort
-/// the process. If the measured guard regresses, this test does not fail politely
-/// either: it takes the test binary down with a stack overflow, which is the loud
-/// end of the trade and the reason to keep it here rather than in a unit test.
+/// well, and this used to abort the process: 250 of those did not fit the stack
+/// that 250 of the cheap kind fit comfortably, and a counter cannot see the
+/// difference. That is what `out_of_stack` was added for.
+///
+/// **Which guard trips here is not fixed, and the test no longer asserts one.**
+/// Boxing `QuinceError` took ~128 bytes out of every `Result` in the descent, and
+/// that was enough for 250 expensive frames to fit under the reserve after all —
+/// so the counter now answers first for this shape, where the measurement used to.
+/// Both refusals are correct and neither is the point. The point is that the
+/// process survives, and asserting the mechanism made an unrelated frame-size win
+/// look like a failure.
+///
+/// The measured guard is still live and still the only thing that catches a shape
+/// too expensive to reach the count — verified by raising `MAX_DEPTH` out of the
+/// way, at which point this program trips `out_of_stack` exactly as it used to.
+/// If both guards regress, this test does not fail politely: it takes the test
+/// binary down with a stack overflow, which is the loud end of the trade and the
+/// reason to keep it here rather than in a unit test.
 #[test]
 fn a_class_that_prints_itself_is_refused_rather_than_crashing() {
     let message = quince::interp::with_stack(|| {
@@ -279,8 +292,8 @@ fn a_class_that_prints_itself_is_refused_rather_than_crashing() {
     });
 
     assert!(
-        message.contains("too deep"),
-        "expected the stack guard to stop it, got: {message}"
+        message.contains("too deep") || message.contains("recursion limit"),
+        "expected one of the recursion guards to stop it, got: {message}"
     );
 }
 

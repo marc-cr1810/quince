@@ -2,7 +2,7 @@
 
 use std::rc::Rc;
 
-use crate::error::{ErrorKind, QuinceError};
+use crate::error::{ErrorKind, QuinceError, Result};
 use crate::runtime::class::Builtin;
 use crate::runtime::heap::{Heap, Object};
 use crate::runtime::value::{Native, Value};
@@ -26,7 +26,7 @@ pub(super) fn text_arg(
     at: usize,
     name: &str,
     span: Span,
-) -> Result<Rc<str>, QuinceError> {
+) -> Result<Rc<str>> {
     match &args[at] {
         Value::Str(text) => Ok(Rc::clone(text)),
         other => Err(QuinceError::new(

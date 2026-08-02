@@ -9,7 +9,7 @@
 
 use std::rc::Rc;
 
-use crate::error::{ErrorKind, QuinceError};
+use crate::error::{ErrorKind, QuinceError, Result};
 use crate::interp::Interp;
 use crate::runtime::dict::{Key, NotAKey};
 use crate::runtime::heap::{Heap, ObjId, Object};
@@ -27,7 +27,7 @@ impl Interp {
         target: &Value,
         index: &Value,
         span: Span,
-    ) -> Result<Value, QuinceError> {
+    ) -> Result<Value> {
         // The class first, so a class extending `dict` whose `x[k]` answers with
         // a default is asked before the dict it carries raises a key error.
         // Whatever the op returns is the answer — a subscript has no type it has
@@ -88,7 +88,7 @@ impl Interp {
         start: Option<&Value>,
         end: Option<&Value>,
         span: Span,
-    ) -> Result<Value, QuinceError> {
+    ) -> Result<Value> {
         // A class that declares `op get` is not sliced around it. The op answers
         // one index, because there is no value in the language meaning "1 to 3"
         // for it to be handed — so slicing an instance would reach past the op to
@@ -140,7 +140,7 @@ impl Interp {
         target: &Value,
         index: &Value,
         span: Span,
-    ) -> Result<(ObjId, usize), QuinceError> {
+    ) -> Result<(ObjId, usize)> {
         let Value::List(id) = target.base(&self.heap) else {
             return Err(QuinceError::new(
                 format!("cannot index {}", target.type_name(&self.heap)),
@@ -162,7 +162,7 @@ impl Interp {
 /// equals `"marc"` then the two must hash alike, or a dict holds two equal keys in
 /// different buckets. So a subclass is hashable exactly when its base is, and a
 /// dict cannot tell the two apart — `keys()` hands back the base type.
-pub(crate) fn key_of(heap: &Heap, value: &Value, span: Span) -> Result<Key, QuinceError> {
+pub(crate) fn key_of(heap: &Heap, value: &Value, span: Span) -> Result<Key> {
     // Asked before the unwrap, and it has to be: a subclass of `string` that
     // decides `==` for itself is no longer equal to the string it carries, so
     // filing it under that string would put it where `==` would never look.
@@ -208,7 +208,7 @@ pub(crate) fn resolve_index(
     len: usize,
     what: &str,
     span: Span,
-) -> Result<usize, QuinceError> {
+) -> Result<usize> {
     let Value::Int(raw) = index else {
         return Err(QuinceError::new(
             format!(
@@ -252,9 +252,9 @@ pub(crate) fn slice_bounds(
     end: Option<&Value>,
     len: usize,
     span: Span,
-) -> Result<(usize, usize), QuinceError> {
+) -> Result<(usize, usize)> {
     let len = len as i64;
-    let resolve = |bound: Option<&Value>, default: i64| -> Result<i64, QuinceError> {
+    let resolve = |bound: Option<&Value>, default: i64| -> Result<i64> {
         let Some(bound) = bound else {
             return Ok(default);
         };

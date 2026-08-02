@@ -8,7 +8,7 @@
 
 use std::collections::HashSet;
 
-use crate::error::QuinceError;
+use crate::error::Result;
 use crate::syntax::ast::{self, Block, Expr, ExprKind, FnDecl, Op, Slot, Stmt, StmtKind};
 use crate::syntax::token::Span;
 use crate::sema::resolve::{Resolver, Scope, builtin_named, declaration};
@@ -17,14 +17,14 @@ impl Resolver {
 
     // -- statements --------------------------------------------------------
 
-    pub(super) fn stmts(&mut self, stmts: &mut [Stmt]) -> Result<(), QuinceError> {
+    pub(super) fn stmts(&mut self, stmts: &mut [Stmt]) -> Result<()> {
         for stmt in stmts {
             self.stmt(stmt)?;
         }
         Ok(())
     }
 
-    pub(super) fn stmt(&mut self, stmt: &mut Stmt) -> Result<(), QuinceError> {
+    pub(super) fn stmt(&mut self, stmt: &mut Stmt) -> Result<()> {
         let span = stmt.span;
         match &mut stmt.kind {
             StmtKind::Expr(expr) => self.expr(expr),
@@ -192,7 +192,7 @@ impl Resolver {
         }
     }
 
-    pub(super) fn block(&mut self, block: &mut Block) -> Result<(), QuinceError> {
+    pub(super) fn block(&mut self, block: &mut Block) -> Result<()> {
         block.slot_count = self.scoped(&mut block.stmts, &[])?;
         Ok(())
     }
@@ -205,7 +205,7 @@ impl Resolver {
         class: &str,
         base: Option<&'static str>,
         span: Span,
-    ) -> Result<(), QuinceError> {
+    ) -> Result<()> {
         for decl in methods {
             let decl =
                 std::rc::Rc::get_mut(decl).expect("the parser hands out unshared declarations");
@@ -266,7 +266,7 @@ impl Resolver {
         }
     }
 
-    pub(super) fn function(&mut self, decl: &mut FnDecl) -> Result<(), QuinceError> {
+    pub(super) fn function(&mut self, decl: &mut FnDecl) -> Result<()> {
         // Parameters occupy the body scope's first slots, in order, which is
         // what lets a call bind them by index without consulting their names.
         //
@@ -284,7 +284,7 @@ impl Resolver {
 
     // -- expressions -------------------------------------------------------
 
-    pub(super) fn expr(&mut self, expr: &mut Expr) -> Result<(), QuinceError> {
+    pub(super) fn expr(&mut self, expr: &mut Expr) -> Result<()> {
         match &mut expr.kind {
             ExprKind::Int(_)
             | ExprKind::Float(_)

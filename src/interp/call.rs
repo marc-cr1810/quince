@@ -9,7 +9,7 @@
 //! values are already in hand.
 
 
-use crate::error::{ErrorKind, QuinceError};
+use crate::error::{ErrorKind, QuinceError, Result};
 use crate::interp::error::{an, check_arity, frozen};
 use crate::interp::{Attr, Flow, Interp, MAX_DEPTH, out_of_stack};
 use crate::runtime::class::{Builtin, Instance};
@@ -21,7 +21,7 @@ use crate::syntax::ast::{Expr, Op};
 use crate::syntax::token::Span;
 
 impl Interp {
-    pub(crate) fn call(&mut self, target: Value, args: Vec<Value>, span: Span) -> Result<Value, QuinceError> {
+    pub(crate) fn call(&mut self, target: Value, args: Vec<Value>, span: Span) -> Result<Value> {
         match target {
             Value::Native(native) => {
                 if let Some(arity) = native.arity {
@@ -205,7 +205,7 @@ impl Interp {
         builtin: Builtin,
         args: Vec<Value>,
         span: Span,
-    ) -> Result<Value, QuinceError> {
+    ) -> Result<Value> {
         // One argument is a conversion of that argument, and its class is what
         // gets to say what it converts to. Asked here rather than in each of the
         // six natives, because it is one question — and asked before them, so an
@@ -260,7 +260,7 @@ impl Interp {
         receiver: &Value,
         args: Vec<Value>,
         span: Span,
-    ) -> Result<Value, QuinceError> {
+    ) -> Result<Value> {
         let Value::Instance(id) = receiver else {
             unreachable!("`super` binds the enclosing method's receiver, always an instance");
         };
@@ -287,7 +287,7 @@ impl Interp {
         builtin: Builtin,
         args: Vec<Value>,
         span: Span,
-    ) -> Result<Value, QuinceError> {
+    ) -> Result<Value> {
         // Checked before the conversion runs, so a second write is refused on the
         // strength of the first rather than after quietly replacing it. The
         // resolver requires that *a* `super.init` is written but cannot say how
@@ -351,7 +351,7 @@ impl Interp {
         env: ObjId,
         callee_span: Span,
         span: Span,
-    ) -> Result<Value, QuinceError> {
+    ) -> Result<Value> {
         let receiver = self.eval(target, env)?;
         let name_span = Span::new(
             (target.span.end as usize + 1).min(callee_span.end as usize),
@@ -392,7 +392,7 @@ impl Interp {
         method: Value,
         mut args: Vec<Value>,
         span: Span,
-    ) -> Result<Value, QuinceError> {
+    ) -> Result<Value> {
         // Arity is reported against what the call site can actually write. The
         // receiver is one of the declared arguments but has no syntax as one,
         // so quoting the declared count would ask for an argument the user has

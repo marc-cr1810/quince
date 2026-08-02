@@ -13,7 +13,7 @@
 
 use std::rc::Rc;
 
-use crate::error::{ErrorKind, QuinceError};
+use crate::error::{ErrorKind, QuinceError, Raised, Result};
 use crate::interp::error::an;
 use crate::interp::show::Ask;
 use crate::runtime::class::Builtin;
@@ -23,7 +23,7 @@ use crate::runtime::value::{Native, Value};
 use crate::syntax::token::Span;
 
 /// The argument named as a type, for a conversion that cannot accept it at all.
-pub(super) fn not_convertible(heap: &Heap, to: &str, value: &Value, span: Span) -> QuinceError {
+pub(super) fn not_convertible(heap: &Heap, to: &str, value: &Value, span: Span) -> Raised {
     QuinceError::new(
         format!("cannot make {} from {}", an(to), an(value.type_name(heap))),
         span,
@@ -34,7 +34,7 @@ pub(super) fn not_convertible(heap: &Heap, to: &str, value: &Value, span: Span) 
 
 /// Rejects a float that no integer can represent, which `as` would otherwise
 /// answer with a saturated bound — silently, and almost never usefully.
-pub(crate) fn checked_trunc(f: f64, span: Span) -> Result<i64, QuinceError> {
+pub(crate) fn checked_trunc(f: f64, span: Span) -> Result<i64> {
     if f.is_nan() {
         return Err(
             QuinceError::new("cannot make an int from NaN", span).with_kind(ErrorKind::Value)
@@ -185,7 +185,7 @@ pub static DICT_INIT: Native = Native {
 
 /// `check_arity` states one exact count, which these two conversions do not
 /// have — they take nothing or one thing.
-pub(super) fn too_many(name: &str, found: usize, span: Span) -> QuinceError {
+pub(super) fn too_many(name: &str, found: usize, span: Span) -> Raised {
     QuinceError::new(
         format!("`{name}` takes 0 or 1 arguments, but {found} were given"),
         span,

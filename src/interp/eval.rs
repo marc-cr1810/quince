@@ -8,7 +8,7 @@
 
 use std::rc::Rc;
 
-use crate::error::{ErrorKind, QuinceError};
+use crate::error::{ErrorKind, QuinceError, Result};
 use crate::interp::error::frozen;
 use crate::interp::index::key_of;
 use crate::interp::{Attr, Interp, resolved};
@@ -41,7 +41,7 @@ impl Interp {
         &mut self,
         exprs: impl IntoIterator<Item = &'e Expr>,
         env: ObjId,
-    ) -> Result<Vec<Value>, QuinceError> {
+    ) -> Result<Vec<Value>> {
         let exprs = exprs.into_iter();
         let mark = self.temps.len();
         let mut values = Vec::with_capacity(exprs.size_hint().0);
@@ -73,7 +73,7 @@ impl Interp {
         first: &Expr,
         second: &Expr,
         env: ObjId,
-    ) -> Result<(Value, Value), QuinceError> {
+    ) -> Result<(Value, Value)> {
         let first = self.eval(first, env)?;
 
         // Only the second operand can reach a safe point, and only a handle can
@@ -88,7 +88,7 @@ impl Interp {
         Ok((first, second?))
     }
 
-    pub(super) fn eval(&mut self, expr: &Expr, env: ObjId) -> Result<Value, QuinceError> {
+    pub(super) fn eval(&mut self, expr: &Expr, env: ObjId) -> Result<Value> {
         match &expr.kind {
             ExprKind::Int(n) => Ok(Value::Int(*n)),
             ExprKind::Float(n) => Ok(Value::Float(*n)),
@@ -265,7 +265,7 @@ impl Interp {
     }
 
     /// Reads a variable through the slot the resolver assigned it.
-    pub(super) fn read(&mut self, var: &Var, env: ObjId, span: Span) -> Result<Value, QuinceError> {
+    pub(super) fn read(&mut self, var: &Var, env: ObjId, span: Span) -> Result<Value> {
         match resolved(&var.slot) {
             Slot::Local { hops, index } => {
                 let scope = env::ancestor(&self.heap, env, hops);
@@ -307,7 +307,7 @@ impl Interp {
         }
     }
 
-    pub(super) fn assign(&mut self, target: &Expr, value: Value, env: ObjId) -> Result<Value, QuinceError> {
+    pub(super) fn assign(&mut self, target: &Expr, value: Value, env: ObjId) -> Result<Value> {
         match &target.kind {
             ExprKind::Var(var) => {
                 match resolved(&var.slot) {

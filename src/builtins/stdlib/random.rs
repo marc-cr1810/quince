@@ -1,6 +1,6 @@
 //! `random` — a seeded generator, and the three ways to draw from it.
 
-use crate::error::{ErrorKind, QuinceError};
+use crate::error::{ErrorKind, QuinceError, Result};
 use crate::runtime::class::Builtin;
 use crate::runtime::heap::Heap;
 use crate::runtime::value::{Native, Value};
@@ -140,7 +140,7 @@ static CHOICE: Native = Native {
 
 /// The int `name` was given, refusing a float: `random.int(1.5, 3)` is a
 /// question with no answer rather than one worth guessing at.
-fn integer(name: &str, args: &[Value], heap: &Heap, span: Span) -> Result<i64, QuinceError> {
+fn integer(name: &str, args: &[Value], heap: &Heap, span: Span) -> Result<i64> {
     match args[0].base(heap) {
         Value::Int(n) => Ok(*n),
         other => Err(QuinceError::new(

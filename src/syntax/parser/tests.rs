@@ -4,7 +4,7 @@ use crate::syntax::ast::{
 };
 use crate::syntax::lexer::Lexer;
 
-    fn parse(src: &str) -> Result<Vec<Stmt>, QuinceError> {
+    fn parse(src: &str) -> Result<Vec<Stmt>> {
         let tokens = Lexer::new(src).tokenize().expect("should lex");
         Parser::new(tokens).parse()
     }
@@ -13,7 +13,7 @@ use crate::syntax::lexer::Lexer;
         parse(src).unwrap_or_else(|e| panic!("should parse `{src}`: {}", e.message))
     }
 
-    fn parse_err(src: &str) -> QuinceError {
+    fn parse_err(src: &str) -> Raised {
         parse(src).expect_err("should fail to parse")
     }
 

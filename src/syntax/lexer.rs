@@ -1,4 +1,4 @@
-use crate::error::{ErrorKind, QuinceError};
+use crate::error::{ErrorKind, QuinceError, Raised, Result};
 use crate::syntax::token::{DocBlock, Span, Token, TokenKind};
 
 /// An error for text that does not tokenise.
@@ -6,7 +6,7 @@ use crate::syntax::token::{DocBlock, Span, Token, TokenKind};
 /// Every error the lexer raises is one of these — there is no other way for
 /// this stage to fail — so the kind is applied in one place rather than at
 /// seven call sites, and a new one cannot be added unclassified.
-fn syntax(message: impl Into<String>, span: Span) -> QuinceError {
+fn syntax(message: impl Into<String>, span: Span) -> Raised {
     QuinceError::new(message, span).with_kind(ErrorKind::Syntax)
 }
 
@@ -50,7 +50,7 @@ impl<'a> Lexer<'a> {
     }
 
     /// Consumes the whole input, producing tokens terminated by `Eof`.
-    pub fn tokenize(mut self) -> Result<Vec<Token>, QuinceError> {
+    pub fn tokenize(mut self) -> Result<Vec<Token>> {
         let mut tokens = Vec::new();
 
         loop {
@@ -200,7 +200,7 @@ impl<'a> Lexer<'a> {
         TokenKind::keyword(word).unwrap_or_else(|| TokenKind::Ident(word.to_string()))
     }
 
-    fn number(&mut self, start: usize) -> Result<TokenKind, QuinceError> {
+    fn number(&mut self, start: usize) -> Result<TokenKind> {
         while self.peek().is_some_and(|c| c.is_ascii_digit()) {
             self.advance();
         }
@@ -236,7 +236,7 @@ impl<'a> Lexer<'a> {
     /// string type and no character type, so `'a'` and `"a"` produce the same
     /// token. Only the terminator varies, which is why it is a parameter rather
     /// than two near-copies of this loop.
-    fn string(&mut self, start: usize, quote: char) -> Result<TokenKind, QuinceError> {
+    fn string(&mut self, start: usize, quote: char) -> Result<TokenKind> {
         let mut value = String::new();
 
         loop {
@@ -302,7 +302,7 @@ mod tests {
         tokens.into_iter().map(|t| t.kind).collect()
     }
 
-    fn error(src: &str) -> QuinceError {
+    fn error(src: &str) -> Raised {
         Lexer::new(src).tokenize().expect_err("should fail to lex")
     }
 

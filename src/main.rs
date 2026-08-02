@@ -9,7 +9,6 @@ use anyhow::{Context, Result};
 use clap::Parser as _;
 
 use quince::color::Style;
-use quince::error::QuinceError;
 use quince::interp::Interp;
 use quince::syntax::lexer::Lexer;
 
@@ -95,7 +94,7 @@ fn run(
 /// is rendered against that instead. A span is an offset into one file, and
 /// drawing one file's offsets against another's text is how a caret ends up
 /// under something that is not there.
-fn report<T>(result: Result<T, QuinceError>, source: &str, path: &str, color: bool) -> T {
+fn report<T>(result: quince::error::Result<T>, source: &str, path: &str, color: bool) -> T {
     match result {
         Ok(value) => value,
         Err(err) => {

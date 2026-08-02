@@ -17,12 +17,12 @@ mod stmt;
 #[cfg(test)]
 mod tests;
 
-use crate::error::{ErrorKind, QuinceError};
+use crate::error::{ErrorKind, QuinceError, Raised, Result};
 use crate::syntax::ast::{Block, Stmt, StmtKind};
 use crate::syntax::token::{Span, Token, TokenKind};
 
 /// An error for text that does not parse.
-fn syntax(message: impl Into<String>, span: Span) -> QuinceError {
+fn syntax(message: impl Into<String>, span: Span) -> Raised {
     QuinceError::new(message, span).with_kind(ErrorKind::Syntax)
 }
 
@@ -33,7 +33,7 @@ fn syntax(message: impl Into<String>, span: Span) -> QuinceError {
 /// the resolver because everything they need is already in hand — the keyword
 /// and its span, before a body is parsed — and being caught early does not make
 /// them grammar. Reading which function a site calls is how you tell.
-fn declaration(message: impl Into<String>, span: Span) -> QuinceError {
+fn declaration(message: impl Into<String>, span: Span) -> Raised {
     QuinceError::new(message, span).with_kind(ErrorKind::Declaration)
 }
 pub struct Parser {
@@ -50,7 +50,7 @@ impl Parser {
     ///
     /// Stops at the first error rather than recovering; reporting several errors
     /// per run needs synchronisation points and can come once the grammar settles.
-    pub fn parse(mut self) -> Result<Vec<Stmt>, QuinceError> {
+    pub fn parse(mut self) -> Result<Vec<Stmt>> {
         let mut stmts = Vec::new();
         while !self.at_end() {
             stmts.push(self.statement()?);
@@ -59,7 +59,7 @@ impl Parser {
     }
 
     // -- statements --------------------------------------------------------
-    fn statement(&mut self) -> Result<Stmt, QuinceError> {
+    fn statement(&mut self) -> Result<Stmt> {
         match self.peek().kind {
             // One token of lookahead, and only here: `final` is the one modifier
             // that is also a binding form, so the class case has to be recognised
@@ -102,7 +102,7 @@ impl Parser {
     }
     // -- blocks ------------------------------------------------------------
 
-    fn block(&mut self) -> Result<Block, QuinceError> {
+    fn block(&mut self) -> Result<Block> {
         let open = self.expect(TokenKind::LBrace, "to open a block")?;
         let mut stmts = Vec::new();
         while !self.check(&TokenKind::RBrace) && !self.at_end() {
@@ -188,7 +188,7 @@ impl Parser {
         }
     }
 
-    fn expect(&mut self, kind: TokenKind, context: &str) -> Result<Token, QuinceError> {
+    fn expect(&mut self, kind: TokenKind, context: &str) -> Result<Token> {
         if self.check(&kind) {
             return Ok(self.advance());
         }
@@ -199,7 +199,7 @@ impl Parser {
         ))
     }
 
-    fn expect_ident(&mut self, context: &str) -> Result<(String, Span), QuinceError> {
+    fn expect_ident(&mut self, context: &str) -> Result<(String, Span)> {
         let token = self.peek();
         if let TokenKind::Ident(name) = &token.kind {
             let result = (name.clone(), token.span);
@@ -224,7 +224,7 @@ impl Parser {
     }
 
     /// Statements end at a newline, a `;`, or the end of the enclosing block.
-    fn end_of_statement(&mut self) -> Result<(), QuinceError> {
+    fn end_of_statement(&mut self) -> Result<()> {
         if self.eat(&TokenKind::Semi) || self.at_statement_end() {
             return Ok(());
         }

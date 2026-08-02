@@ -1,7 +1,7 @@
 //! `list`'s methods.
 
 
-use crate::error::{ErrorKind, QuinceError};
+use crate::error::{ErrorKind, QuinceError, Result};
 use crate::interp::Interp;
 use crate::interp::error::frozen;
 use crate::runtime::class::Builtin;
@@ -109,7 +109,7 @@ pub static SUM: Native = Native {
 };
 
 /// The list `name` was called on, or a type error naming it.
-pub(super) fn receiver_list(name: &str, args: &[Value], heap: &Heap, span: Span) -> Result<ObjId, QuinceError> {
+pub(super) fn receiver_list(name: &str, args: &[Value], heap: &Heap, span: Span) -> Result<ObjId> {
     match args[0].base(heap) {
         Value::List(id) => Ok(*id),
         other => Err(QuinceError::new(
@@ -145,8 +145,8 @@ pub(super) fn walk_list(
     name: &str,
     args: &[Value],
     span: Span,
-    mut f: impl FnMut(&mut Interp, Value, ObjId) -> Result<(), QuinceError>,
-) -> Result<Value, QuinceError> {
+    mut f: impl FnMut(&mut Interp, Value, ObjId) -> Result<()>,
+) -> Result<Value> {
     let source = receiver_list(name, args, &interp.heap, span)?;
     let mark = interp.temps.len();
     interp.temps.push(args[0].clone());
@@ -255,7 +255,7 @@ pub(super) fn merge_sort(
     interp: &mut Interp,
     items: Vec<Value>,
     span: Span,
-) -> Result<Vec<Value>, QuinceError> {
+) -> Result<Vec<Value>> {
     if items.len() <= 1 {
         return Ok(items);
     }

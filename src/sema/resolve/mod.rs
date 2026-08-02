@@ -21,7 +21,7 @@ mod tests;
 
 use std::collections::{HashMap, HashSet};
 
-use crate::error::{ErrorKind, QuinceError};
+use crate::error::{ErrorKind, QuinceError, Raised, Result};
 use crate::runtime::class::BUILTINS;
 use crate::syntax::ast::{ImportNames, Slot, Stmt, StmtKind};
 use crate::syntax::token::Span;
@@ -32,12 +32,12 @@ use crate::syntax::token::Span;
 /// the grammar is satisfied, and what is left to get wrong is names — declaring
 /// one twice, reading one that is not in scope yet, writing `self` where there
 /// is no receiver. So the kind is applied here rather than at ten call sites.
-pub(super) fn declaration(message: impl Into<String>, span: Span) -> QuinceError {
+pub(super) fn declaration(message: impl Into<String>, span: Span) -> Raised {
     QuinceError::new(message, span).with_kind(ErrorKind::Declaration)
 }
 
 /// Resolves a whole program in place.
-pub fn resolve(program: &mut [Stmt]) -> Result<(), QuinceError> {
+pub fn resolve(program: &mut [Stmt]) -> Result<()> {
     let mut resolver = Resolver::default();
     // The top level has no scope, so `scoped` never runs over it — which is why
     // nothing used to register the classes declared there or look at the names
@@ -132,7 +132,7 @@ impl Resolver {
         &mut self,
         stmts: &mut [Stmt],
         predeclare: &[(String, bool, Span)],
-    ) -> Result<u16, QuinceError> {
+    ) -> Result<u16> {
         self.scopes.push(Scope::default());
         let result = self
             .declare_all(stmts, predeclare)
@@ -145,7 +145,7 @@ impl Resolver {
         &mut self,
         stmts: &mut [Stmt],
         predeclare: &[(String, bool, Span)],
-    ) -> Result<(), QuinceError> {
+    ) -> Result<()> {
         // Classes first, so that a `let` stealing a type's name is refused
         // whichever order the two were written in. Without this pass the check
         // below would only catch the half of the mistake that happens to come
@@ -215,7 +215,7 @@ impl Resolver {
     /// `class int { … }` is the mistake this catches. Shadowing a builtin type is
     /// refused for the same reason shadowing it with a `let` is: every mention of
     /// `int` after that line would mean something the language did not choose.
-    pub(super) fn declare_type(&mut self, name: &str, span: Span) -> Result<(), QuinceError> {
+    pub(super) fn declare_type(&mut self, name: &str, span: Span) -> Result<()> {
         if is_builtin_type(name) {
             return Err(declaration(
                 format!("`{name}` is a type built into the language"),
@@ -234,7 +234,7 @@ impl Resolver {
     /// collide with — a global is bound by name, so `let string = "x"` used to
     /// replace the type silently and every later mention of `string` meant a
     /// string. That is the whole reason this exists.
-    pub(super) fn declare(&mut self, name: &str, mutable: bool, span: Span) -> Result<(), QuinceError> {
+    pub(super) fn declare(&mut self, name: &str, mutable: bool, span: Span) -> Result<()> {
         if is_builtin_type(name) || self.types.contains(name) {
             let what = match is_builtin_type(name) {
                 true => "a type built into the language",
@@ -261,7 +261,7 @@ impl Resolver {
     ///
     /// Called directly only for a `class`, whose name *is* the type and so
     /// cannot be refused for being one.
-    pub(super) fn declare_slot(&mut self, name: &str, mutable: bool, span: Span) -> Result<(), QuinceError> {
+    pub(super) fn declare_slot(&mut self, name: &str, mutable: bool, span: Span) -> Result<()> {
         let Some(scope) = self.scopes.last_mut() else {
             // Top level: a global, bound by name at run time, so there is no slot
             // to reserve — but the same name declared twice is the same mistake

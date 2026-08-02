@@ -1,7 +1,7 @@
 use std::fmt;
 use std::rc::Rc;
 
-use crate::error::QuinceError;
+use crate::error::Result;
 use crate::interp::Interp;
 use crate::runtime::class::Builtin;
 use crate::runtime::heap::{Heap, ObjId};
@@ -25,7 +25,7 @@ pub struct Function {
 ///
 /// Output is reached through the interpreter too, which is what lets tests
 /// capture what a program prints.
-pub type NativeFn = fn(&mut Interp, &[Value], Span) -> Result<Value, QuinceError>;
+pub type NativeFn = fn(&mut Interp, &[Value], Span) -> Result<Value>;
 
 /// A method that has found its receiver but has not been called yet.
 ///
