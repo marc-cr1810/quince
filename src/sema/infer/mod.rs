@@ -47,18 +47,27 @@ use std::rc::Rc;
 use crate::runtime::class::BUILTINS;
 use crate::sema::symbols::{Kind, Symbol, module_native, push_once, symbol_for, symbol_of_native};
 use crate::sema::types::{Type, builtin_ancestor, builtin_constructor, module_member, returned_by};
-use crate::syntax::ast::{FnDecl, Stmt};
+use crate::syntax::ast::{FnDecl, Stmt, Visibility};
 use crate::syntax::token::Span;
 
 
 /// What one class declaration said, before anything was worked out from it.
-#[derive(Default)]
 pub(crate) struct ClassInfo {
     /// The name after `extends`, if there was one. Kept as a name rather than a
     /// resolved handle because a parent may be declared further down the file,
     /// or not at all.
     pub(crate) parent: Option<String>,
     pub(crate) methods: HashMap<String, Rc<FnDecl>>,
+    /// The fields the body declared, by name, and how far each reaches.
+    ///
+    /// Only the declared ones. A field an `op init` assigned into existence is
+    /// found by [`Pass::fields_of`] walking the methods, and carries no
+    /// visibility because nothing wrote one.
+    pub(crate) fields: HashMap<String, Visibility>,
+    /// The whole declaration, so an editor can ask which class an offset is
+    /// inside of — which is what a visibility-aware completion needs and no
+    /// other question here does.
+    pub(crate) span: Span,
 }
 
 /// One name in scope, and what is known about it.
@@ -256,7 +265,18 @@ impl Types {
             }
             if let Some(fields) = self.fields.get(&current) {
                 for (name, ty) in fields {
-                    push_once(&mut found, Symbol::new(name, Kind::Field, ty.clone()));
+                    // A declared field carries the word it was written with; one
+                    // an `init` invented carries none, and is public.
+                    let visibility = self
+                        .classes
+                        .get(&current)
+                        .and_then(|info| info.fields.get(name))
+                        .copied()
+                        .unwrap_or_default();
+                    push_once(
+                        &mut found,
+                        Symbol::new(name, Kind::Field, ty.clone()).reaching(visibility),
+                    );
                 }
             }
             // The builtin this link *is*, if it is one: `extend list` puts a
@@ -275,6 +295,57 @@ impl Types {
             }
         }
         found
+    }
+
+    /// The class whose declaration encloses `offset`, if any.
+    ///
+    /// The innermost, so a class nested in nothing is still the answer and a
+    /// tie cannot happen — class declarations do not overlap. `None` at the top
+    /// level, which is what makes top-level code an outsider to every class.
+    pub fn class_at(&self, offset: u32) -> Option<&str> {
+        self.classes
+            .iter()
+            .filter(|(_, info)| info.span.start <= offset && offset <= info.span.end)
+            .min_by_key(|(_, info)| info.span.end - info.span.start)
+            .map(|(name, _)| name.as_str())
+    }
+
+    /// Whether code inside `from` may reach a member of `of` declared with
+    /// `visibility`.
+    ///
+    /// The editor's half of the rule the evaluator enforces, and deliberately
+    /// the *less* precise half: `members_of` flattens a chain, so a `private`
+    /// member of an ancestor is offered to the subclass that cannot actually
+    /// reach it. Erring towards offering is the right way round for a
+    /// completion list — the language still refuses it, with a message that
+    /// says why, and an editor that hides a name the reader can see in the
+    /// source is the more confusing failure.
+    pub fn may_offer(&self, visibility: Visibility, of: &str, from: Option<&str>) -> bool {
+        if !visibility.closes_outside() {
+            return true;
+        }
+        let Some(from) = from else {
+            return false;
+        };
+        if from == of {
+            return true;
+        }
+        if visibility.closes_subclass() {
+            return false;
+        }
+        // `protected`: any class on `from`'s chain reaching `of` may see it.
+        let mut current = Some(from);
+        let mut seen = HashSet::new();
+        while let Some(name) = current {
+            if !seen.insert(name.to_string()) {
+                return false;
+            }
+            if name == of {
+                return true;
+            }
+            current = self.parent_of(name);
+        }
+        false
     }
 
     /// The class `class` extends, if the program said so.

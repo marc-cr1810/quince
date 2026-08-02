@@ -12,12 +12,13 @@
 //! the nine class objects, and never consulted again.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use crate::builtins::types::{BOOL, CLASS, DICT, FLOAT, FUNCTION, INT, LIST, MODULE, NIL, STR};
 use crate::runtime::dict::Dict;
 use crate::runtime::heap::{Heap, ObjId};
 use crate::runtime::value::{Native, Value};
-use crate::syntax::ast::{OPS, Op, Openness};
+use crate::syntax::ast::{FieldDecl, OPS, Op, Openness, Visibility};
 
 /// A type built into the language.
 ///
@@ -283,6 +284,26 @@ pub struct Class {
     /// whole class representation was collapsed for, and `class MyStr extends
     /// string` works — see DESIGN.md.
     pub openness: Openness,
+    /// The fields the body declared, in the order written.
+    ///
+    /// Kept as declarations rather than as values because an initializer is an
+    /// expression and has to run once per instance: evaluating them when the
+    /// class was built would give every instance the same list to push onto.
+    /// [`Class::field_env`] is the scope they run in.
+    ///
+    /// Not inherited. A subclass's instance is initialized by walking the chain
+    /// at construction, so a parent's fields are found where they were declared
+    /// rather than copied down — the opposite choice from `slots`, and for the
+    /// opposite reason: slots are read on every `if x` and these are read once.
+    pub fields: Vec<Rc<FieldDecl>>,
+    /// The scope a field's initializer is evaluated in — the one the class was
+    /// declared in, which is what a method closes over too.
+    ///
+    /// `None` for a builtin and for any class with no fields to initialize.
+    pub field_env: Option<ObjId>,
+    /// How far the class's own name reaches: whether an importing module sees
+    /// it. Nothing to do with the visibility of its members.
+    pub visibility: Visibility,
 }
 
 impl Class {
@@ -305,7 +326,33 @@ impl Class {
             slots,
             builtin: Some(builtin),
             openness: Openness::Open,
+            fields: Vec::new(),
+            field_env: None,
+            visibility: Visibility::Public,
         }
+    }
+
+    /// The field `name`, searching this class and then its ancestors.
+    ///
+    /// Same order as [`Class::method`] and for the same reason: the first
+    /// declaration found wins, so a subclass shadows the field it redeclares.
+    pub fn field(&self, name: &str, heap: &Heap) -> Option<Rc<FieldDecl>> {
+        let mut class = self;
+        loop {
+            if let Some(field) = class.fields.iter().find(|field| field.name == name) {
+                return Some(Rc::clone(field));
+            }
+            class = heap.class(class.parent?);
+        }
+    }
+
+    /// Whether `name` names a method or field this class declared, or inherited.
+    ///
+    /// What tells a member reached through the dot apart from one an `op init`
+    /// invented: only a *declared* member carries a visibility, so only a
+    /// declared member can be refused.
+    pub fn declares(&self, name: &str, heap: &Heap) -> bool {
+        self.method(name, heap).is_some() || self.field(name, heap).is_some()
     }
 
     /// A slot table with nothing in it, which is every class before its own
@@ -388,6 +435,12 @@ impl Class {
         // handle to a function in the parent's table, and the parent is traced
         // just above, so it survives either way.
         worklist.extend(self.slots.iter().flatten().filter_map(Value::handle));
+        // The scope a field initializer runs in. Usually the same one the
+        // methods closed over, and so already reached through them — but a class
+        // with fields and no methods holds it alone, and that is the case a
+        // collection between declaring the class and constructing one would
+        // otherwise sweep out from under the next `Point()`.
+        worklist.extend(self.field_env);
     }
 }
 
@@ -491,6 +544,9 @@ mod tests {
             Value::Dict(heap.alloc(Object::Dict(Dict::new()))),
             Value::Native(&DUMMY),
             Value::Class(heap.alloc(Object::Class(Class {
+                fields: Vec::new(),
+                field_env: None,
+                visibility: Visibility::Public,
                 name: "C".to_string(),
                 methods: HashMap::new(),
                 parent: None,

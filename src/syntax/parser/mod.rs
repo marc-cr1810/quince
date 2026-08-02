@@ -18,7 +18,8 @@ mod stmt;
 mod tests;
 
 use crate::error::{ErrorKind, QuinceError, Raised, Result};
-use crate::syntax::ast::{Block, Stmt, StmtKind};
+use crate::syntax::ast::{Block, Stmt, StmtKind, Visibility};
+use crate::syntax::doc::Doc;
 use crate::syntax::token::{Span, Token, TokenKind};
 
 /// An error for text that does not parse.
@@ -36,14 +37,40 @@ fn syntax(message: impl Into<String>, span: Span) -> Raised {
 fn declaration(message: impl Into<String>, span: Span) -> Raised {
     QuinceError::new(message, span).with_kind(ErrorKind::Declaration)
 }
+/// The words written in front of a declaration, before the keyword that says
+/// which kind of declaration it is.
+///
+/// One bundle rather than three parameters because this is the list the
+/// milestones grow: v0.8 adds `const`, `override`, and `explicit` here, and each
+/// of those would otherwise be another argument threaded through `fn_decl`.
+pub(super) struct Modifiers {
+    pub doc: Option<Doc>,
+    pub visibility: Visibility,
+    /// Where the visibility word was written, for the reports that refuse one.
+    /// `None` when none was written, which is the same reach and not the same
+    /// thing to point at.
+    pub vis_span: Option<Span>,
+}
+
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    /// How many blocks deep the parser is, so a form that means something only
+    /// at the top level can say so.
+    ///
+    /// Visibility is the one such form today: a `private let` inside a function
+    /// has no importer to hide from, so it is a word that would do nothing, and
+    /// a modifier that does nothing is worse than one that is refused.
+    depth: usize,
 }
 
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
-        Parser { tokens, pos: 0 }
+        Parser {
+            tokens,
+            pos: 0,
+            depth: 0,
+        }
     }
 
     /// Parses a whole program.
@@ -69,6 +96,9 @@ impl Parser {
             TokenKind::Let | TokenKind::Final | TokenKind::Const => self.let_stmt(),
             TokenKind::Complete | TokenKind::Sealed => self.class_stmt(),
             TokenKind::Fn => self.fn_stmt(),
+            // A visibility word says what an importing module sees, so it is a
+            // word about the top level and is refused anywhere else.
+            TokenKind::Public | TokenKind::Private | TokenKind::Protected => self.exported_stmt(),
             // An `op` is a method the language calls on an instance, so there is
             // nothing for one to belong to out here.
             TokenKind::Op => Err(declaration(
@@ -100,14 +130,94 @@ impl Parser {
             _ => self.expr_stmt(),
         }
     }
+    /// A top-level declaration with a visibility word in front of it.
+    ///
+    /// Only three forms can carry one — a binding, a function, and a class —
+    /// because those are the three a module exports. `import` is not among them:
+    /// a name a module imported is not a name it declared, and re-export is a
+    /// question this milestone does not answer.
+    fn exported_stmt(&mut self) -> Result<Stmt> {
+        let (word, span) = (self.peek().kind.clone(), self.peek().span);
+
+        if self.depth > 0 {
+            return Err(declaration(format!("`{word}` means nothing here"), span).with_help(
+                "visibility says what an importing module sees, so it belongs on a top-level \
+                 declaration — inside a function there is nobody it could hide the name from",
+            ));
+        }
+
+        // The word is left where it is: each declaration form reads its own
+        // modifiers, so dispatching is all this has to do. One token along says
+        // which form it is, and two are needed for `final` alone — a binding
+        // form and a class modifier both, which is the same ambiguity
+        // `statement` resolves for an unexported declaration.
+        let after = self.tokens[self.pos + 1].kind.clone();
+        let then_class = matches!(
+            self.tokens.get(self.pos + 2).map(|token| &token.kind),
+            Some(TokenKind::Class)
+        );
+        match after {
+            TokenKind::Fn => self.fn_stmt(),
+            TokenKind::Class | TokenKind::Complete | TokenKind::Sealed => self.class_stmt(),
+            TokenKind::Final if then_class => self.class_stmt(),
+            TokenKind::Let | TokenKind::Final | TokenKind::Const => self.let_stmt(),
+            TokenKind::Op => Err(declaration(
+                "`op` is only valid inside a class body",
+                self.tokens[self.pos + 1].span,
+            )
+            .with_help("use `fn` for a function that is called by name")),
+            other => Err(declaration(
+                format!("expected a declaration after `{word}`, found {other}"),
+                span.to(self.tokens[self.pos + 1].span),
+            )
+            .with_help(
+                "`public`, `private`, and `protected` say what an importing module sees, so \
+                 one goes in front of a `let`, `fn`, or `class`",
+            )),
+        }
+    }
+
+    /// Reads the words in front of a declaration: its `##` block, and its
+    /// visibility if one is written.
+    ///
+    /// `what` names the thing being declared, for [`Self::doc_of`]. The doc is
+    /// taken from the *first* token of the header, which is the visibility word
+    /// when there is one — a `##` block sits above what it documents, and what
+    /// it documents starts at the first word the program wrote.
+    pub(super) fn modifiers(&mut self, what: &str) -> Result<Modifiers> {
+        let header = self.peek().clone();
+        let (visibility, vis_span) = self.visibility_word();
+        Ok(Modifiers {
+            doc: Self::doc_of(&header, what)?,
+            visibility,
+            vis_span,
+        })
+    }
+
+    /// Eats a visibility word if the next token is one.
+    ///
+    /// Writing `public` and writing nothing are the same reach, and the span is
+    /// what tells them apart for a report that has to quote the word back.
+    pub(super) fn visibility_word(&mut self) -> (Visibility, Option<Span>) {
+        let visibility = match self.peek().kind {
+            TokenKind::Public => Visibility::Public,
+            TokenKind::Private => Visibility::Private,
+            TokenKind::Protected => Visibility::Protected,
+            _ => return (Visibility::Public, None),
+        };
+        (visibility, Some(self.advance().span))
+    }
+
     // -- blocks ------------------------------------------------------------
 
     fn block(&mut self) -> Result<Block> {
         let open = self.expect(TokenKind::LBrace, "to open a block")?;
         let mut stmts = Vec::new();
+        self.depth += 1;
         while !self.check(&TokenKind::RBrace) && !self.at_end() {
             stmts.push(self.statement()?);
         }
+        self.depth -= 1;
         let close = self.expect(TokenKind::RBrace, "to close the block")?;
         Ok(Block {
             stmts,

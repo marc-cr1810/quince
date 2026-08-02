@@ -73,6 +73,7 @@ impl Infer {
                     name,
                     parent,
                     methods,
+                    fields,
                     ..
                 } => {
                     let info = ClassInfo {
@@ -81,6 +82,11 @@ impl Infer {
                             .iter()
                             .map(|decl| (decl.name.clone(), Rc::clone(decl)))
                             .collect(),
+                        fields: fields
+                            .iter()
+                            .map(|field| (field.name.clone(), field.visibility))
+                            .collect(),
+                        span: stmt.span,
                     };
                     self.classes.insert(name.clone(), info);
                 }
@@ -91,7 +97,18 @@ impl Infer {
                 // `builtin_ancestor`, and this only records what was added
                 // beside them.
                 StmtKind::Extend { target, methods, .. } => {
-                    let info = self.classes.entry(target.name.clone()).or_default();
+                    // An `extend` block is not a declaration, so its span is not
+                    // the class's — an entry made here covers the extension, and
+                    // one made by a real `class` above keeps its own.
+                    let info = self
+                        .classes
+                        .entry(target.name.clone())
+                        .or_insert_with(|| ClassInfo {
+                            parent: None,
+                            methods: HashMap::new(),
+                            fields: HashMap::new(),
+                            span: stmt.span,
+                        });
                     for decl in methods {
                         info.methods.insert(decl.name.clone(), Rc::clone(decl));
                     }
@@ -150,7 +167,16 @@ impl Infer {
             None => Vec::new(),
         };
 
-        let mut found: HashMap<String, Type> = HashMap::new();
+        // The declared fields first, so one an `init` also assigns to is joined
+        // against its declaration rather than replacing it.
+        let mut found: HashMap<String, Type> = match self.classes.get(class) {
+            Some(info) => info
+                .fields
+                .keys()
+                .map(|name| (name.clone(), Type::Unknown))
+                .collect(),
+            None => HashMap::new(),
+        };
         self.receivers.push(class.to_string());
         for decl in methods {
             self.scopes.push(decl.body.span);

@@ -1,6 +1,6 @@
 use super::*;
 use crate::syntax::ast::{
-    BinaryOp, BindKind, Expr, ExprKind, FnDecl, LogicalOp, Op, Openness, UnaryOp,
+    BinaryOp, BindKind, Expr, ExprKind, FnDecl, LogicalOp, Op, Openness, UnaryOp, Visibility,
 };
 use crate::syntax::lexer::Lexer;
 
@@ -639,12 +639,75 @@ use crate::syntax::lexer::Lexer;
     }
 
     #[test]
-    fn a_class_body_holds_only_methods() {
-        // A `let` in a class body would otherwise parse as a statement and then
-        // silently do nothing, since there is nowhere for it to go.
+    fn a_class_body_holds_fields_and_methods_and_nothing_else() {
+        // A `let` is a field as of v0.7. Anything that is neither is still
+        // refused, because it would otherwise parse as a statement and then
+        // silently do nothing — there is nowhere in a class body for it to go.
         assert_eq!(
-            parse_err("class C {\n let x = 1\n}").message,
-            "expected a method, found let"
+            parse_err("class C {\n print(1)\n}").message,
+            "expected a field or a method, found print"
+        );
+    }
+
+    #[test]
+    fn a_class_body_declares_fields_with_a_visibility() {
+        let stmts = parse_ok(
+            "class C {\n let a = 1\n private final b = 2\n protected const c = 3\n fn m() {}\n}",
+        );
+        let StmtKind::Class {
+            methods, fields, ..
+        } = &stmts[0].kind
+        else {
+            panic!("expected a class");
+        };
+        assert_eq!(methods.len(), 1);
+        let seen: Vec<_> = fields
+            .iter()
+            .map(|field| (field.name.as_str(), field.bind, field.visibility))
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                ("a", BindKind::Let, Visibility::Public),
+                ("b", BindKind::Final, Visibility::Private),
+                ("c", BindKind::Const, Visibility::Protected),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_op_may_not_be_hidden_from_the_language_that_calls_it() {
+        // `public op` says nothing new and is allowed; the two that restrict
+        // would make a method `print` is entitled to call and forbidden from
+        // calling.
+        parse_ok("class C {\n public op string() { return \"c\" }\n}");
+        for word in ["private", "protected"] {
+            let src = format!("class C {{\n {word} op string() {{ return \"c\" }}\n}}");
+            assert_eq!(
+                parse_err(&src).message,
+                format!("an `op` may not be {word}")
+            );
+        }
+    }
+
+    #[test]
+    fn a_visibility_word_belongs_to_a_top_level_declaration() {
+        // Inside a function there is no importing module to hide a name from, so
+        // the word would do nothing — and a modifier that does nothing is worse
+        // than one that is refused.
+        assert_eq!(
+            parse_err("fn f() {\n private let x = 1\n}").message,
+            "`private` means nothing here"
+        );
+        // At the top level all three declaration forms take one.
+        parse_ok("public let a = 1\nprivate fn f() {}\npublic class C {}\nprivate final class D {}");
+    }
+
+    #[test]
+    fn a_visibility_word_needs_something_to_modify() {
+        assert_eq!(
+            parse_err("public 1 + 1").message,
+            "expected a declaration after `public`, found 1"
         );
     }
 

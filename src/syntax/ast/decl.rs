@@ -7,7 +7,7 @@
 //! type-parameter list.
 
 
-use crate::syntax::ast::{Block, Op};
+use crate::syntax::ast::{Block, Expr, Op};
 use crate::syntax::doc::Doc;
 use crate::syntax::token::Span;
 
@@ -89,6 +89,14 @@ pub struct FnDecl {
     /// Set when the declaration used `op`, which the parser allows only inside a
     /// class body — so a plain function always leaves this `None`.
     pub op: Option<Op>,
+    /// How far it reaches: who may call the method, or whether an importing
+    /// module sees the function.
+    ///
+    /// An `op` is always [`Visibility::Public`] and the parser refuses anything
+    /// else — the language calls these on the program's behalf, from outside, so
+    /// a private one would be a method `print` is entitled to call and forbidden
+    /// from calling.
+    pub visibility: Visibility,
     /// The `##` block written above it, already checked against `params`.
     ///
     /// Checked at the parser rather than kept raw, so that a `@param` naming
@@ -127,6 +135,100 @@ impl BindKind {
             BindKind::Const => "const",
         }
     }
+}
+
+/// How far a declaration reaches.
+///
+/// One word per reach, and [`Visibility::Public`] is what a declaration without
+/// a word means — so the common case is written by writing nothing, and the
+/// words that appear are the ones that restrict.
+///
+/// The same three words answer two different questions, which is deliberate:
+/// on a class member it is who may reach through the dot, and on a top-level
+/// declaration it is whether an importing module sees the name at all. Both are
+/// "how far does this reach", and a reader who learns the words once has learned
+/// both — the same argument [`Openness`] makes for its four.
+///
+/// | | outside | subclass | declaring class |
+/// |---|---|---|---|
+/// | [`Visibility::Public`] | yes | yes | yes |
+/// | [`Visibility::Protected`] | no | yes | yes |
+/// | [`Visibility::Private`] | no | no | yes |
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Visibility {
+    /// No word, or `public`: reachable from anywhere.
+    #[default]
+    Public,
+    /// `protected`: the declaring class and the classes that extend it.
+    Protected,
+    /// `private`: the declaring class, and nothing else.
+    Private,
+}
+
+impl Visibility {
+    /// Whether code outside the class hierarchy may reach this.
+    pub fn closes_outside(self) -> bool {
+        !matches!(self, Visibility::Public)
+    }
+
+    /// Whether a subclass's methods may reach this.
+    ///
+    /// The one row that separates the two restricting words, and the reason
+    /// `protected` earns a word of its own rather than being spelled as a
+    /// weaker `private`.
+    pub fn closes_subclass(self) -> bool {
+        matches!(self, Visibility::Private)
+    }
+
+    /// Whether an importing module sees a top-level declaration under this.
+    ///
+    /// `protected` has no meaning at the top level — a module has no subclass —
+    /// so it reads as `private` there rather than as a third answer. The parser
+    /// refuses it outright (§3.6), and this is the fallback that keeps the
+    /// predicate total if it ever stops doing so.
+    pub fn exported(self) -> bool {
+        matches!(self, Visibility::Public)
+    }
+
+    /// The keyword as written, for a report that quotes it back. `None` is the
+    /// declaration that used no word and so has nothing to quote.
+    pub fn word(self) -> Option<&'static str> {
+        match self {
+            Visibility::Public => None,
+            Visibility::Protected => Some("protected"),
+            Visibility::Private => Some("private"),
+        }
+    }
+}
+
+/// A field declared in a class body.
+///
+/// New in v0.7. Before it, a field existed because an `op init` assigned one,
+/// which left [`Visibility`] nothing to attach to — the whole reason this node
+/// arrives with the visibility words rather than after them.
+///
+/// A declared field is still initialized by evaluating its `value` when an
+/// instance is built, before `op init` runs, so `init` sees the declared value
+/// and may overwrite it. That order is what makes `private let balance = 0`
+/// followed by `self.balance = initial` read the way it looks.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FieldDecl {
+    pub name: String,
+    /// Where the name was written, for a report about the *field* rather than
+    /// about the expression initializing it.
+    pub name_span: Span,
+    /// `let`, `final`, or `const`, meaning on a field exactly what it means on
+    /// a binding.
+    pub bind: BindKind,
+    pub visibility: Visibility,
+    /// What it holds when an instance is built.
+    ///
+    /// Not optional in this milestone: a declaration with no initializer needs
+    /// a type to synthesize a default from, and there is none until tranche 3.
+    /// §3.5's blank `final` is the form that waits for it.
+    pub value: Expr,
+    /// The `##` block written above it, as for a binding.
+    pub doc: Option<Doc>,
 }
 
 /// What a class declaration leaves open.
@@ -229,6 +331,49 @@ mod tests {
                 "`{word}` is not a reserved word, so it cannot be a modifier"
             );
         }
+        for visibility in [Visibility::Private, Visibility::Protected] {
+            let word = visibility.word().expect("a restricting word is written");
+            assert!(
+                crate::syntax::token::KEYWORDS.contains(&word),
+                "`{word}` is not a reserved word, so it cannot be a modifier"
+            );
+        }
+        // `public` has no `word()` because it is the absence of one, and it is
+        // still reserved — a program may write it, and every other spelling of
+        // the default would then be a second way to say nothing.
+        assert!(crate::syntax::token::KEYWORDS.contains(&"public"));
     }
 
+    #[test]
+    fn the_three_reaches_are_nested() {
+        // The table in `Visibility`'s docs. Each word closes everything the one
+        // before it closed, which is what makes them three points on one axis
+        // rather than three unrelated flags — and is why `exported` can read off
+        // the same order.
+        let table = [
+            (Visibility::Public, false, false, true, None),
+            (Visibility::Protected, true, false, false, Some("protected")),
+            (Visibility::Private, true, true, false, Some("private")),
+        ];
+        for (visibility, outside, subclass, exported, word) in table {
+            assert_eq!(visibility.closes_outside(), outside, "{visibility:?}");
+            assert_eq!(visibility.closes_subclass(), subclass, "{visibility:?}");
+            assert_eq!(visibility.exported(), exported, "{visibility:?}");
+            assert_eq!(visibility.word(), word, "{visibility:?}");
+        }
+
+        // Nesting, stated as the implication it is: anything a subclass cannot
+        // reach, the outside cannot reach either.
+        for (visibility, ..) in table {
+            assert!(!visibility.closes_subclass() || visibility.closes_outside());
+        }
+    }
+
+    #[test]
+    fn writing_no_visibility_is_writing_public() {
+        // The default is load-bearing: every declaration that existed before
+        // v0.7 parses to `Public`, so adding the field changed no program.
+        assert_eq!(Visibility::default(), Visibility::Public);
+        assert_eq!(Visibility::default().word(), None);
+    }
 }

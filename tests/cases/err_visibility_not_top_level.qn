@@ -1,0 +1,5 @@
+fn f() {
+    private let x = 1
+    return x
+}
+print(f())

@@ -37,7 +37,7 @@ pub mod show;
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -254,6 +254,16 @@ pub struct Interp {
     /// Values a Rust frame is holding across a safe point, which no walk of the
     /// heap could find. See [`Interp::collect_if_needed`].
     pub(crate) temps: Vec<Value>,
+    /// The class whose method is running, one entry per Quince call in progress.
+    ///
+    /// What a visibility check asks "who is reaching". A plain `fn` pushes
+    /// `None`, which is what makes top-level code an outsider to every class —
+    /// and the stack is what makes a method called *from* another class's method
+    /// answer for itself rather than for its caller.
+    ///
+    /// Pushed only for a [`Value::Function`] call. A native never reaches a
+    /// member through the dot, so there is nothing for it to be inside of.
+    reaching: Vec<Option<ObjId>>,
     depth: usize,
     pub(crate) out: Box<dyn Write>,
     /// Where `io.line` reads from.
@@ -318,6 +328,17 @@ pub struct Interp {
     /// tags an error has a scope in hand and would have to walk back to a path.
     /// See [`QuinceError::in_module`].
     module_sources: HashMap<ObjId, Rc<ModuleSource>>,
+    /// The top-level names each loaded module declared but did not export.
+    ///
+    /// Read off the module's AST before it runs, rather than recorded as each
+    /// declaration executes: visibility is a property of the declaration and not
+    /// of the binding, and a `private fn` inside an `if` that never ran is still
+    /// not exported. Keyed by scope, as `module_sources` is, because the lookup
+    /// that consults it has one in hand.
+    ///
+    /// Only file modules appear. A stdlib module is a static table with no
+    /// visibility words in it, so everything it declares is exported.
+    module_private: HashMap<ObjId, HashSet<String>>,
     /// The class each [`ErrorKind`] reifies into, captured once at startup.
     ///
     /// Held here rather than looked up in globals at `catch` time because `Error`
@@ -376,6 +397,7 @@ impl Interp {
             globals,
             scopes: Vec::new(),
             temps: Vec::new(),
+            reaching: Vec::new(),
             depth: 0,
             out,
             input,
@@ -385,6 +407,7 @@ impl Interp {
             files: HashMap::new(),
             loading: Vec::new(),
             module_sources: HashMap::new(),
+            module_private: HashMap::new(),
             error_classes: Vec::new(),
         };
         interp.install_error_classes();

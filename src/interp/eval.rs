@@ -428,6 +428,10 @@ impl Interp {
 
                 match object? {
                     Value::Instance(id) => {
+                        // The same reach a read is checked against. Writing is
+                        // not a weaker claim than reading: a `private` field the
+                        // outside could assign to would be private in name only.
+                        self.may_reach(self.heap.instance(id).class, name, target.span)?;
                         let key = Key::Str(Rc::from(name.as_str()));
                         let written = self
                             .heap

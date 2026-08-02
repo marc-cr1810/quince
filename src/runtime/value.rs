@@ -13,6 +13,21 @@ use crate::syntax::token::Span;
 pub struct Function {
     pub decl: Rc<FnDecl>,
     pub env: ObjId,
+    /// The class whose body declared this, for a method — `None` for a plain
+    /// `fn`, and for one an `extend` block added.
+    ///
+    /// What answers "who is reaching" when a member's visibility is checked. It
+    /// has to be the class the method was *written in* rather than the class of
+    /// whatever `self` turns out to be: a `private` member is reachable from
+    /// every method of its own class, on any instance of it, and unreachable
+    /// from a subclass's method even though `self` is an instance of both.
+    /// That is a fact about where the code is, so it is recorded where the code
+    /// is.
+    ///
+    /// An `extend` block gets `None` deliberately. It adds a method from
+    /// outside the declaration, so it is outside, and giving it the class's own
+    /// reach would make `extend` the way around every `private` in the language.
+    pub owner: Option<ObjId>,
 }
 
 /// The signature every builtin implements.

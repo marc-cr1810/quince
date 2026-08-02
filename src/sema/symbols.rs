@@ -17,7 +17,7 @@ use crate::runtime::class::BUILTINS;
 use crate::runtime::value::Native;
 use crate::sema::infer::infer;
 use crate::sema::types::{Type, of_value, returned_by};
-use crate::syntax::ast::FnDecl;
+use crate::syntax::ast::{FnDecl, Visibility};
 use crate::syntax::doc::Doc;
 
 
@@ -59,6 +59,14 @@ pub struct Symbol {
     /// show, since `final` and `const` are the difference between a name that
     /// can be rebound and one that cannot.
     pub keyword: Option<&'static str>,
+    /// How far the declaration reaches.
+    ///
+    /// Here rather than only in the runtime class, because this is what both
+    /// editing surfaces render and a completion list that offers what the
+    /// language will refuse is worse than one that offers nothing. Every symbol
+    /// that was not declared with a word is [`Visibility::Public`], which is
+    /// what a builtin's method and an inferred field both are.
+    pub visibility: Visibility,
 }
 
 impl Symbol {
@@ -72,11 +80,18 @@ impl Symbol {
             doc: None,
             params: Vec::new(),
             keyword: None,
+            visibility: Visibility::Public,
         }
     }
 
     pub(crate) fn declared_with(mut self, keyword: &'static str) -> Symbol {
         self.keyword = Some(keyword);
+        self
+    }
+
+    /// Records how far the declaration reaches.
+    pub(crate) fn reaching(mut self, visibility: Visibility) -> Symbol {
+        self.visibility = visibility;
         self
     }
 
@@ -139,6 +154,7 @@ pub(crate) fn symbol_for(decl: &Rc<FnDecl>, kind: Kind, returns: Type) -> Symbol
         returns,
         doc: decl.doc.clone(),
         keyword: None,
+        visibility: decl.visibility,
         params: decl
             .params
             .iter()
@@ -180,6 +196,8 @@ pub fn symbol_of_native(native: &'static Native, kind: Kind) -> Symbol {
         returns: returned_by(native),
         doc: Doc::parse_text(native.doc).ok().filter(|doc| !doc.is_empty()),
         keyword: None,
+        // A native carries no visibility word; the tables have none to write.
+        visibility: Visibility::Public,
         params: native.params.iter().map(|name| name.to_string()).collect(),
     }
 }

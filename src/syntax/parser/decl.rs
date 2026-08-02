@@ -7,16 +7,18 @@
 
 use crate::error::Result;
 use crate::syntax::ast::{
-    self, FnDecl, ImportName, ImportNames, Op, Openness, Param, Stmt, StmtKind, Var,
+    self, BindKind, FieldDecl, FnDecl, ImportName, ImportNames, Op, Openness, Param, Stmt, StmtKind,
+    Var,
 };
 use crate::syntax::doc::Doc;
-use crate::syntax::parser::{Parser, declaration, syntax};
+use crate::syntax::parser::{Modifiers, Parser, declaration, syntax};
 use crate::syntax::token::{Token, TokenKind};
 
 impl Parser {
     pub(super) fn fn_stmt(&mut self) -> Result<Stmt> {
         let start = self.peek().span;
-        let decl = self.fn_decl(false)?;
+        let modifiers = self.modifiers("a function")?;
+        let decl = self.fn_decl(false, modifiers)?;
         Ok(Stmt {
             span: start.to(decl.body.span),
             kind: StmtKind::Fn {
@@ -37,12 +39,34 @@ impl Parser {
     /// An `op` is validated here rather than in the resolver because everything
     /// the check needs is local: the name, the span, and the parameters, all in
     /// hand before the body is parsed.
-    pub(super) fn fn_decl(&mut self, method: bool) -> Result<FnDecl> {
+    pub(super) fn fn_decl(&mut self, method: bool, modifiers: Modifiers) -> Result<FnDecl> {
+        let Modifiers {
+            doc,
+            visibility,
+            vis_span,
+        } = modifiers;
         let token = self.advance();
-        let doc = Self::doc_of(&token, "a function")?;
         let keyword = token.kind.clone();
         let is_op = keyword == TokenKind::Op;
         let after = if is_op { "after `op`" } else { "after `fn`" };
+
+        // The language calls an `op` on the program's behalf, from outside the
+        // class — so a private one would be a method `print` is entitled to call
+        // and forbidden from calling. Refused at the declaration rather than at
+        // the call, because the call is in the evaluator and has no word to point
+        // at. `public op` is allowed and says nothing new, as it does anywhere.
+        if is_op && visibility.closes_outside() {
+            let word = visibility.word().expect("a restricting word is written");
+            return Err(declaration(
+                format!("an `op` may not be {word}"),
+                vis_span.expect("a restricting word was written, so it has a span"),
+            )
+            .with_help(
+                "the language calls an `op` itself, from outside the class — one it is not \
+                 allowed to reach could never run",
+            ));
+        }
+
         let (name, name_span) = self.expect_ident(after)?;
 
         let op = if is_op {
@@ -126,8 +150,64 @@ impl Parser {
             params,
             body,
             op,
+            visibility,
             doc,
         })
+    }
+
+    /// `private let balance = 0`, inside a class body.
+    ///
+    /// The binding forms mean here what they mean anywhere — `let` reassignable,
+    /// `final` bound once, `const` frozen — so this reads the same keyword and
+    /// differs only in where the result lands. An initializer is required; the
+    /// blank form waits for the annotations that would give it a default.
+    pub(super) fn field_decl(&mut self, modifiers: Modifiers) -> Result<FieldDecl> {
+        let keyword = self.advance();
+        let bind = match keyword.kind {
+            TokenKind::Let => BindKind::Let,
+            TokenKind::Final => BindKind::Final,
+            _ => BindKind::Const,
+        };
+        let word = format!("`{}`", bind.word());
+
+        let (name, name_span) = self.expect_ident(&format!("after {word}"))?;
+        self.expect(TokenKind::Assign, &format!("in a {word} field"))?;
+        let value = self.expression()?;
+        self.end_of_statement()?;
+
+        Ok(FieldDecl {
+            name,
+            name_span,
+            bind,
+            visibility: modifiers.visibility,
+            value,
+            doc: modifiers.doc,
+        })
+    }
+
+    /// Refuses a field a body has already declared.
+    ///
+    /// The same collision `refuse_duplicate` refuses among methods, and for the
+    /// same reason — but kept apart from it because a field and a method do not
+    /// share a table: `fn total` beside `let total` is two different things
+    /// reached two different ways, and refusing the pair would be inventing a
+    /// rule the evaluator does not have.
+    pub(super) fn refuse_duplicate_field(
+        declared: &[FieldDecl],
+        field: &FieldDecl,
+        whose: &str,
+    ) -> Result<()> {
+        if !declared.iter().any(|seen| seen.name == field.name) {
+            return Ok(());
+        }
+        Err(declaration(
+            format!("{whose} already declares a field `{}`", field.name),
+            field.name_span,
+        )
+        .with_help(
+            "the second would replace the first without a word — rename it, or delete the \
+             one you meant to be rid of",
+        ))
     }
 
     /// The documentation attached to a token, parsed and checked for shape.
@@ -187,8 +267,12 @@ impl Parser {
     pub(super) fn class_stmt(&mut self) -> Result<Stmt> {
         let start = self.peek().span;
         // The modifier when there is one, since that is the first token of the
-        // header and so the one the documentation attached to.
-        let doc = Self::doc_of(self.peek(), "a class")?;
+        // header and so the one the documentation attached to. Visibility comes
+        // before openness — `public final class` — because it is a word about
+        // the name and the other is a word about the type.
+        let header = self.peek().clone();
+        let (visibility, _) = self.visibility_word();
+        let doc = Self::doc_of(&header, "a class")?;
         let openness = match self.peek().kind {
             TokenKind::Final => Openness::Final,
             TokenKind::Complete => Openness::Complete,
@@ -219,16 +303,42 @@ impl Parser {
         self.expect(TokenKind::LBrace, "after the class name")?;
 
         let mut methods = Vec::new();
+        let mut fields = Vec::new();
         while !self.check(&TokenKind::RBrace) && !self.at_end() {
-            if !self.check(&TokenKind::Fn) && !self.check(&TokenKind::Op) {
-                return Err(syntax(
-                    format!("expected a method, found {}", self.peek().kind),
-                    self.peek().span,
-                ));
+            // The visibility word comes first and says nothing about which of the
+            // two this is, so it is read before the branch and handed to whichever
+            // side takes it. The doc block is read from the word, for the reason
+            // the class header reads its own from the modifier.
+            let member = self.peek().clone();
+            let (visibility, vis_span) = self.visibility_word();
+            match self.peek().kind {
+                TokenKind::Fn | TokenKind::Op => {
+                    let modifiers = Modifiers {
+                        doc: Self::doc_of(&member, "a function")?,
+                        visibility,
+                        vis_span,
+                    };
+                    let decl = self.fn_decl(true, modifiers)?;
+                    Self::refuse_duplicate(&methods, &decl, &name)?;
+                    methods.push(std::rc::Rc::new(decl));
+                }
+                TokenKind::Let | TokenKind::Final | TokenKind::Const => {
+                    let modifiers = Modifiers {
+                        doc: Self::doc_of(&member, "a field")?,
+                        visibility,
+                        vis_span,
+                    };
+                    let field = self.field_decl(modifiers)?;
+                    Self::refuse_duplicate_field(&fields, &field, &name)?;
+                    fields.push(field);
+                }
+                _ => {
+                    return Err(syntax(
+                        format!("expected a field or a method, found {}", self.peek().kind),
+                        self.peek().span,
+                    ));
+                }
             }
-            let decl = self.fn_decl(true)?;
-            Self::refuse_duplicate(&methods, &decl, &name)?;
-            methods.push(std::rc::Rc::new(decl));
         }
         let end = self.expect(TokenKind::RBrace, "after the class body")?.span;
 
@@ -238,7 +348,9 @@ impl Parser {
                 parent,
                 parent_span,
                 methods,
+                fields,
                 openness,
+                visibility,
                 slot: None,
                 doc,
             },
@@ -268,7 +380,8 @@ impl Parser {
                     self.peek().span,
                 ));
             }
-            let decl = self.fn_decl(true)?;
+            let modifiers = self.modifiers("a function")?;
+            let decl = self.fn_decl(true, modifiers)?;
             Self::refuse_duplicate(&methods, &decl, &target)?;
             methods.push(std::rc::Rc::new(decl));
         }

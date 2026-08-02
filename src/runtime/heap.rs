@@ -279,6 +279,15 @@ impl Heap {
         }
     }
 
+    /// Only for the one write a function ever takes after allocation: the class
+    /// that declared it, which cannot be known until that class exists.
+    pub fn function_mut(&mut self, id: ObjId) -> &mut Function {
+        match self.get_mut(id) {
+            Object::Function(func) => func,
+            other => panic!("expected a function, found {other:?}"),
+        }
+    }
+
     pub fn bound_method(&self, id: ObjId) -> &BoundMethod {
         match self.get(id) {
             Object::BoundMethod(bound) => bound,
@@ -552,7 +561,9 @@ mod tests {
         let mut heap = Heap::new();
         let scope = heap.alloc(Object::Env(Env::new(None, 1)));
         let func = heap.alloc(Object::Function(Function {
+            owner: None,
             decl: std::rc::Rc::new(crate::syntax::ast::FnDecl {
+                visibility: crate::syntax::ast::Visibility::Public,
                 doc: None,
                 name: "f".to_string(),
                 name_span: crate::syntax::token::Span::new(0, 0),

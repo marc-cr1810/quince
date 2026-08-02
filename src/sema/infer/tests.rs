@@ -405,3 +405,72 @@ fn every_builtin_that_can_be_called_names_a_type() {
     assert_eq!(builtin_constructor("nil"), None);
     assert_eq!(builtin_constructor("Point"), None);
 }
+
+#[test]
+fn a_class_declaration_encloses_the_offsets_inside_it() {
+    let src = "class A {\n    private let x = 1\n}\nlet a = A()\n";
+    let types = types(src);
+    let inside = src.find("private").expect("the field is written") as u32;
+    assert_eq!(types.class_at(inside), Some("A"));
+    // Past the closing brace is outside every class, which is what makes
+    // top-level code an outsider.
+    assert_eq!(types.class_at(src.len() as u32), None);
+}
+
+#[test]
+fn what_may_be_offered_follows_where_the_cursor_is() {
+    let src = "class Base {\n\
+                   private let hidden = 1\n\
+                   protected let shared = 2\n\
+                   let open = 3\n\
+               }\n\
+               class Sub extends Base {\n\
+                   fn m() {\n\
+                       return 1\n\
+                   }\n\
+               }\n";
+    let types = types(src);
+
+    // Public reaches everywhere, including from nowhere in particular.
+    assert!(types.may_offer(Visibility::Public, "Base", None));
+    assert!(types.may_offer(Visibility::Public, "Base", Some("Sub")));
+
+    // Outside every class, the two restricting words withhold.
+    assert!(!types.may_offer(Visibility::Private, "Base", None));
+    assert!(!types.may_offer(Visibility::Protected, "Base", None));
+
+    // Inside the declaring class, everything.
+    assert!(types.may_offer(Visibility::Private, "Base", Some("Base")));
+    assert!(types.may_offer(Visibility::Protected, "Base", Some("Base")));
+
+    // A subclass is the one row that separates the two words.
+    assert!(!types.may_offer(Visibility::Private, "Base", Some("Sub")));
+    assert!(types.may_offer(Visibility::Protected, "Base", Some("Sub")));
+
+    // An unrelated class is outside, whichever word was written.
+    assert!(!types.may_offer(Visibility::Protected, "Base", Some("Elsewhere")));
+}
+
+#[test]
+fn a_declared_field_is_a_member_carrying_the_word_it_was_written_with() {
+    let src = "class A {\n\
+                   private let hidden = 1\n\
+                   let open = 2\n\
+                   op init() {\n\
+                       self.invented = 3\n\
+                   }\n\
+               }\n";
+    let members = types(src).members_of("A");
+    let reach = |name: &str| {
+        members
+            .iter()
+            .find(|symbol| symbol.name == name)
+            .unwrap_or_else(|| panic!("`{name}` should be a member of `A`, got {members:?}"))
+            .visibility
+    };
+    assert_eq!(reach("hidden"), Visibility::Private);
+    assert_eq!(reach("open"), Visibility::Public);
+    // A field an `init` assigned into existence was declared by nothing, so it
+    // carries no word — and the default is the one that refuses nobody.
+    assert_eq!(reach("invented"), Visibility::Public);
+}

@@ -1,0 +1,8 @@
+Error: quince::VisibilityError
+
+ × `balance` is private to `Account`
+   ╭─[err_private_field.qn:10:9]
+10 │ print(a.balance)
+   ·         ───────
+   ╰────
+   help: only methods declared inside `Account` may reach it — a method on a subclass is outside, and so is an `extend` block

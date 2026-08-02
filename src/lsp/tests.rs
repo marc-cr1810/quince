@@ -226,6 +226,30 @@ fn dot_completion_offers_the_class_the_pass_worked_out() {
     assert!(labels.contains(&"n".to_string()), "{labels:?}");
 }
 
+const HAS_HIDDEN_MEMBERS: &str = "class Account {\n\
+     private let balance = 0\n\
+     protected let owner = \"nobody\"\n\
+     public final id = \"A1\"\n\
+     fn peek() {\n\
+     return 1\n\
+     }\n\
+     private fn audit() {\n\
+     return 2\n\
+     }\n\
+     }\n";
+
+#[test]
+fn dot_completion_withholds_what_the_language_would_refuse() {
+    // Outside the class, only the public members are worth offering — a list
+    // that suggests `balance` is a list that suggests writing a VisibilityError.
+    let labels = completions_after(&format!("{HAS_HIDDEN_MEMBERS}let a = Account()\na"));
+    assert!(labels.contains(&"peek".to_string()), "{labels:?}");
+    assert!(labels.contains(&"id".to_string()), "{labels:?}");
+    assert!(!labels.contains(&"balance".to_string()), "{labels:?}");
+    assert!(!labels.contains(&"owner".to_string()), "{labels:?}");
+    assert!(!labels.contains(&"audit".to_string()), "{labels:?}");
+}
+
 #[test]
 fn dot_completion_offers_a_modules_members() {
     // Nothing offered these before: a module is not a class, so the

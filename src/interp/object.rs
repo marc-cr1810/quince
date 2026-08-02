@@ -15,6 +15,7 @@ use crate::runtime::dict::Key;
 use crate::runtime::heap::ObjId;
 use crate::runtime::value::Value;
 use crate::syntax::ast::{FnDecl, Var};
+use crate::syntax::ast::Visibility;
 use crate::syntax::token::Span;
 
 impl Interp {
@@ -39,6 +40,7 @@ impl Interp {
                 .fields
                 .get(&Key::Str(Rc::from(name)))
         {
+            self.may_reach(self.heap.instance(*id).class, name, name_span)?;
             return Ok(Attr::Field(value.clone()));
         }
 
@@ -49,7 +51,10 @@ impl Interp {
         // methods, and this is the line that says so.
         if let Value::Module(id) = receiver {
             return match self.heap.globals(*id).get(name) {
-                Some(value) => Ok(Attr::Field(value.clone())),
+                Some(value) => {
+                    self.may_import(*id, name, name_span)?;
+                    Ok(Attr::Field(value.clone()))
+                }
                 None => Err(self.not_in_module(
                     self.heap.globals(*id).name().unwrap_or("module"),
                     name,
@@ -70,9 +75,93 @@ impl Interp {
 
         let class = receiver.class(&self.heap);
         match self.find_method(class, name) {
-            Some(method) => Ok(Attr::Method(method)),
+            Some(method) => {
+                self.may_reach(class, name, name_span)?;
+                Ok(Attr::Method(method))
+            }
             None => Err(self.no_attr(receiver, name, target_span, name_span, expr_span)),
         }
+    }
+
+    /// Refuses a member reached from outside the visibility it was declared with.
+    ///
+    /// Three questions, in the order that makes the common case free: what did
+    /// the declaration say, who is reaching, and does the one reach the other.
+    /// A member nothing declared — one an `op init` invented by assigning it —
+    /// has no visibility and is reachable, which is what keeps every program
+    /// written before v0.7 running unchanged.
+    pub(super) fn may_reach(&self, class: ObjId, name: &str, span: Span) -> Result<()> {
+        let Some((visibility, owner)) = self.declared_reach(class, name) else {
+            return Ok(());
+        };
+        if !visibility.closes_outside() {
+            return Ok(());
+        }
+
+        // Inside a method of the declaring class, everything is reachable —
+        // including on an instance that is not `self`, which is what makes
+        // `other.balance` work inside `op eq`.
+        let reaching = self.reaching.last().copied().flatten();
+        let allowed = match reaching {
+            Some(from) if from == owner => true,
+            // `protected` also admits a subclass's methods. Walking up from the
+            // reaching class rather than down from the owner, because the chain
+            // only runs that way.
+            Some(from) if !visibility.closes_subclass() => self.descends_from(from, owner),
+            _ => false,
+        };
+        if allowed {
+            return Ok(());
+        }
+
+        let word = visibility.word().expect("a closed member was written with one");
+        let whose = self.heap.class(owner).name.clone();
+        Err(QuinceError::new(
+            format!("`{name}` is {word} to `{whose}`"),
+            span,
+        )
+        .with_kind(ErrorKind::Visibility)
+        .with_help(match visibility {
+            Visibility::Private => format!(
+                "only methods declared inside `{whose}` may reach it — a method on a subclass \
+                 is outside, and so is an `extend` block"
+            ),
+            _ => format!(
+                "only methods of `{whose}` and of the classes extending it may reach it"
+            ),
+        }))
+    }
+
+    /// What `name` was declared as on `class` or an ancestor, and by which class.
+    ///
+    /// `None` when nothing declared it: a field an `op init` assigned into
+    /// existence, or a method an `extend` block added. Neither carries a
+    /// visibility, so neither has one to enforce.
+    fn declared_reach(&self, class: ObjId, name: &str) -> Option<(Visibility, ObjId)> {
+        let mut current = Some(class);
+        while let Some(id) = current {
+            let class = self.heap.class(id);
+            if let Some(field) = class.fields.iter().find(|field| field.name == name) {
+                return Some((field.visibility, id));
+            }
+            if let Some(Value::Function(func)) = class.methods.get(name) {
+                return Some((self.heap.function(*func).decl.visibility, id));
+            }
+            current = class.parent;
+        }
+        None
+    }
+
+    /// Whether `class` is `ancestor`, or descends from it.
+    fn descends_from(&self, class: ObjId, ancestor: ObjId) -> bool {
+        let mut current = Some(class);
+        while let Some(id) = current {
+            if id == ancestor {
+                return true;
+            }
+            current = self.heap.class(id).parent;
+        }
+        false
     }
 
     /// The method `name` on class `id`, declared, inherited, or added by

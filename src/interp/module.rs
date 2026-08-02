@@ -7,6 +7,7 @@
 //! v0.7's module visibility is a run-time check and this is where it goes — a file
 //! module's exports are not known until the file has run.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -17,6 +18,7 @@ use crate::runtime::class::BUILTINS as BUILTIN_TYPES;
 use crate::runtime::env::{self, Globals};
 use crate::runtime::heap::{ObjId, Object};
 use crate::runtime::value::Value;
+use crate::syntax::ast::{Stmt, StmtKind};
 use crate::syntax::token::{Span, TokenKind};
 
 impl Interp {
@@ -125,6 +127,10 @@ impl Interp {
 
         let globals = self.new_module_globals(name, Some(path.clone()));
         self.module_sources.insert(globals, Rc::clone(&source));
+        let withheld = unexported(&program);
+        if !withheld.is_empty() {
+            self.module_private.insert(globals, withheld);
+        }
         self.files
             .insert(path.clone(), ModuleState::Loading(globals));
         self.loading.push(path.clone());
@@ -246,6 +252,32 @@ impl Interp {
         )
     }
 
+    /// Refuses a name the module declared and did not export.
+    ///
+    /// A *run-time* check, and the milestone document argues the point at
+    /// length: a file module's contents are not known until the interpreter has
+    /// loaded and run it, so refusing at resolution would mean loading modules
+    /// during resolution. Importing a name a module does not declare is already
+    /// an error here rather than earlier, for exactly the same reason.
+    pub(super) fn may_import(&self, loaded: ObjId, name: &str, span: Span) -> Result<()> {
+        let withheld = self
+            .module_private
+            .get(&loaded)
+            .is_some_and(|names| names.contains(name));
+        if !withheld {
+            return Ok(());
+        }
+        let module = self.heap.globals(loaded).name().unwrap_or("module");
+        Err(
+            QuinceError::new(format!("`{module}` does not export `{name}`"), span)
+                .with_kind(ErrorKind::Visibility)
+                .with_help(format!(
+                    "it is declared, and declared `private` — write `public` in front of it in \
+                     `{module}` for other files to reach it"
+                )),
+        )
+    }
+
     /// A name a module does not declare, reached either way it can be asked for.
     ///
     /// `math.florr` and `from math import florr` are the same mistake and get the
@@ -271,4 +303,27 @@ impl Interp {
         }
         err
     }
+}
+
+/// The top-level names a module declared and did not export.
+///
+/// Top level only, and deliberately: a declaration nested in an `if` or a
+/// function is not a name another module could reach under any visibility, so
+/// there is nothing there to withhold. Read from the AST rather than recorded as
+/// each statement runs, because a `private fn` in a branch that never executed
+/// is still not exported.
+fn unexported(program: &[Stmt]) -> HashSet<String> {
+    program
+        .iter()
+        .filter_map(|stmt| match &stmt.kind {
+            StmtKind::Let {
+                name, visibility, ..
+            } if !visibility.exported() => Some(name.clone()),
+            StmtKind::Class {
+                name, visibility, ..
+            } if !visibility.exported() => Some(name.clone()),
+            StmtKind::Fn { decl, .. } if !decl.visibility.exported() => Some(decl.name.clone()),
+            _ => None,
+        })
+        .collect()
 }

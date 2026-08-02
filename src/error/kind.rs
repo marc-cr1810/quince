@@ -36,6 +36,14 @@ pub enum ErrorKind {
     Index,
     Key,
     Frozen,
+    /// A member reached from somewhere its visibility does not extend to.
+    ///
+    /// Separate from [`ErrorKind::Attr`] because the receiver *has* the member
+    /// and the name is spelled right — the mistake is where the reach came from,
+    /// and "no such field" would send someone looking for a typo that is not
+    /// there. The same split, for the same reason, as [`ErrorKind::Attr`] from
+    /// [`ErrorKind::Type`].
+    Visibility,
     Recursion,
     ZeroDivision,
     Overflow,
@@ -107,6 +115,7 @@ impl ErrorKind {
             ErrorKind::Index => Some("IndexError"),
             ErrorKind::Key => Some("KeyError"),
             ErrorKind::Frozen => Some("FrozenError"),
+            ErrorKind::Visibility => Some("VisibilityError"),
             ErrorKind::Recursion => Some("RecursionError"),
             ErrorKind::ZeroDivision => Some("ZeroDivisionError"),
             ErrorKind::Overflow => Some("OverflowError"),
@@ -150,6 +159,7 @@ pub static ERROR_KINDS: &[ErrorKind] = &[
     ErrorKind::Index,
     ErrorKind::Key,
     ErrorKind::Frozen,
+    ErrorKind::Visibility,
     ErrorKind::Recursion,
     ErrorKind::ZeroDivision,
     ErrorKind::Overflow,

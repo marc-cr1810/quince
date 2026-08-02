@@ -1,0 +1,6 @@
+class Account {
+    protected let owner = "nobody"
+}
+
+let a = Account()
+print(a.owner)

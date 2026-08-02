@@ -1,0 +1,10 @@
+class Account {
+    private let balance = 0
+
+    op init(opening) {
+        self.balance = opening
+    }
+}
+
+let a = Account(5)
+print(a.balance)

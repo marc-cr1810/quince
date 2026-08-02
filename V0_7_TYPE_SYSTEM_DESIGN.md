@@ -526,7 +526,14 @@ milestone. §8.
 - An unknown type name, or a type alias that cycles. §3.11.
 - A `?` on a type that is already nullable (`int??`).
 - An annotated binding with no initializer — `let x: int`. §3.2.
-- Visibility violations reachable statically — `acc.balance` outside the class. §3.4.
+- ~~Visibility violations reachable statically — `acc.balance` outside the class.~~
+  **Not done, and deliberately.** This section's own closing paragraph settles it: where
+  both could work it goes at run time, because the unannotated case has to be caught there
+  anyway and one mistake should not report from two places. A receiver's class is only
+  sometimes decidable, so a static check would refuse `acc.balance` in the programs the
+  pass happened to understand and stay silent in the rest — the same mistake reporting from
+  two places, or from neither, depending on how much inference succeeded. The editor gets
+  the static half instead, as completion filtering (§6), where being approximate is free.
 - An `op` declared private or protected, or with a conflicting return type. §3.4, §3.7.
 - A non-nullable blank `final` that some `op init` leaves unassigned. §3.5.
 
@@ -570,9 +577,21 @@ Both surfaces read `Symbol`, so annotations reach them by landing there.
 
 ## 7. Work items, in order
 
-**Tranche 1 — visibility.** Independent of the type system, small, and immediately
-useful. Keywords, a field on declarations, resolution checks, and completion filtering.
-Landing it first means the milestone has shipped something before the harder half starts.
+**Tranche 1 — visibility.** ✅ **Landed.** Independent of the type system and immediately
+useful. Keywords, a field on declarations, the checks, and completion filtering.
+
+It turned out to be bigger than "small", for a reason worth recording: §3.4 puts `private`
+on a class *field*, and before this milestone a class body accepted only `fn` and `op` —
+a field existed because an `op init` assigned one, so there was nowhere to write the word.
+**Class field declarations therefore landed here**, in their initialized form
+(`private let balance = 0`), because visibility with no fields to attach to is half of
+§3.4. §3.5's blank `final` still waits for tranche 3, which is what gives it a type to
+synthesize a default from.
+
+A declared field is initialized when the instance is built, ancestors first, *before*
+`op init` runs — so an `init` assigning the same name overwrites a value already there,
+which is what makes `let balance = 0` followed by `self.balance = opening` read the way it
+looks.
 
 **Tranche 2 — `Type` gains parameters.** `Type::Class(String)` becomes something that can
 carry arguments, and a reified header appears on every allocation that has arguments to
@@ -660,6 +679,15 @@ Recorded because they were open in an earlier draft and someone will want to rev
 - **`ref` deferred.** §8.
 - **`T?` is sugar for `Option[T]`.** §10, which used to be this document's one open
   decision and is now the record of how it was settled.
+- **Class field declarations landed in tranche 1**, because §3.4 had nowhere to write a
+  visibility word without them. §7.
+- **An `extend` block is an outsider.** A method it adds reaches what any other outsider
+  reaches, and not what the class's own methods do. The alternative would make `extend`
+  the way around every `private` in the language, which is not a door worth leaving open.
+- **Visibility is lexical, not receiver-based.** A method of `Account` may reach
+  `other.balance` on any `Account`, not only on `self` — which is what makes `op eq` and
+  a `richer_than` writable at all. What decides is where the code was written.
+- **No static `acc.balance` check.** §5.
 
 ---
 

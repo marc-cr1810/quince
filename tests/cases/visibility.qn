@@ -1,0 +1,56 @@
+class Account {
+    private let balance = 0
+    protected let owner = "nobody"
+    public final id = "A1"
+    let note = "plain"
+
+    op init(opening) {
+        self.balance = opening
+    }
+
+    fn deposit(amount) {
+        self.balance = self.balance + amount
+    }
+
+    fn peek() {
+        return self.balance
+    }
+
+    private fn audit() {
+        return "audited " + string(self.balance)
+    }
+
+    fn report() {
+        return self.audit()
+    }
+
+    fn richer_than(other) {
+        return self.balance > other.balance
+    }
+}
+
+class Savings extends Account {
+    op init(opening) {
+        super.init(opening)
+    }
+
+    fn who() {
+        return self.owner
+    }
+}
+
+let a = Account(100)
+a.deposit(50)
+print(a.peek())
+print(a.id)
+print(a.note)
+print(a.report())
+
+# A private member is reachable on another instance of the same class,
+# because the reach is the code's and not the receiver's.
+print(a.richer_than(Account(10)))
+
+# A subclass reaches `protected` and inherits the rest.
+let s = Savings(7)
+print(s.who())
+print(s.peek())

@@ -13,7 +13,7 @@ pub mod decl;
 pub mod op;
 
 pub use decl::{
-    BindKind, FnDecl, ImportName, ImportNames, Openness, Param, SELF, SUPER,
+    BindKind, FieldDecl, FnDecl, ImportName, ImportNames, Openness, Param, SELF, SUPER, Visibility,
 };
 pub use op::{BinaryOp, LogicalOp, OPS, Op, Reflect, UnaryOp};
 
@@ -159,6 +159,10 @@ pub enum StmtKind {
         name: String,
         value: Expr,
         bind: BindKind,
+        /// Whether an importing module sees this name. Meaningful only at the
+        /// top level — the parser refuses a visibility word on a binding inside
+        /// a function, where there is no importer to hide it from.
+        visibility: Visibility,
         /// Where the binding goes. Always `Local { hops: 0, .. }` or `Global`.
         slot: Option<Slot>,
         /// The `##` block written above it. A binding has no parameters and no
@@ -185,8 +189,18 @@ pub enum StmtKind {
         /// than the twenty lines that follow. [`Var`] carries no span of its own.
         parent_span: Option<Span>,
         methods: Vec<Rc<FnDecl>>,
+        /// The fields declared in the body, in the order written — which is the
+        /// order they are initialized in when an instance is built.
+        ///
+        /// A class may still gain a field its body never named, by an `op init`
+        /// assigning one. Declaring is what lets a field carry a [`Visibility`];
+        /// it is not what brings the field into existence.
+        fields: Vec<FieldDecl>,
         /// Which of the two doors the declaration closed, if either.
         openness: Openness,
+        /// How far the class's own name reaches — whether an importing module
+        /// sees it. Nothing to do with the visibility of what is inside it.
+        visibility: Visibility,
         /// Where the class's own name is bound, as for `Let`.
         slot: Option<Slot>,
         /// The `##` block written above it. A summary only, as for a binding —

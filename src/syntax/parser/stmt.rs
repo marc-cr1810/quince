@@ -10,8 +10,9 @@ use crate::syntax::token::TokenKind;
 
 impl Parser {
     pub(super) fn let_stmt(&mut self) -> Result<Stmt> {
+        let start = self.peek().span;
+        let modifiers = self.modifiers("a binding")?;
         let keyword = self.advance();
-        let doc = Self::doc_of(&keyword, "a binding")?;
         let bind = match keyword.kind {
             TokenKind::Let => BindKind::Let,
             TokenKind::Final => BindKind::Final,
@@ -22,7 +23,7 @@ impl Parser {
         let (name, _) = self.expect_ident(&format!("after {word}"))?;
         self.expect(TokenKind::Assign, &format!("in a {word} binding"))?;
         let value = self.expression()?;
-        let span = keyword.span.to(value.span);
+        let span = start.to(value.span);
         self.end_of_statement()?;
 
         Ok(Stmt {
@@ -31,7 +32,8 @@ impl Parser {
                 name,
                 value,
                 bind,
-                doc,
+                visibility: modifiers.visibility,
+                doc: modifiers.doc,
             },
             span,
         })

@@ -46,7 +46,7 @@
         },
         {
           "name": "keyword.declaration.quince",
-          "match": "\\b(fn|op|class|extends|extend|let|final|complete|sealed|const)\\b"
+          "match": "\\b(fn|op|class|extends|extend|let|final|complete|sealed|const|public|private|protected)\\b"
         },
         {
           "name": "variable.language.quince",

@@ -1,0 +1,9 @@
+public final PI = 3.14
+
+public fn area(r) {
+    return PI * r * r
+}
+
+private fn helper(x) {
+    return x * 2
+}

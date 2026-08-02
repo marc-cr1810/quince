@@ -49,6 +49,12 @@ pub enum TokenKind {
     /// is the fourth, and is shared with the binding forms.
     Complete,
     Sealed,
+    /// The three visibility words, one per reach a member can have. See
+    /// [`crate::syntax::ast::Visibility`]. Spelled out rather than abbreviated,
+    /// for the reason the class modifiers are: one spelling per modifier.
+    Public,
+    Private,
+    Protected,
     /// Keywords rather than identifiers so that using one where it has no
     /// meaning is caught by the resolver, with a message that says why.
     SelfKw,
@@ -119,8 +125,8 @@ pub enum TokenKind {
 /// `import` two tokens later — and is an ordinary identifier everywhere else.
 pub const KEYWORDS: &[&str] = &[
     "fn", "op", "class", "extends", "extend", "self", "super", "let", "final", "complete",
-    "sealed", "const", "import", "if", "else", "while", "for", "in", "return", "try", "catch",
-    "throw", "true", "false", "nil",
+    "sealed", "const", "public", "private", "protected", "import", "if", "else", "while", "for",
+    "in", "return", "try", "catch", "throw", "true", "false", "nil",
 ];
 
 impl TokenKind {
@@ -139,6 +145,9 @@ impl TokenKind {
             "complete" => TokenKind::Complete,
             "sealed" => TokenKind::Sealed,
             "const" => TokenKind::Const,
+            "public" => TokenKind::Public,
+            "private" => TokenKind::Private,
+            "protected" => TokenKind::Protected,
             "import" => TokenKind::Import,
             "if" => TokenKind::If,
             "else" => TokenKind::Else,
@@ -182,6 +191,9 @@ impl TokenKind {
             TokenKind::Complete => "Before `class`: the method table is finished, so no `extend` block may add to it. Subclasses are still welcome, since a subclass adds nothing to the class it descends from.",
             TokenKind::Sealed => "Before `class`: `final` and `complete` at once — neither a subclass nor an `extend` block.",
             TokenKind::Const => "Binds a name once and freezes the value, deeply, and through every other name that already reaches it.",
+            TokenKind::Public => "Reachable from anywhere. What a member is when no visibility is written, so it is the word to omit rather than the word to add.",
+            TokenKind::Private => "Reachable only from inside methods of the class that declared it. On a top-level declaration, it is not exported to an importing module.",
+            TokenKind::Protected => "Reachable from inside methods of the declaring class and of the classes that extend it, and nowhere else.",
             TokenKind::Import => "Loads a module — one the language ships, or a file beside this one. `import math` binds the module; `from math import floor` binds the names.",
             TokenKind::If => "Runs a block when a condition is truthy. A class decides its own truthiness with `op bool`.",
             TokenKind::Else => "The block to run when the `if` before it did not.",
@@ -252,6 +264,9 @@ impl fmt::Display for TokenKind {
             TokenKind::Complete => write!(f, "complete"),
             TokenKind::Sealed => write!(f, "sealed"),
             TokenKind::Const => write!(f, "const"),
+            TokenKind::Public => write!(f, "public"),
+            TokenKind::Private => write!(f, "private"),
+            TokenKind::Protected => write!(f, "protected"),
             TokenKind::Import => write!(f, "import"),
             TokenKind::If => write!(f, "if"),
             TokenKind::Else => write!(f, "else"),

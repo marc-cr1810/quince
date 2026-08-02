@@ -1,0 +1,10 @@
+class Account {
+    let balance = 0
+
+    private fn audit() {
+        return "audited"
+    }
+}
+
+let a = Account()
+print(a.audit())

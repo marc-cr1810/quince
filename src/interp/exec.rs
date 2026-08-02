@@ -35,6 +35,7 @@ impl Interp {
                 name,
                 value,
                 bind,
+                visibility: _,
                 doc: _,
                 slot,
             } => {
@@ -55,6 +56,7 @@ impl Interp {
                 let func = self.heap.alloc(Object::Function(Function {
                     decl: Rc::clone(decl),
                     env,
+                    owner: None,
                 }));
                 self.bind(slot, &decl.name, Value::Function(func), false, env);
                 Ok(Flow::Normal)
@@ -66,7 +68,9 @@ impl Interp {
                 parent,
                 parent_span,
                 methods,
+                fields,
                 openness,
+                visibility,
                 slot,
             } => {
                 // Read before the class's own name is bound, so `class A extends
@@ -158,6 +162,9 @@ impl Interp {
                     let func = Value::Function(self.heap.alloc(Object::Function(Function {
                         decl: Rc::clone(decl),
                         env: enclosing,
+                        // Filled in below: the class does not exist yet, and a
+                        // method's reach is its own class's.
+                        owner: None,
                     })));
                     // Every op lands in the table by name *and* in its slot. The
                     // name is what `super.init(msg)` reaches; the slot is what
@@ -175,6 +182,12 @@ impl Interp {
                     slots,
                     builtin: None,
                     openness: *openness,
+                    fields: fields.iter().cloned().map(Rc::new).collect(),
+                    // The scope the initializers run in, which is the one the
+                    // methods closed over — a field's initializer sees what a
+                    // method body would see, `super` included.
+                    field_env: (!fields.is_empty()).then_some(enclosing),
+                    visibility: *visibility,
                 };
 
                 // Inherited rather than searched for: a class that declares no
@@ -188,6 +201,22 @@ impl Interp {
                 }
 
                 let class = self.heap.alloc(Object::Class(class));
+
+                // Now that the class exists, every method it declared learns
+                // which class that was. Done after rather than during, because a
+                // method's owner is the class object and the class object cannot
+                // be allocated before the table it holds.
+                let declared: Vec<ObjId> = self
+                    .heap
+                    .class(class)
+                    .methods
+                    .values()
+                    .filter_map(Value::handle)
+                    .collect();
+                for id in declared {
+                    self.heap.function_mut(id).owner = Some(class);
+                }
+
                 self.bind(slot, name, Value::Class(class), false, env);
                 Ok(Flow::Normal)
             }
@@ -225,6 +254,9 @@ impl Interp {
                     let func = Value::Function(self.heap.alloc(Object::Function(Function {
                         decl: Rc::clone(decl),
                         env,
+                        // Left `None`: an `extend` block is outside the class it
+                        // adds to, so it reaches what any outsider reaches.
+                        owner: None,
                     })));
                     self.extensions.insert((id, decl.name.clone()), func.clone());
                     if let Some(op) = decl.op {
@@ -264,6 +296,7 @@ impl Interp {
                                 .ok_or_else(|| {
                                     self.not_in_module(module, &name.name, name.span, loaded)
                                 })?;
+                            self.may_import(loaded, &name.name, name.span)?;
                             values.push(value);
                         }
                         for (name, value) in names.iter().zip(values) {

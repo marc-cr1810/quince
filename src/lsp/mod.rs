@@ -84,11 +84,17 @@ impl DocumentState {
 
         match self.type_of(before, offset) {
             Type::Class(class) => match &self.types {
-                Some(types) => types
-                    .members_of(&class)
-                    .into_iter()
-                    .filter(|symbol| !(on_class_object && symbol.kind == Kind::Field))
-                    .collect(),
+                Some(types) => {
+                    // Where the cursor is decides what it may reach, so the
+                    // editor stops offering what the language would refuse.
+                    let inside = types.class_at(offset);
+                    types
+                        .members_of(&class)
+                        .into_iter()
+                        .filter(|symbol| !(on_class_object && symbol.kind == Kind::Field))
+                        .filter(|symbol| types.may_offer(symbol.visibility, &class, inside))
+                        .collect()
+                }
                 None => Vec::new(),
             },
             Type::Module(module) => quince::sema::symbols::module_symbols(&module),

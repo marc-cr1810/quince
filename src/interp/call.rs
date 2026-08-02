@@ -9,11 +9,13 @@
 //! values are already in hand.
 
 
+use std::rc::Rc;
+
 use crate::error::{ErrorKind, QuinceError, Result};
 use crate::interp::error::{an, check_arity, frozen};
 use crate::interp::{Attr, Flow, Interp, MAX_DEPTH, out_of_stack};
 use crate::runtime::class::{Builtin, Instance};
-use crate::runtime::dict::Dict;
+use crate::runtime::dict::{Dict, Key};
 use crate::runtime::env::Env;
 use crate::runtime::heap::{ObjId, Object};
 use crate::runtime::value::Value;
@@ -71,7 +73,9 @@ impl Interp {
                 }
 
                 self.depth += 1;
+                self.reaching.push(func.owner);
                 let result = self.exec_scoped(&func.decl.body.stmts, scope);
+                self.reaching.pop();
                 self.depth -= 1;
 
                 // The one place a call into another module's code comes back
@@ -117,6 +121,18 @@ impl Interp {
                     payload: None,
                 }));
                 let instance = Value::Instance(instance_id);
+
+                // Declared fields, before `op init` — so an `init` assigning one
+                // overwrites a value that is already there, which is what makes
+                // `let balance = 0` followed by `self.balance = opening` read the
+                // way it looks. Rooted through `temps`, because an initializer is
+                // an arbitrary expression and may reach a safe point — the same
+                // reason the `op init` case below pushes the instance.
+                let mark = self.temps.len();
+                self.temps.push(instance.clone());
+                let initialized = self.init_fields(id, instance_id, span);
+                self.temps.truncate(mark);
+                initialized?;
 
                 // The `op init` the class resolved when it was built, not a
                 // lookup of the name `init` — a method merely *called* `init` is
@@ -275,6 +291,45 @@ impl Interp {
 
     /// Runs a conversion and keeps what it produced as `id`'s payload.
     ///
+    /// Runs the initializer of every field the class and its ancestors declared.
+    ///
+    /// Ancestors first, so a subclass redeclaring a name writes last and wins —
+    /// the same order [`Class::field`] reads them back in, which is what keeps
+    /// the value an instance holds and the declaration a report names in step.
+    ///
+    /// The chain is collected before anything runs, because an initializer is
+    /// arbitrary Quince code: it may allocate, collect, or construct another
+    /// instance of the same class, and none of that may happen while a borrow of
+    /// the class is being held.
+    fn init_fields(&mut self, class: ObjId, instance: ObjId, span: Span) -> Result<()> {
+        let mut chain = Vec::new();
+        let mut current = Some(class);
+        while let Some(id) = current {
+            chain.push(id);
+            current = self.heap.class(id).parent;
+        }
+
+        for id in chain.into_iter().rev() {
+            let declared = self.heap.class(id).fields.clone();
+            let Some(env) = self.heap.class(id).field_env else {
+                continue;
+            };
+            for field in declared {
+                let value = self.eval(&field.value, env)?;
+                if field.bind.freezes() {
+                    self.heap.freeze(&value);
+                }
+                let key = Key::Str(Rc::from(field.name.as_str()));
+                let written = self
+                    .heap
+                    .instance_mut(instance)
+                    .map(|held| held.fields.insert(key, value));
+                written.map_err(|_| frozen(&self.heap, &Value::Instance(instance), span))?;
+            }
+        }
+        Ok(())
+    }
+
     /// Both ways a payload comes to exist end here: an explicit `super.init(…)`,
     /// and the implicit construction a class declaring no `op init` gets. They are
     /// the same operation on purpose — an implicit `op init` is not a second rule,
