@@ -375,6 +375,12 @@ impl Interp {
         span: Span,
         origin: Option<&Expr>,
     ) -> Result<Value> {
+        // The annotation is part of the declaration being executed, so its span
+        // and the value's index the same text — except where the value came
+        // from somewhere else entirely, which is what `origin` being `None`
+        // means at a parameter or a return: the declaration may be in an
+        // imported module while the call is here.
+        let annotation_is_here = origin.is_some();
         // A name that is not a type at all is a different mistake from a value
         // that does not hold, and reporting it as the second blames the value
         // for the annotation being wrong. Checked here rather than at
@@ -393,7 +399,14 @@ impl Interp {
             if let Some(precise) = self.offending_element(ty, &value, span, origin) {
                 return Err(precise);
             }
-            return Err(does_not_hold(&self.heap, ty, &value, what, span));
+            return Err(does_not_hold(
+                &self.heap,
+                ty,
+                &value,
+                what,
+                span,
+                annotation_is_here,
+            ));
         }
         // Elements widen too, or `let xs: list[float] = [1, 2]` would hold ints
         // under an annotation reading `float` — the same contradiction §4.1
@@ -450,6 +463,7 @@ impl Interp {
                     item,
                     &format!("item {index}"),
                     written_at(origin, index).unwrap_or(span),
+                    origin.is_some(),
                 ))
             }
             ("dict", Value::Dict(id)) => {
@@ -475,6 +489,7 @@ impl Interp {
                         &key,
                         "the key",
                         at.unwrap_or(span),
+                        origin.is_some(),
                     ));
                 }
                 let arg = ty.args.get(1)?;
@@ -489,6 +504,7 @@ impl Interp {
                     held,
                     "the value",
                     at.unwrap_or(span),
+                    origin.is_some(),
                 ))
             }
             _ => None,
@@ -564,7 +580,10 @@ impl Interp {
             return Ok(value);
         };
         if !holds(ty, &value, &self.heap) {
-            return Err(does_not_hold(&self.heap, ty, &value, what, span));
+            // Never `true`. This annotation was stamped on the allocation when
+            // it crossed a boundary that may have been a different file, or in
+            // the REPL a different entry — so its span means nothing here.
+            return Err(does_not_hold(&self.heap, ty, &value, what, span, false));
         }
         Ok(match (&ty.name, &value) {
             (TypeName::Named(name), Value::Int(n)) if name == "float" => Value::Float(*n as f64),

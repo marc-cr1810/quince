@@ -21,12 +21,25 @@ use crate::syntax::token::Span;
 /// and a field — because they are one mistake and should read as one. `what`
 /// names the boundary, so the sentence says where rather than making the caret
 /// carry it alone.
+///
+/// `annotation_is_here` says whether [`TypeExpr::span`] indexes the same text
+/// this error will be drawn against. A [`Span`] is a byte range and nothing
+/// else — it does not know which source it came from — so a label placed at one
+/// is only meaningful while both belong to the same string.
+///
+/// They often do not. The REPL compiles each entry separately, so an annotation
+/// written on one line and violated on a later one has a span into a text that
+/// is no longer on screen; drawing it produced a caret under whatever character
+/// happened to sit at that offset. An imported module is the same problem with
+/// a different cause. Only a caller holding both halves of one compilation can
+/// answer, so only a caller says.
 pub(crate) fn does_not_hold(
     heap: &Heap,
     ty: &TypeExpr,
     value: &Value,
     what: &str,
     span: Span,
+    annotation_is_here: bool,
 ) -> Raised {
     let (message, help) = crate::sema::types::refusal(ty, value, heap, what);
     let mut err = QuinceError::new(message, span).with_kind(ErrorKind::Type);
@@ -40,7 +53,7 @@ pub(crate) fn does_not_hold(
     // and it is listed unlabelled, because the message one line up already says
     // what it is and every other diagnostic in the language marks its subject
     // exactly this way.
-    if ty.span != span && ty.span.end > ty.span.start {
+    if annotation_is_here && ty.span != span && ty.span.end > ty.span.start {
         err = err.with_labels([
             LabeledSpan::unlabelled(span),
             LabeledSpan::new(ty.span, format!("declared `{}` here", ty.written())),
