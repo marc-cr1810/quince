@@ -1,0 +1,8 @@
+Error: quince::TypeError
+
+ × item 3 is `int`, but this is a string
+  ╭─[err_element_caret.qn:1:31]
+1 │ let xs: list[int] = [1, 2, 3, "hi"]
+  ·              ─┬─              ────
+  ·               ╰── declared `int` here
+  ╰────

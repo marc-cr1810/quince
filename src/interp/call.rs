@@ -23,6 +23,19 @@ use crate::sema::types::holds;
 use crate::syntax::ast::{Expr, ExprKind, Op, TypeExpr, TypeName};
 use crate::syntax::token::Span;
 
+/// Where a container literal's `index`th element was written, if the value came
+/// from one.
+///
+/// `None` for every value that did not — one returned from a function, or read
+/// out of another name — where the best the caret can do is the expression as a
+/// whole.
+fn written_at(origin: Option<&Expr>, index: usize) -> Option<Span> {
+    match &origin?.kind {
+        ExprKind::List(items) => Some(items.get(index)?.span),
+        _ => None,
+    }
+}
+
 impl Interp {
     pub(crate) fn call(&mut self, target: Value, args: Vec<Value>, span: Span) -> Result<Value> {
         match target {
@@ -339,6 +352,24 @@ impl Interp {
         what: &str,
         span: Span,
     ) -> Result<Value> {
+        self.coerced_from(ty, value, what, span, None)
+    }
+
+    /// The same, told where the value was written.
+    ///
+    /// `origin` is the expression that produced it, when the caller has one.
+    /// It buys precision a `Value` cannot: by the time a list is checked it is
+    /// a heap object whose elements have no spans, so `[1, 2, 3, "hi"]` failing
+    /// on its fourth element could only underline the whole binding. With the
+    /// literal in hand the caret lands on `"hi"`.
+    pub(super) fn coerced_from(
+        &mut self,
+        ty: &TypeExpr,
+        value: Value,
+        what: &str,
+        span: Span,
+        origin: Option<&Expr>,
+    ) -> Result<Value> {
         // A name that is not a type at all is a different mistake from a value
         // that does not hold, and reporting it as the second blames the value
         // for the annotation being wrong. Checked here rather than at
@@ -354,7 +385,7 @@ impl Interp {
             // the element rather than about itself — "this is a list" when a
             // list was asked for says nothing. Rewalked rather than threaded out
             // of `holds`, because this runs once, on the way to an error.
-            if let Some(precise) = self.offending_element(ty, &value, span) {
+            if let Some(precise) = self.offending_element(ty, &value, span, origin) {
                 return Err(precise);
             }
             return Err(does_not_hold(&self.heap, ty, &value, what, span));
@@ -389,7 +420,13 @@ impl Interp {
     ///
     /// `None` when the container itself was the mistake — a dict where a list
     /// was asked for — which is the case the caller already words well.
-    fn offending_element(&mut self, ty: &TypeExpr, value: &Value, span: Span) -> Option<Raised> {
+    fn offending_element(
+        &mut self,
+        ty: &TypeExpr,
+        value: &Value,
+        span: Span,
+        origin: Option<&Expr>,
+    ) -> Option<Raised> {
         let name = match &ty.name {
             TypeName::Named(name) => name.as_str(),
             TypeName::Any => return None,
@@ -407,19 +444,47 @@ impl Interp {
                     arg,
                     item,
                     &format!("item {index}"),
-                    span,
+                    written_at(origin, index).unwrap_or(span),
                 ))
             }
             ("dict", Value::Dict(id)) => {
                 let dict = self.heap.dict(id).clone();
+                // By position, so the caret can find the entry in the literal
+                // that produced it. Sound only while the two line up, which a
+                // repeated key breaks — `{"a": 1, "a": 2}` is two entries
+                // written and one stored — so the length is checked before the
+                // index is trusted, and the whole literal is underlined when it
+                // is not.
+                let aligned = |origin: Option<&Expr>| match &origin?.kind {
+                    ExprKind::Dict(pairs) if pairs.len() == dict.len() => Some(pairs.clone()),
+                    _ => None,
+                };
                 if let Some(arg) = ty.args.first()
-                    && let Some(key) = dict.keys().find(|key| !holds(arg, key, &self.heap))
+                    && let Some(index) = dict.keys().position(|key| !holds(arg, &key, &self.heap))
                 {
-                    return Some(does_not_hold(&self.heap, arg, &key, "the key", span));
+                    let key = dict.keys().nth(index)?;
+                    let at = aligned(origin).and_then(|pairs| Some(pairs.get(index)?.0.span));
+                    return Some(does_not_hold(
+                        &self.heap,
+                        arg,
+                        &key,
+                        "the key",
+                        at.unwrap_or(span),
+                    ));
                 }
                 let arg = ty.args.get(1)?;
-                let held = dict.values().find(|held| !holds(arg, held, &self.heap))?;
-                Some(does_not_hold(&self.heap, arg, held, "the value", span))
+                let index = dict
+                    .values()
+                    .position(|held| !holds(arg, held, &self.heap))?;
+                let held = dict.values().nth(index)?;
+                let at = aligned(origin).and_then(|pairs| Some(pairs.get(index)?.1.span));
+                Some(does_not_hold(
+                    &self.heap,
+                    arg,
+                    held,
+                    "the value",
+                    at.unwrap_or(span),
+                ))
             }
             _ => None,
         }
@@ -671,7 +736,13 @@ impl Interp {
                 let mut value = self.eval(&field.value, env)?;
                 if let Some(ty) = field.ty.clone() {
                     let named = format!("`{}`", field.name);
-                    value = self.coerced(&ty, value, &named, span)?;
+                    value = self.coerced_from(
+                        &ty,
+                        value,
+                        &named,
+                        field.value.span,
+                        Some(&field.value),
+                    )?;
                 }
                 if field.bind.freezes() {
                     self.heap.freeze(&value);

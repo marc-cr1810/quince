@@ -1,0 +1,8 @@
+Error: quince::TypeError
+
+ × the value is `int`, but this is a string
+  ╭─[err_entry_caret.qn:1:42]
+1 │ let d: dict[string, int] = {"a": 1, "b": "x"}
+  ·                     ─┬─                  ───
+  ·                      ╰── declared `int` here
+  ╰────

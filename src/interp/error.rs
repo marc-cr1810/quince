@@ -6,7 +6,7 @@
 
 use std::rc::Rc;
 
-use crate::error::{ErrorKind, QuinceError, Raised, Result};
+use crate::error::{ErrorKind, LabeledSpan, QuinceError, Raised, Result};
 use crate::interp::{Interp, KIND, MESSAGE};
 use crate::runtime::class::Instance;
 use crate::runtime::dict::{Dict, Key};
@@ -29,7 +29,23 @@ pub(crate) fn does_not_hold(
     span: Span,
 ) -> Raised {
     let (message, help) = crate::sema::types::refusal(ty, value, heap, what);
-    let err = QuinceError::new(message, span).with_kind(ErrorKind::Type);
+    let mut err = QuinceError::new(message, span).with_kind(ErrorKind::Type);
+    // The annotation, when it is somewhere the caret is not. Two marks on one
+    // line — what turned up, and what was required — save the reader looking
+    // for the declaration that made this a mistake.
+    //
+    // The offending value keeps a bare underline rather than a label of its
+    // own. Supplying any label at all replaces the plain caret a report would
+    // otherwise draw, so the value has to be listed explicitly to stay marked —
+    // and it is listed unlabelled, because the message one line up already says
+    // what it is and every other diagnostic in the language marks its subject
+    // exactly this way.
+    if ty.span != span && ty.span.end > ty.span.start {
+        err = err.with_labels([
+            LabeledSpan::unlabelled(span),
+            LabeledSpan::new(ty.span, format!("declared `{}` here", ty.written())),
+        ]);
+    }
     match help {
         Some(help) => err.with_help(help),
         None => err,

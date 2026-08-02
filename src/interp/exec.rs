@@ -41,11 +41,20 @@ impl Interp {
                 doc: _,
                 slot,
             } => {
-                let mut value = self.eval(value, env)?;
+                let initializer = value;
+                let mut value = self.eval(initializer, env)?;
                 // Against the annotation before the name is bound, so a refused
                 // value is never observable under the name that refused it.
+                // The initializer goes too, so a report about one element of a
+                // literal can underline that element rather than the statement.
                 if let Some(ty) = ty {
-                    value = self.coerced(ty, value, &format!("`{name}`"), stmt.span)?;
+                    value = self.coerced_from(
+                        ty,
+                        value,
+                        &format!("`{name}`"),
+                        initializer.span,
+                        Some(initializer),
+                    )?;
                 }
                 // Freezing before binding, so that a `const` can never be
                 // observed thawed — not that anything runs in between, but the
