@@ -37,8 +37,10 @@
 use crate::error::{ErrorKind, QuinceError, Raised};
 use crate::sema::infer::Types;
 use crate::sema::types::{Type, stated};
+use crate::runtime::value::Native;
+use crate::sema::types::builtin_method;
 use crate::syntax::ast::{
-    BindKind, Block, Expr, ExprKind, FieldDecl, Stmt, StmtKind, TypeExpr, TypeName,
+    BindKind, Block, Expr, ExprKind, FieldDecl, Param, Stmt, StmtKind, TypeExpr, TypeName,
 };
 
 /// Every type mistake decidable from the source, in source order.
@@ -73,7 +75,7 @@ pub fn check(program: &[Stmt], types: &Types) -> Vec<Raised> {
 /// session.
 #[derive(Default)]
 struct Bindings {
-    scopes: Vec<Vec<(String, BindKind)>>,
+    scopes: Vec<Vec<(String, BindKind, Option<TypeExpr>)>>,
 }
 
 impl Bindings {
@@ -85,20 +87,29 @@ impl Bindings {
         self.scopes.pop();
     }
 
-    fn declare(&mut self, name: &str, bind: BindKind) {
+    fn declare(&mut self, name: &str, bind: BindKind, ty: Option<TypeExpr>) {
         if let Some(scope) = self.scopes.last_mut() {
-            scope.push((name.to_string(), bind));
+            scope.push((name.to_string(), bind, ty));
         }
     }
 
     /// The word `name` was bound with, innermost first.
     fn kind(&self, name: &str) -> Option<BindKind> {
+        self.found(name).map(|(bind, _)| bind)
+    }
+
+    /// What the declaration annotated `name` as, if it annotated it.
+    fn annotation(&self, name: &str) -> Option<TypeExpr> {
+        self.found(name).and_then(|(_, ty)| ty)
+    }
+
+    fn found(&self, name: &str) -> Option<(BindKind, Option<TypeExpr>)> {
         self.scopes.iter().rev().find_map(|scope| {
             scope
                 .iter()
                 .rev()
-                .find(|(bound, _)| bound == name)
-                .map(|(_, bind)| *bind)
+                .find(|(bound, ..)| bound == name)
+                .map(|(_, bind, ty)| (*bind, ty.clone()))
         })
     }
 }
@@ -118,7 +129,7 @@ fn one(stmt: &Stmt, types: &Types, bound: &mut Bindings, found: &mut Vec<Raised>
                 against(ty, value, &format!("`{name}`"), types, found);
             }
             expression(value, types, bound, found);
-            bound.declare(name, *bind);
+            bound.declare(name, *bind, ty.clone());
         }
         StmtKind::Class { methods, fields, .. } => {
             for field in fields {
@@ -175,7 +186,7 @@ fn block(block: &Block, types: &Types, bound: &mut Bindings, found: &mut Vec<Rai
 fn body(decl: &std::rc::Rc<crate::syntax::ast::FnDecl>, types: &Types, bound: &mut Bindings, found: &mut Vec<Raised>) {
     bound.push();
     for param in &decl.params {
-        bound.declare(&param.name, param.bind);
+        bound.declare(&param.name, param.bind, param.ty.clone());
     }
     stmts(&decl.body.stmts, types, bound, found);
     bound.pop();
@@ -206,6 +217,15 @@ fn expression(expr: &Expr, types: &Types, bound: &Bindings, found: &mut Vec<Rais
 
     // Writing to a name bound once. The resolver refuses this for a local and
     // cannot see a global, so within one file this is what answers for one.
+    if let ExprKind::Assign { target, value } = &expr.kind
+        && let ExprKind::Var(var) = &target.kind
+    {
+        // Against the annotation the *declaration* carried, since that is what
+        // constrains the name rather than the first value bound to it.
+        if let Some(ty) = bound.annotation(&var.name) {
+            against(&ty, value, &format!("`{}`", var.name), types, found);
+        }
+    }
     if let ExprKind::Assign { target, .. } = &expr.kind
         && let ExprKind::Var(var) = &target.kind
         && let Some(bind) = bound.kind(&var.name)
@@ -222,6 +242,13 @@ fn expression(expr: &Expr, types: &Types, bound: &Bindings, found: &mut Vec<Rais
         ));
     }
 
+    // Reaching a member the declaration put out of reach. `may_offer` is the
+    // same rule the completion list follows, so what the editor offers and what
+    // it squiggles cannot disagree.
+    if let ExprKind::Field { target, name, .. } = &expr.kind {
+        visibility(target, name, expr.span, types, found);
+    }
+
     let ExprKind::Call { callee, args } = &expr.kind else {
         // `xs[i] = v` is the other way into a typed container.
         if let ExprKind::Assign { target, value } = &expr.kind
@@ -233,9 +260,29 @@ fn expression(expr: &Expr, types: &Types, bound: &Bindings, found: &mut Vec<Rais
         }
         return;
     };
+    // A call to a `fn` the program declared, against the parameters it named.
+    if let ExprKind::Var(var) = &callee.kind {
+        if let Some(decl) = types.function(&var.name) {
+            arguments(&decl.params, args, types, found);
+        } else if let Some(native) = types.native(&var.name) {
+            native_arguments(native, args, types, found);
+        }
+    }
+
     let ExprKind::Field { target, name, .. } = &callee.kind else {
         return;
     };
+
+    // A method call: the program's own, or the library's.
+    let receiver = receiver_type(target, types);
+    if let Some(class) = receiver.class_name() {
+        if let Some(decl) = types.method_of(class, name) {
+            // The receiver is `params[0]` and nobody writes it.
+            arguments(decl.params.get(1..).unwrap_or(&[]), args, types, found);
+        } else if let Some(native) = builtin_method(class, name) {
+            native_arguments(native, args, types, found);
+        }
+    }
 
     // Mutating what `const` froze. `final` is the other axis and is untouched:
     // it binds the name once and leaves the object alone, so a `final` list
@@ -263,6 +310,78 @@ fn expression(expr: &Expr, types: &Types, bound: &Bindings, found: &mut Vec<Rais
     }
 }
 
+/// Refuses each argument the declaration has an annotation for.
+fn arguments(params: &[Param], args: &[Expr], types: &Types, found: &mut Vec<Raised>) {
+    // A mismatched count is an arity error, reported when the call runs. Saying
+    // something about the arguments of a call that cannot happen would be two
+    // complaints about one mistake.
+    if params.len() != args.len() {
+        return;
+    }
+    for (param, arg) in params.iter().zip(args) {
+        if let Some(ty) = &param.ty {
+            against(ty, arg, &format!("`{}`", param.name), types, found);
+        }
+    }
+}
+
+/// The same for a builtin, whose parameters name a *set* of types.
+fn native_arguments(native: &Native, args: &[Expr], types: &Types, found: &mut Vec<Raised>) {
+    if native.params.len() != args.len() {
+        return;
+    }
+    for (param, arg) in native.params.iter().zip(args) {
+        if param.accepts.is_empty() {
+            continue;
+        }
+        let held = types.of_expr(arg.span.start);
+        let Some(actual) = held.class_name() else {
+            continue;
+        };
+        // The same one-sidedness as everywhere else: an int passed where a
+        // float is taken is fine, and so is anything the pass cannot name.
+        let admitted = param.accepts.iter().any(|builtin| {
+            builtin.name() == actual || (builtin.name() == "float" && actual == "int")
+        });
+        if admitted {
+            continue;
+        }
+        found.push(refusal(
+            format!("`{}` is {}, but this is {}", param.name, param.written(), an(actual)),
+            format!("`{}` takes {} there", native.name, param.written()),
+            arg.span,
+        ));
+    }
+}
+
+/// Refuses a member reached from outside the visibility it was declared with.
+fn visibility(
+    target: &Expr,
+    name: &str,
+    span: crate::syntax::token::Span,
+    types: &Types,
+    found: &mut Vec<Raised>,
+) {
+    let Some(class) = receiver_type(target, types).class_name().map(str::to_string) else {
+        return;
+    };
+    let Some((reach, owner)) = types.reach_of(&class, name) else {
+        return;
+    };
+    if types.may_offer(reach, &class, types.class_at(span.start)) {
+        return;
+    }
+    let word = reach.word().unwrap_or("private");
+    found.push(refusal(
+        format!("`{name}` is {word} to `{owner}`"),
+        match reach.closes_subclass() {
+            true => format!("only methods declared inside `{owner}` may reach it"),
+            false => format!("only methods of `{owner}` and of the classes extending it may reach it"),
+        },
+        span,
+    ));
+}
+
 /// What a receiver holds.
 ///
 /// By name where the receiver is one, because [`Types::of_expr`] is keyed by
@@ -273,6 +392,15 @@ fn expression(expr: &Expr, types: &Types, bound: &Bindings, found: &mut Vec<Rais
 fn receiver_type(expr: &Expr, types: &Types) -> Type {
     match &expr.kind {
         ExprKind::Var(var) => types.of_name(&var.name, expr.span.start),
+        // A literal is its own answer, and has to be given directly for the
+        // same reason a name does: `"a,b"` and `"a,b".split` begin at the same
+        // byte, so the recorded type is the whole call's.
+        ExprKind::Str(_) => Type::class("string"),
+        ExprKind::Int(_) => Type::class("int"),
+        ExprKind::Float(_) => Type::class("float"),
+        ExprKind::Bool(_) => Type::class("bool"),
+        ExprKind::List(_) => Type::class("list"),
+        ExprKind::Dict(_) => Type::class("dict"),
         _ => types.of_expr(expr.span.start),
     }
 }

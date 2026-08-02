@@ -737,3 +737,81 @@ fn shadowing_is_respected_by_the_binding_checks() {
         assert_eq!(warnings(src), Vec::<String>::new(), "for {src:?}");
     }
 }
+
+#[test]
+fn a_call_is_checked_against_the_parameters_it_names() {
+    assert_eq!(
+        warnings("fn f(n: int) {\n    return n\n}\nlet a = f(\"s\")\n"),
+        vec!["`n` is `int`, but this is a string"]
+    );
+    // A method, with the receiver left out of the count.
+    assert_eq!(
+        warnings(
+            "class C {\n    op init() { }\n    fn take(n: int) {\n        return n\n    }\n}\n\
+             let c = C()\nlet a = c.take(\"s\")\n"
+        ),
+        vec!["`n` is `int`, but this is a string"]
+    );
+    // The library, whose parameters name a set of types.
+    assert_eq!(
+        warnings("let s = \"a,b\".split(5)\n"),
+        vec!["`separator` is `string`, but this is an int"]
+    );
+    assert_eq!(
+        warnings("from math import floor\nlet n = floor(\"x\")\n"),
+        vec!["`n` is `int` or `float`, but this is a string"]
+    );
+
+    let quiet = [
+        "fn f(n: int) {\n    return n\n}\nlet a = f(1)\n",
+        // An unannotated parameter takes whatever it is handed.
+        "fn f(n) {\n    return n\n}\nlet a = f(\"s\")\n",
+        // Widening, one level down as everywhere.
+        "fn f(n: float) {\n    return n\n}\nlet a = f(1)\n",
+        "from math import floor\nlet n = floor(2)\n",
+        // A mismatched count is an arity error, reported when the call runs —
+        // two complaints about one mistake would be worse than one.
+        "fn f(n: int) {\n    return n\n}\nlet a = f()\n",
+    ];
+    for src in quiet {
+        assert_eq!(warnings(src), Vec::<String>::new(), "for {src:?}");
+    }
+}
+
+#[test]
+fn reaching_a_hidden_member_is_reported() {
+    let src = "class Account {\n\
+                   private let balance = 0\n\
+                   protected let owner = \"nobody\"\n\
+                   let open = 1\n\
+               }\n\
+               let a = Account()\n";
+    assert_eq!(
+        warnings(&format!("{src}let n = a.balance\n")),
+        vec!["`balance` is private to `Account`"]
+    );
+    assert_eq!(
+        warnings(&format!("{src}let n = a.owner\n")),
+        vec!["`owner` is protected to `Account`"]
+    );
+    assert_eq!(warnings(&format!("{src}let n = a.open\n")), Vec::<String>::new());
+}
+
+#[test]
+fn a_reassignment_is_checked_against_the_declarations_annotation() {
+    assert_eq!(
+        warnings("let x: int = 0\nx = \"s\"\n"),
+        vec!["`x` is `int`, but this is a string"]
+    );
+    let quiet = [
+        "let x: int = 0\nx = 5\n",
+        // Widening.
+        "let x: float = 0.0\nx = 5\n",
+        // An unannotated `let` takes whatever it is given, and always could.
+        "let x = 0\nx = \"s\"\n",
+    ];
+    for src in quiet {
+        assert_eq!(warnings(src), Vec::<String>::new(), "for {src:?}");
+    }
+}
+

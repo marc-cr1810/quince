@@ -46,6 +46,10 @@ pub(crate) struct Infer {
     pub(crate) computing_fields: HashSet<String>,
     pub(crate) fields: HashMap<String, HashMap<String, Type>>,
     pub(crate) function_returns: HashMap<String, Type>,
+    /// The declaration behind each of those, for anything wanting parameters.
+    pub(crate) fn_decls: HashMap<String, Rc<FnDecl>>,
+    /// Which builtin each imported name stands for.
+    pub(crate) natives: HashMap<String, &'static crate::runtime::value::Native>,
     pub(crate) method_returns: HashMap<(String, String), Type>,
     pub(crate) exprs: HashMap<u32, Type>,
     pub(crate) bindings: Vec<Binding>,
@@ -284,6 +288,7 @@ impl Infer {
                 let returns = self.function(decl, None);
                 self.function_returns
                     .insert(decl.name.clone(), returns.clone());
+                self.fn_decls.insert(decl.name.clone(), Rc::clone(decl));
                 self.bind_symbol(symbol_for(decl, Kind::Function, returns), scope);
             }
             StmtKind::Class { name, methods, fields, doc, .. } => {
@@ -330,6 +335,14 @@ impl Infer {
                         for name in names {
                             match members.iter().find(|symbol| symbol.name == name.name) {
                                 Some(symbol) if known => {
+                                    // Which native the name now stands for, so
+                                    // `floor(x)` is checked the way
+                                    // `math.floor(x)` is. The symbol carries
+                                    // the documentation and the parameter
+                                    // *names*; this carries what they accept.
+                                    if let Some(native) = module_native(module, &name.name) {
+                                        self.natives.insert(name.name.clone(), native);
+                                    }
                                     self.bind_symbol(symbol.clone(), stmt.span.start)
                                 }
                                 _ => self.bind(

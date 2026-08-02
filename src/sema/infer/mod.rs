@@ -134,6 +134,17 @@ pub struct Types {
     /// a second declaration holds the last one, which is what the evaluator
     /// would find too.
     pub(crate) functions: HashMap<String, Type>,
+    /// The declaration of each `fn`, by name.
+    ///
+    /// Kept beside the return type rather than instead of it: the return is
+    /// what an expression's type comes from and is answered constantly, while
+    /// this is read only when something wants the *parameters* — which nothing
+    /// did until the static check started looking at calls.
+    pub(crate) fn_decls: HashMap<String, Rc<FnDecl>>,
+    /// Which builtin each imported name stands for — `from math import floor`
+    /// makes `floor` a name for one, and a call through it should be checked
+    /// exactly as `math.floor` is.
+    pub(crate) natives: HashMap<String, &'static crate::runtime::value::Native>,
     /// What each method returns, by the class that declares it and its name.
     pub(crate) methods: HashMap<(String, String), Type>,
 }
@@ -202,6 +213,55 @@ impl Types {
             && self
                 .symbol(path, offset)
                 .is_some_and(|symbol| symbol.kind == Kind::Class)
+    }
+
+    /// The builtin `name` stands for, if an import made it one.
+    pub fn native(&self, name: &str) -> Option<&'static crate::runtime::value::Native> {
+        self.natives.get(name).copied()
+    }
+
+    /// The `fn` declared under `name`, if the program declared one.
+    pub fn function(&self, name: &str) -> Option<&Rc<FnDecl>> {
+        self.fn_decls.get(name)
+    }
+
+    /// The method `name` on `class`, searching its ancestors.
+    pub fn method_of(&self, class: &str, name: &str) -> Option<&Rc<FnDecl>> {
+        let mut current = class;
+        let mut seen = 0;
+        loop {
+            let info = self.classes.get(current)?;
+            if let Some(decl) = info.methods.get(name) {
+                return Some(decl);
+            }
+            // The hierarchy may be cyclic — `class A extends B` and the reverse
+            // is refused at run time, not here — so the walk is bounded.
+            seen += 1;
+            if seen > 64 {
+                return None;
+            }
+            current = info.parent.as_deref()?;
+        }
+    }
+
+    /// How far `name` reaches on `class`, if the program declared it.
+    pub fn reach_of(&self, class: &str, name: &str) -> Option<(Visibility, String)> {
+        let mut current = class.to_string();
+        let mut seen = 0;
+        loop {
+            let info = self.classes.get(&current)?;
+            if let Some(visibility) = info.fields.get(name) {
+                return Some((*visibility, current));
+            }
+            if let Some(decl) = info.methods.get(name) {
+                return Some((decl.visibility, current));
+            }
+            seen += 1;
+            if seen > 64 {
+                return None;
+            }
+            current = info.parent.clone()?;
+        }
     }
 
     /// Every class the program declared, for a list an editor offers.
@@ -491,6 +551,8 @@ pub fn infer(program: &[Stmt]) -> Types {
         classes: pass.classes,
         fields: pass.fields,
         functions: pass.function_returns,
+        fn_decls: pass.fn_decls,
+        natives: pass.natives,
         methods: pass.method_returns,
     }
 }
