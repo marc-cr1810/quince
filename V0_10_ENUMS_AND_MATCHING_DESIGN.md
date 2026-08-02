@@ -1,7 +1,7 @@
 # Quince v0.10 — enums, pattern matching, and the containers that need them
 
 Design for the milestone after v0.9. It adds algebraic data types (`enum`), the built-in
-`option[T]` and `result[T, E]`, error propagation (`?`), exhaustive `match`, `if let`, and
+`Option[T]` and `Result[T, E]`, error propagation (`?`), exhaustive `match`, `if let`, and
 four container types that have been waiting on something: fixed-size `array[T, N]`, binary
 `bytes`, hash `set[T]`, and a real `range` object.
 
@@ -14,7 +14,7 @@ codebase has already recorded, the reversal is argued rather than assumed.
 ## 1. What this milestone adds
 
 1. **`enum`** — unit and payload-carrying variants, with methods and operators. §5.
-2. **`option[T]` and `result[T, E]`** as built-in generic enums. §4.
+2. **`Option[T]` and `Result[T, E]`** as built-in generic enums. §4.
 3. **The `?` propagation operator** — unwrap, or early-return the failure. §4.3.
 4. **Exhaustive `match`**, as an expression, over enums, tuples, and primitives. §6.
 5. **`if let`** for the single-variant case. §6.5.
@@ -35,12 +35,19 @@ v0.9 §3.5, and what this milestone adds is pattern matching over it (§6.3).
 This milestone is the fourth of four that began as one document, and it is not startable
 without the three before it. Several of their pieces are load-bearing here.
 
-- **Generic classes with reified headers.** `option[T]` and `result[T, E]` are *generic
-  enums*. Everything v0.9 §3.1–3.4 builds — type parameters, bounds, const value
-  parameters, `O(1)` `is` against a reified header — is what they are made of. This is the
-  ordering constraint that put generics in their own milestone ahead of this one.
-- **`array[T, N]` needs `const N: int`**, specified in v0.9 §3.3 for exactly this.
-- **`T?` and `nil` already mean absence.** `option[T]` is a second answer to a question v0.7
+- **`Type` carries arguments, and allocations carry a reified header** — v0.7 tranche 2.
+  This, and not v0.9, is what `Option[T]` and `Result[T, E]` are built out of. They are
+  *built-in* generics, so they need exactly what `list[T]` and `dict[K, V]` needed and
+  nothing more; an earlier draft said this milestone waited on user generics because
+  `Option[T]` is a generic enum, and that conflated the two. A built-in generic implemented
+  in Rust does not go through `class Name[T]` any more than `list` does.
+- **v0.9 is still a prerequisite, for three narrower things:** `tuple`, without which §6.3's
+  tuple patterns have nothing to match; `const N: int`, without which `array[T, N]` (§7.3)
+  has no arity; and the generic parameter-list grammar, without which a *user* cannot write
+  `enum Tree[T]` even though the built-ins are generic. Drop all three and enums could in
+  principle precede generics — but tuple patterns are half of what makes `match` worth
+  having, so the ordering stands.
+- **`T?` and `nil` already mean absence.** `Option[T]` is a second answer to a question v0.7
   answered, and §3 settles that before anything else here is built.
 - **`tuple` is v0.9's.** This milestone matches on it, and does not define it.
 - **Slicing is `x[a:b]`,** a `Slice` node, because there was no value meaning "1 to 3".
@@ -81,23 +88,23 @@ and is the first test to write.
 
 ## 3. The decision that gates the rest
 
-v0.7 gives the language `T?` and `nil`. This milestone gives it `option[T]` with
-`some`/`none`. Those are two mechanisms for absence, and shipping both without a stated
+v0.7 gives the language `T?` and `nil`. This milestone gives it `Option[T]` with
+`Some`/`None`. Those are two mechanisms for absence, and shipping both without a stated
 relationship is the worst available outcome: every API author picks one by coin flip and
 every caller learns both.
 
 v0.7 §10 lays out the three coherent answers. **This document assumes answer 1** — `T?` is
-sugar for `option[T]` — and everything below is written on it:
+sugar for `Option[T]` — and everything below is written on it:
 
-- `int?` and `option[int]` are one type with two spellings. `nil` is how `option.none` prints
+- `int?` and `Option[int]` are one type with two spellings. `nil` is how `Option.None` prints
   and how it is written in a value position.
 - `?.` and `??` are sugar over `match`, and behave exactly as v0.7 §3.8 specifies.
 - `expr?` (§4.3) works on either spelling, because there is only one thing there.
-- `if let option.some(x) = …` and `if x is int` narrow the same value, and both are allowed
+- `if let Option.Some(x) = …` and `if x is int` narrow the same value, and both are allowed
   to (§6.5).
-- v0.7's `d[key] -> V?` needs no change and *gains* something: `option[option[int]]` is a
+- v0.7's `d[key] -> V?` needs no change and *gains* something: `Option[Option[int]]` is a
   real type where `int??` was refused, so a dict can finally distinguish a missing key from
-  a stored `nil`. Whether `d[key]` should therefore answer `option[V]` in its written
+  a stored `nil`. Whether `d[key]` should therefore answer `Option[V]` in its written
   signature is the one loose thread, and §10 keeps it.
 
 If the answer turns out to be 2 or 3 instead, §4, §6.5, and §7.2 are the sections that
@@ -105,51 +112,78 @@ change, and they change substantially. That is why this is §3 and not an append
 
 ---
 
-## 4. Built-in `option[T]` and `result[T, E]`
+## 4. Built-in `Option[T]` and `Result[T, E]`
 
-Following Quince's lowercase convention for built-in types (`int`, `list`, `dict`),
-`option[T]` and `result[T, E]` are built-in generic enums, and their variants are lowercase
-too. A user's enums are conventionally PascalCase with PascalCase variants, as the
-language's classes already are — so `result.ok` beside `HttpStatus.Ok` is the distinction
-the language already draws between `list` and `Stack`, not an inconsistency.
+`Option[T]` and `Result[T, E]` are built-in generic enums, and they are **PascalCase**
+against the lowercase convention every other built-in type follows (`int`, `list`, `dict`,
+`set`, `tuple`, `bytes`, `range`). That is a deliberate exception and it is worth the two
+paragraphs.
 
-### 4.1 `option[T]`
+**The decisive reason is that a lowercase `result` would burn the identifier.** A built-in
+type's name is not merely conventional in Quince — the resolver refuses to let a binding
+take it, with `` `list` is the name of a type built into the language / a type's name cannot
+also be a variable``. So a lowercase `result` would make `let result = …` a hard error in
+every program forever, and `tests/cases/extend_op_additive.qn` already contains one. It is
+among the most common variable names in programming, and it is exactly the name you reach
+for inside the function that builds one:
 
 ```quince
-builtin enum option[T] {
-    some(value: T),
-    none
-}
-
-fn find_user(id: int): option[string] {
-    if id == 101 {
-        return option.some("Alice")
-    }
-    return option.none
+fn parse(s: string): Result[int, string] {
+    let result = 0              # fine — `Result` is the type, `result` is a variable
+    …
+    return Result.Ok(result)
 }
 ```
 
-`option[T]` is the type `T?` is a spelling of (§3). `find_user` could equally be written
+Under the lowercase spelling that function cannot be written at all. No other built-in has
+this problem, because nobody names a variable `list` inside the function that calls `list()`.
+
+**The second reason is that it makes a rule rather than an exception.** Every lowercase
+built-in is a *class*; `Option` and `Result` would be the only built-in *enums*. Reading the
+convention as "built-in classes are lowercase, enums are PascalCase" costs nothing and gains
+consistency where it is actually looked at: `Result.Ok` and `HttpStatus.Ok` are the same
+shape, and a reader learns one story about how a variant is written rather than two.
+
+What is lost is real and small: casing no longer tells you on sight whether a type is
+built-in. It told you that for classes and it still does.
+
+### 4.1 `Option[T]`
+
+```quince
+builtin enum Option[T] {
+    Some(value: T),
+    None
+}
+
+fn find_user(id: int): Option[string] {
+    if id == 101 {
+        return Option.Some("Alice")
+    }
+    return Option.None
+}
+```
+
+`Option[T]` is the type `T?` is a spelling of (§3). `find_user` could equally be written
 `fn find_user(id: int): string?` with `return nil`, and means the same thing.
 
-### 4.2 `result[T, E]`
+### 4.2 `Result[T, E]`
 
 ```quince
-builtin enum result[T, E] {
-    ok(value: T),
-    err(error: E)
+builtin enum Result[T, E] {
+    Ok(value: T),
+    Err(error: E)
 }
 
-fn parse_port(s: string): result[int, string] {
+fn parse_port(s: string): Result[int, string] {
     if is_numeric(s) {
-        return result.ok(int(s))
+        return Result.Ok(int(s))
     }
-    return result.err("Invalid port number: " + s)
+    return Result.Err("Invalid port number: " + s)
 }
 ```
 
-`result` gets no short spelling. It is also **not** how the language reports errors:
-`try`/`catch`/`throw` landed in v0.5 and stays. `result` is for a failure the caller is
+`Result` gets no short spelling. It is also **not** how the language reports errors:
+`try`/`catch`/`throw` landed in v0.5 and stays. `Result` is for a failure the caller is
 expected to handle in the ordinary path; `throw` is for one that unwinds. A language with
 both owes its reader a sentence on when to reach for which, and that is the sentence.
 
@@ -159,25 +193,25 @@ The `?` suffix unwraps on success, or **early-returns** from the enclosing funct
 failure.
 
 ```quince
-fn setup_server(config_str: string): result[int, string] {
-    # If parse_port answers result.err, `?` early-returns that err immediately.
+fn setup_server(config_str: string): Result[int, string] {
+    # If parse_port answers Result.Err, `?` early-returns that err immediately.
     let port: int = parse_port(config_str)?
-    return result.ok(port)
+    return Result.Ok(port)
 }
 ```
 
 Rules:
 
-1. **In a function returning `result[T, E]`:** `expr?` unwraps `ok(val)`. On `err(e)` it
-   early-returns `result.err(e)`, and `e` must hold as the declared `E`.
-2. **In a function returning `option[T]` (equivalently `T?`):** `expr?` unwraps `some(val)`
-   and early-returns `option.none` on `none`.
-3. **Mixing them is refused.** `expr?` on a `result` inside a function returning `option[T]`
+1. **In a function returning `Result[T, E]`:** `expr?` unwraps `Ok(val)`. On `Err(e)` it
+   early-returns `Result.Err(e)`, and `e` must hold as the declared `E`.
+2. **In a function returning `Option[T]` (equivalently `T?`):** `expr?` unwraps `Some(val)`
+   and early-returns `Option.None` on `None`.
+3. **Mixing them is refused.** `expr?` on a `Result` inside a function returning `Option[T]`
    would discard the error — a thing to do on purpose, not by omitting two characters.
 4. **In a function returning anything else**, `?` is refused at resolution:
    ```text
    DeclarationError: cannot use '?' operator in function returning 'int';
-   function must return result, option, or T?
+   function must return Result, Option, or T?
    ```
 5. **Inside a `const fn`, `?` is allowed.** An early return mutates nothing, and v0.8 §3.1's
    restriction is about state, not control flow.
@@ -244,13 +278,13 @@ enum HttpStatus {
 
 ### 5.3 What an enum is, against the rest of the language
 
-- **Enums may be generic.** `enum Tree[T]` works — `option[T]` is the proof, and a built-in
+- **Enums may be generic.** `enum Tree[T]` works — `Option[T]` is the proof, and a built-in
   using a form users cannot is not a form worth having.
 - **Enums are closed.** No subclassing, and no `extend` block may add a variant.
   Exhaustiveness (§6.4) means nothing otherwise. An `extend` block *may* add methods.
 - **An enum is not a dict key**, for the reason v0.7 §4.2 gives about classes: `dict::Key`
   cannot call back into the interpreter. It joins the queue behind `op hash`.
-- **`is` works on enums and their instantiations.** `x is option[int]` is `O(1)` against the
+- **`is` works on enums and their instantiations.** `x is Option[int]` is `O(1)` against the
   reified header, as v0.7 §3.9 specifies for every generic.
 
 ---
@@ -331,8 +365,8 @@ What "every case" means depends on the scrutinee:
   exhaustive only through a `_` arm or an irrefutable binding arm like `(x, y)`. The checker
   does not reason about ranges, so `match n { 0 => …, 1 => … }` over an `int` is refused
   however the arms are written.
-- **A nullable or `option` scrutinee must cover `none`.** This is where §3 pays: under one
-  unified mechanism, `match maybe_user { option.some(u) => … }` is refused for the same
+- **A nullable or `Option` scrutinee must cover `None`.** This is where §3 pays: under one
+  unified mechanism, `match maybe_user { Option.Some(u) => … }` is refused for the same
   reason a missing enum variant is, and the reader learns one rule instead of two.
 
 ### 6.5 `if let`
@@ -340,13 +374,13 @@ What "every case" means depends on the scrutinee:
 `if let` extracts one variant's payload without a full `match`:
 
 ```quince
-if let result.ok(port) = parse_port("8080") {
+if let Result.Ok(port) = parse_port("8080") {
     print("Server listening on port:", port)
 } else {
     print("Could not parse a port")
 }
 
-if let option.some(user) = find_user(101) {
+if let Option.Some(user) = find_user(101) {
     print("Found user:", user)
 }
 ```
@@ -358,7 +392,7 @@ if let option.some(user) = find_user(101) {
 - **No `while let` in this milestone.** It is small, and it belongs with the iteration work
   in §7.2 rather than here. §10.
 - `if let` does not replace v0.7's smart cast. `if x is string` narrows a type; `if let`
-  destructures a variant. Under §3 they overlap for exactly one case — `option`/`T?` — and
+  destructures a variant. Under §3 they overlap for exactly one case — `Option`/`T?` — and
   both are allowed to handle it, because forbidding either would be a rule about spelling.
 
 ---
@@ -484,14 +518,14 @@ and that is not a price a language can charge on its most ordinary loop.
 So the protocol becomes lazy:
 
 - **`op iter` returns an iterator** — any object declaring `op next`.
-- **`op next` answers the next element, or `none` to stop.** Under §3 that is `option[T]`,
+- **`op next` answers the next element, or `None` to stop.** Under §3 that is `Option[T]`,
   which is also what keeps iteration over a sequence containing `nil` possible — the eager
   protocol never had to answer that question.
 - **`op iter`'s list contract is kept as a fallback.** A class returning a `list` still
   works, because a `list` is iterable. Every class in the corpus declaring `op iter` today
   keeps working untouched, and that is what makes the reversal affordable.
 
-`op next` joins `OPS` with a return contract of `option[T]`, and belongs in v0.7 §3.7's table
+`op next` joins `OPS` with a return contract of `Option[T]`, and belongs in v0.7 §3.7's table
 once it lands. The reversal is recorded as such in §11.
 
 ### 7.3 `array[T, N]` — fixed-size contiguous storage
@@ -596,15 +630,15 @@ today, and this section is what the first is aiming at.
 
 ### 8.2 Null pointer optimization
 
-For `option[T]` where `T` is a reference — a class instance, a container, a string — the
-runtime encodes `option.none` as a null reference (`0x0`) and `option.some(ref)` as the
-handle itself. `option[Point]` then costs exactly what a handle costs.
+For `Option[T]` where `T` is a reference — a class instance, a container, a string — the
+runtime encodes `Option.None` as a null reference (`0x0`) and `Option.Some(ref)` as the
+handle itself. `Option[Point]` then costs exactly what a handle costs.
 
-**This is what makes §3's answer free.** `Point?` and `option[Point]` are not merely
+**This is what makes §3's answer free.** `Point?` and `Option[Point]` are not merely
 equivalent; they are the same bits. Calling them one type gives up nothing.
 
 Where `T` is a value type — `int`, `float`, `bool` — there is no spare null and the
-representation falls back to §8.1's tag plus payload. `option[int]` costs a word more than an
+representation falls back to §8.1's tag plus payload. `Option[int]` costs a word more than an
 `int`, which is the ordinary price, and is stated so that nobody plans around an optimization
 that is not there.
 
@@ -625,8 +659,8 @@ compared, and printed.
 **Tranche 3 — `match` and `if let`.** Patterns, binding, arm type-joining, exhaustiveness,
 unreachable-arm refusal. The largest single item here, and what justifies tranche 2.
 
-**Tranche 4 — `option` and `result`.** The built-in generic enums, and §3's unification of
-`T?` with `option[T]` — which touches v0.7's `?.`, `??`, and `d[key]`. Deliberately after
+**Tranche 4 — `Option` and `Result`.** The built-in generic enums, and §3's unification of
+`T?` with `Option[T]` — which touches v0.7's `?.`, `??`, and `d[key]`. Deliberately after
 `match`, so the sugar is defined over a mechanism that already works.
 
 **Tranche 5 — `?` propagation.** Small once tranche 4 exists, and the ergonomic payoff of the
@@ -654,11 +688,11 @@ Each is a real convenience and none is needed to make `match` worth having. Guar
 with exhaustiveness in a way that wants its own thinking: a guarded arm cannot count toward
 coverage, and a checker that quietly assumes it can is worse than no checker at all.
 
-**Nested patterns** — `option.some(Shape.Circle(r))`. The most likely of these to be missed,
+**Nested patterns** — `Option.Some(Shape.Circle(r))`. The most likely of these to be missed,
 and deferred only because §6's rules are stated for one level; the recursion should be
 written down deliberately rather than implied.
 
-**Whether `d[key]` writes its signature as `option[V]` or `V?`.** §3. They are one type, so
+**Whether `d[key]` writes its signature as `Option[V]` or `V?`.** §3. They are one type, so
 this is a question about what the documentation and the LSP show, not about behaviour — but
 it should be answered once rather than per-site.
 
@@ -671,10 +705,14 @@ milestone does not need them.
 
 ## 11. Decisions taken
 
-- **`T?` is `option[T]`.** §3, and the one to reverse if any. v0.7 §10 has the
+- **`T?` is `Option[T]`.** §3, and the one to reverse if any. v0.7 §10 has the
   alternatives; §8.2 has the reason this one is free.
-- **`result` is not `throw`.** Both stay, for different jobs. §4.2.
-- **`?` does not silently discard an error.** Mixing `result` and `option` across it is
+- **`Option` and `Result` are PascalCase**, against the lowercase built-in convention.
+  A lowercase `result` would forbid `let result = …` outright — the resolver refuses to let
+  a binding take a built-in type's name — and the corpus already has one. It also makes
+  every enum PascalCase, built-in and user alike. §4.
+- **`Result` is not `throw`.** Both stay, for different jobs. §4.2.
+- **`?` does not silently discard an error.** Mixing `Result` and `Option` across it is
   refused. §4.3 rule 3.
 - **Variant payloads are named fields, always.** No bare-identifier form. §5.1.
 - **Unit variants take no parentheses.** §5.1.

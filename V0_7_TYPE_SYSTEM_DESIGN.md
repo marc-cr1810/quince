@@ -36,7 +36,7 @@ Reference parameters (`ref`, `final ref`, `const ref`) were in the first draft a
 9. **Null safety ergonomics.** Optional chaining (`?.`) and null coalescing (`??`). §3.8.
 10. **Type guarding & smart casting.** `is` for runtime type checks, with block-scoped
     narrowing. §3.9.
-11. **Type aliases.** `type ScoreTable = dict[string, int]`. §3.11.
+11. **Type aliases.** `alias ScoreTable = dict[string, int]`. §3.11.
 12. **Bitwise operator slots.** `op bit_and`, `op bit_or`, `op bit_xor`, `op bit_not`,
     `op bit_shl`, `op bit_shr`. §3.7.
 13. **LSP type tooling.** Inlay hints, type completion after `:`, visibility- and
@@ -87,16 +87,25 @@ This milestone is not starting from nothing, and the pieces it builds on constra
 | `?.` | **new** | optional chaining operator |
 | `??` | **new** | null coalescing operator |
 | `is` | **new keyword** | type check & smart-casting operator |
-| `type` | **new keyword** | type alias declaration (`type ID = string`) |
+| `alias` | **new keyword** | type alias declaration (`alias ID = string`) |
 | `any` | **new keyword** | dynamic top type annotation (`let x: any`, `dict[string, any]`) |
 | `_` | **new symbol** | wildcard type placeholder (`dict[_, User]`, `list[_]`) |
 | `const` | exists (`const x = 5`) | **new use:** the `const T` qualifier on parameters and returns |
 | `[` `]` | exists (indexing, list literals) | type arguments, in type position |
 | `public` `private` `protected` | **new keywords** | visibility |
 
-`?`, `?.`, `??`, `is`, `type`, `any`, `public`, `private`, `protected` are reserved. None of
+`?`, `?.`, `??`, `is`, `alias`, `any`, `public`, `private`, `protected` are reserved. None of
 them appears as an identifier in the corpus, so the
 `the_editor_grammar_spells_every_keyword` guard and a corpus run are enough to land them.
+
+**It is `alias`, not `type`, and that is not a preference.** `type` is one of the language's
+three globals — `type(x)` is called 36 times in the corpus — so reserving it would break
+every one of those calls. It could be made a *contextual* keyword, recognized only at
+statement start before an identifier and `=`, which parses fine. What that costs is the
+highlighter: `the_editor_grammar_spells_every_keyword` exists precisely so the editor and
+the language agree on the keyword list, and a word that is a keyword on one line and a
+function on the next is the one case that test cannot express. A second word is cheaper
+than a contextual one. §9.
 
 ### 3.2 Annotations on bindings
 
@@ -369,7 +378,7 @@ if val is string {
 
 **Reified generics and performance:**
 - **Every allocation with type arguments carries them.** One mechanism, one header field.
-  v0.9's user generics and v0.10's `set`, `array`, `option`, and `result` inherit it by
+  v0.9's user generics and v0.10's `set`, `array`, `Option`, and `Result` inherit it by
   being built the same way rather than by each adding their own.
 - Evaluating `l is list[string]` compares the header's descriptor in O(1). It does not
   perform an O(N) element scan, which is what avoids both Java-style erasure and the cost
@@ -427,7 +436,7 @@ Rules:
   time, and a language with `T?` in it that still raises on a lookup is asking the reader
   to hold two absence stories at once. The cost is that `dict[string, int?]` can no longer
   tell "missing" from "present, holding `nil`" — which is exactly the argument v0.10 makes
-  for `option[V]`, and is why §10 keeps it open. `d.remove(key)` and `key in d` are
+  for `Option[V]`, and is why §10 keeps it open. `d.remove(key)` and `key in d` are
   unaffected.
 - **Reified header check (O(1)):** both containers carry element, key, and value
   descriptors, so `d is dict[string, int]` is O(1). §3.9.
@@ -436,20 +445,20 @@ Rules:
 `tuple[…]` is not here. It is a variadic-arity type whose checking is the same machinery as
 a generic parameter pack, so it lands with the generics in v0.9.
 
-### 3.11 Type aliases (`type`)
+### 3.11 Type aliases (`alias`)
 
 ```quince
-type UserID = string
-type ScoreTable = dict[UserID, int]
+alias UserID = string
+alias ScoreTable = dict[UserID, int]
 
 let scores: ScoreTable = {"USR1": 100, "USR2": 85}
 ```
 
 An alias is a resolution-time substitution and introduces no new type: `ScoreTable` and
 `dict[string, int]` are the same type, `is` cannot tell them apart, and an error message
-prints whichever the program wrote. A cycle (`type A = B`, `type B = A`) is refused.
+prints whichever the program wrote. A cycle (`alias A = B`, `alias B = A`) is refused.
 
-**Aliases take no parameters in this milestone.** `type Pair[T] = tuple[T, T]` is a generic
+**Aliases take no parameters in this milestone.** `alias Pair[T] = tuple[T, T]` is a generic
 declaration and waits for v0.9, which is where there is something for it to abbreviate.
 
 ---
@@ -640,6 +649,8 @@ Recorded because they were open in an earlier draft and someone will want to rev
   language with `T?` in it should have one story about absence and not two. §3.10.
 - **Dict keys stay a closed set.** No `op hash` in this milestone. §4.2, §8.
 - **`const` gets a new job rather than a new keyword.** §3.3.
+- **`alias`, not `type`.** `type` is a global the corpus calls 36 times, so reserving it
+  would break every call. A contextual keyword would parse, but not highlight. §3.1.
 - **`op init`, not `fn init`.** The first draft's example did not run.
 - **Module visibility is a run-time error.** §3.6.
 - **This milestone is three milestones.** The document reached twenty-two features and
@@ -649,20 +660,20 @@ Recorded because they were open in an earlier draft and someone will want to rev
 
 ---
 
-## 10. Open decision: `T?` and `option[T]`
+## 10. Open decision: `T?` and `Option[T]`
 
-v0.10 introduces `option[T]` with `some`/`none`, and this milestone has `T?` with `nil`.
+v0.10 introduces `Option[T]` with `Some`/`None`, and this milestone has `T?` with `nil`.
 Two mechanisms for absence in one language is one too many.
 
 The three coherent answers:
 
-1. **`T?` is sugar for `option[T]`.** One mechanism, two spellings, `nil` being how
-   `option.none` prints. `?.` and `??` become sugar over `match`. v0.10's null pointer
+1. **`T?` is sugar for `Option[T]`.** One mechanism, two spellings, `nil` being how
+   `Option.None` prints. `?.` and `??` become sugar over `match`. v0.10's null pointer
    optimization already makes them bit-identical for reference types, so this costs nothing
    at run time. **This is the answer v0.10 is written on**, and the one to reverse if any.
-2. **They are separate**, `T?` for the cheap local case and `option[T]` for the case that
+2. **They are separate**, `T?` for the cheap local case and `Option[T]` for the case that
    travels — which requires explaining a distinction the compiler does not enforce.
-3. **`option[T]` replaces `T?`.** Cleanest, and it makes `d[key]` answer `option[V]` —
+3. **`Option[T]` replaces `T?`.** Cleanest, and it makes `d[key]` answer `Option[V]` —
    the version that can distinguish "missing" from "present, holding `nil`", the one thing
    §3.10 gives up. It also means `T?` should not ship here at all, which reopens most of
    this document.

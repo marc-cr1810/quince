@@ -20,7 +20,7 @@ grammar change rather than a library addition. Either this lands whole or it wai
 5. **`tuple[T1, …, TN]`**, the built-in arbitrary-arity product type, with destructuring
    and variadic tail unpacking. §3.5.
 6. **Container-constrained extensions.** `extend list[int]`. §3.6.
-7. **Generic type aliases.** `type Pair[T] = tuple[T, T]`. §3.7.
+7. **Generic type aliases.** `alias Pair[T] = tuple[T, T]`. §3.7.
 8. **LSP support for all of it** — completion inside `[…]`, hover showing bound arguments. §6.
 
 ---
@@ -302,8 +302,8 @@ from two places at two times is worse than reporting late. The resolver still re
 v0.7 §3.11 gives aliases without parameters. With generics they take them:
 
 ```quince
-type Pair[T] = tuple[T, T]
-type Lookup[V] = dict[string, V]
+alias Pair[T] = tuple[T, T]
+alias Lookup[V] = dict[string, V]
 
 let coords: Pair[float] = (1.0, 2.0)
 let scores: Lookup[int] = {"alice": 95}
@@ -311,7 +311,7 @@ let scores: Lookup[int] = {"alice": 95}
 
 An alias is still a resolution-time substitution introducing no new type: `Pair[float]` and
 `tuple[float, float]` are the same type, and `is` cannot tell them apart. A cyclic alias —
-including one that cycles through its own parameter, `type A[T] = A[T]` — is refused.
+including one that cycles through its own parameter, `alias A[T] = A[T]` — is refused.
 
 ---
 

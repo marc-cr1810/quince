@@ -2922,7 +2922,7 @@ Reference parameters (`ref`, `final ref`, `const ref`) were in the first draft a
 **deferred** — they are a change to the calling convention rather than a feature.
 
 See `V0_7_TYPE_SYSTEM_DESIGN.md`, whose §10 keeps the one question the split did not settle:
-how `T?` relates to v0.10's `option[T]`.
+how `T?` relates to v0.10's `Option[T]`.
 
 **v0.8 — declaration modifiers and typed dispatch**
 
@@ -2949,21 +2949,23 @@ not bounds is the half-built mechanism v0.6's trade names.
 - **Const generic value parameters** (`const N: int`) — `int`, `bool`, `string`, not `float`.
 - **Variadic packs** (`Ts...`), one per list, in last position.
 - **`tuple[T1, …, TN]`**: immutable, arity in the type, with destructuring and tail unpacking. It ships here rather than with v0.7's containers because its checking *is* pack checking. This is also what finally unblocks a dict iterating as pairs.
-- **`extend list[int]`**, and **generic type aliases**.
+- **`extend list[int]`**, and **generic type aliases** (`alias Pair[T] = tuple[T, T]` — the keyword is `alias` and not `type`, since `type(x)` is a global the corpus calls 36 times).
 
 See `V0_9_GENERICS_DESIGN.md`.
 
 **v0.10 — enums, pattern matching, and the containers that were waiting**
 
 - **`enum`**: unit and payload-carrying variants, generic, closed, with methods and operators.
-- **`option[T]` and `result[T, E]`**: built-in generic enums, with `?` for propagation. `T?` becomes a spelling of `option[T]` — which null pointer optimization makes free, the two being the same bits already.
+- **`Option[T]` and `Result[T, E]`**: built-in generic enums, with `?` for propagation. PascalCase against the lowercase built-in convention, because a lowercase `result` would make `let result = …` a hard error everywhere — a built-in type's name cannot also be a binding. `T?` becomes a spelling of `Option[T]` — which null pointer optimization makes free, the two being the same bits already.
 - **`match` and `if let`**: exhaustive pattern matching as an expression, over enums, tuples, and primitives.
 - **`range`**: the first value in the language meaning "a to b" — which is what `Op::Get` has been refusing to slice for want of. It **replaces `x[a:b]` with `x[a..b]`**, because `:` cannot survive a first-class range value once `{…}` spells both dicts and sets: `{1: 10}` would be a dict literal and a set of one range at the same time. `..` is left-associative and `range` overloads it, so the step is just the operator again: `0..10..2` is `(0..10)..2`, desugaring to `(0..10).step(2)`.
 - **A lazy iteration protocol (`op next`)**, which `range` forces and which reverses the eager `op iter` decision recorded above. `op iter`'s list contract is kept as a fallback, so nothing in the corpus breaks.
 - **`array[T, N]`, `bytes`, `set[T]`**: fixed-size storage, raw binary, and hashed uniqueness.
 
-See `V0_10_ENUMS_AND_MATCHING_DESIGN.md`. It comes after v0.9 because `option[T]` is a
-generic enum and cannot be built before generics exist.
+See `V0_10_ENUMS_AND_MATCHING_DESIGN.md`. It comes after v0.9 for `tuple` (which §6.3's
+patterns match on), `const N: int` (which `array[T, N]` needs), and the parameter-list
+grammar (without which a *user* cannot write `enum Tree[T]`) — not for `Option[T]` itself,
+which is a built-in generic and needs only what `list[T]` needed.
 
 **Later**
 Bytecode VM, async/await, sized integer types — all things Zephyr has, deferred until the
