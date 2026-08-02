@@ -645,3 +645,37 @@ fn a_narrowing_int_is_told_how_to_choose() {
         vec!["`n` is `int`, but this is a float"]
     );
 }
+
+
+#[test]
+fn a_mutation_of_a_typed_container_is_reported() {
+    // The form people actually write: a list is built empty or short and then
+    // filled, so `push` is where the wrong element usually arrives.
+    assert_eq!(
+        warnings("let xs: list[int] = [1, 2, 3]\nxs.push(\"test\")\n"),
+        vec!["the item is `int`, but this is a string"]
+    );
+    assert_eq!(
+        warnings("let xs: list[int] = []\nxs[0] = \"a\"\n"),
+        vec!["the item is `int`, but this is a string"]
+    );
+    assert_eq!(
+        warnings("let d: dict[string, int] = {}\nd[\"k\"] = \"v\"\n"),
+        vec!["the value is `int`, but this is a string"]
+    );
+
+    let quiet = [
+        "let xs: list[int] = []\nxs.push(4)\n",
+        // Widening, as everywhere else.
+        "let xs: list[float] = []\nxs.push(1)\n",
+        // A container the pass cannot name the contents of.
+        "let xs = []\nxs.push(\"anything\")\n",
+        "let xs: list = []\nxs.push(\"anything\")\n",
+        // `push` on something that is not a list at all is not this check's
+        // business — the receiver is the mistake and it is reported elsewhere.
+        "let n = 1\n",
+    ];
+    for src in quiet {
+        assert_eq!(warnings(src), Vec::<String>::new(), "for {src:?}");
+    }
+}

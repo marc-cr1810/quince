@@ -92,11 +92,13 @@ fn one(stmt: &Stmt, types: &Types, found: &mut Vec<Raised>) {
             block(handler, types, found);
         }
         StmtKind::Block(inner) => block(inner, types, found),
-        StmtKind::Expr(_)
-        | StmtKind::Return(_)
-        | StmtKind::Throw(_)
-        | StmtKind::Alias { .. }
-        | StmtKind::Import { .. } => {}
+        StmtKind::Expr(expr) | StmtKind::Throw(expr) => expression(expr, types, found),
+        StmtKind::Return(value) => {
+            if let Some(value) = value {
+                expression(value, types, found);
+            }
+        }
+        StmtKind::Alias { .. } | StmtKind::Import { .. } => {}
     }
 }
 
@@ -109,6 +111,127 @@ fn check_field(field: &FieldDecl, types: &Types, found: &mut Vec<Raised>) {
         return;
     };
     against(ty, &field.value, &format!("`{}`", field.name), types, found);
+}
+
+/// Walks an expression for the mistakes decidable inside one.
+///
+/// Only the containers, and only their mutations. A `list[int]` that the pass
+/// can name has an element type, so `xs.push("a")` is as visible as
+/// `let xs: list[int] = ["a"]` was — and it is the form people actually write,
+/// since a list is usually built empty and filled.
+///
+/// What is *not* here is the rest of what a call could be checked for: an
+/// argument against a parameter's annotation, a native's declared types. Those
+/// need the pass to keep declarations it currently discards for a plain `fn`,
+/// which is a change to what it records rather than to what this asks.
+fn expression(expr: &Expr, types: &Types, found: &mut Vec<Raised>) {
+    for child in parts(expr) {
+        expression(child, types, found);
+    }
+
+    let ExprKind::Call { callee, args } = &expr.kind else {
+        // `xs[i] = v` is the other way into a typed container.
+        if let ExprKind::Assign { target, value } = &expr.kind
+            && let ExprKind::Index { target: collection, .. } = &target.kind
+        {
+            let held = receiver_type(collection, types);
+            check_element(&held, "list", 0, value, "the item", types, found);
+            check_element(&held, "dict", 1, value, "the value", types, found);
+        }
+        return;
+    };
+    let ExprKind::Field { target, name, .. } = &callee.kind else {
+        return;
+    };
+
+    // The mutating methods, by the argument each puts into the container.
+    // One today; `insert` and the rest arrive with the collections v0.10 adds.
+    let held = receiver_type(target, types);
+    if let ("push", Some(item)) = (name.as_str(), args.first()) {
+        check_element(&held, "list", 0, item, "the item", types, found);
+    }
+}
+
+/// What a receiver holds.
+///
+/// By name where the receiver is one, because [`Types::of_expr`] is keyed by
+/// where an expression *starts* and a receiver shares its first byte with
+/// everything wrapped around it — `xs`, `xs[0]`, and `xs.push` all begin at the
+/// same offset, and the outer one is the one recorded. Asking for the binding
+/// sidesteps the collision entirely.
+fn receiver_type(expr: &Expr, types: &Types) -> Type {
+    match &expr.kind {
+        ExprKind::Var(var) => types.of_name(&var.name, expr.span.start),
+        _ => types.of_expr(expr.span.start),
+    }
+}
+
+/// Refuses a value going into a container the pass has named the contents of.
+fn check_element(
+    held: &Type,
+    container: &str,
+    slot: usize,
+    value: &Expr,
+    what: &str,
+    types: &Types,
+    found: &mut Vec<Raised>,
+) {
+    if held.class_name() != Some(container) {
+        return;
+    }
+    let Some(wanted) = held.args().get(slot) else {
+        return;
+    };
+    let actual = types.of_expr(value.span.start);
+    if fits(types, wanted, &actual) {
+        return;
+    }
+    found.push(refusal(
+        format!("{what} is `{wanted}`, but this is {}", an(&actual.to_string())),
+        format!(
+            "either give it {}, or declare the container to admit {}",
+            an_type(wanted),
+            an(&actual.to_string())
+        ),
+        value.span,
+    ));
+}
+
+/// `a` or `an`, for a type quoted back.
+fn an_type(ty: &Type) -> String {
+    let written = ty.to_string();
+    match written.starts_with(['a', 'e', 'i', 'o', 'u']) {
+        true => format!("an `{written}`"),
+        false => format!("a `{written}`"),
+    }
+}
+
+/// One level of an expression's children.
+fn parts(expr: &Expr) -> Vec<&Expr> {
+    match &expr.kind {
+        ExprKind::Unary { rhs, .. } => vec![rhs],
+        ExprKind::Binary { lhs, rhs, .. }
+        | ExprKind::Logical { lhs, rhs, .. }
+        | ExprKind::Coalesce { lhs, rhs } => vec![lhs, rhs],
+        ExprKind::Call { callee, args } => {
+            let mut parts = vec![callee.as_ref()];
+            parts.extend(args);
+            parts
+        }
+        ExprKind::Index { target, index } => vec![target, index],
+        ExprKind::Field { target, .. } | ExprKind::Chain(target) => vec![target],
+        ExprKind::Is { value, .. } => vec![value],
+        ExprKind::Assign { target, value } => vec![target, value],
+        ExprKind::List(items) => items.iter().collect(),
+        ExprKind::Dict(pairs) => pairs.iter().flat_map(|(k, v)| [k, v]).collect(),
+        ExprKind::Slice { target, start, end } => {
+            let mut parts = vec![target.as_ref()];
+            parts.extend(start.as_deref());
+            parts.extend(end.as_deref());
+            parts
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// Checks an initializer against the annotation it is being bound to.
