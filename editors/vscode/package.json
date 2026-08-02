@@ -2,11 +2,12 @@
   "name": "quince-vscode",
   "displayName": "Quince Language Support",
   "description": "Language Server Protocol integration, syntax highlighting, and live development tools for Quince.",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "publisher": "quince-lang",
   "engines": {
     "vscode": "^1.75.0"
   },
+  "icon": "icons/quince-icon.png",
   "categories": [
     "Programming Languages"
   ],
@@ -18,6 +19,13 @@
     "*"
   ],
   "contributes": {
+    "iconThemes": [
+      {
+        "id": "quince-file-icons",
+        "label": "Quince File Icons",
+        "path": "./icons/quince-icon-theme.json"
+      }
+    ],
     "languages": [
       {
         "id": "quince",
@@ -49,13 +57,27 @@
       {
         "language": "quince",
         "scopes": {
-          "class": ["entity.name.type.class.quince"],
-          "function": ["entity.name.function.quince"],
-          "method": ["entity.name.function.member.quince"],
-          "variable": ["variable.other.readwrite.quince"],
-          "parameter": ["variable.parameter.quince"],
-          "property": ["variable.other.property.quince"],
-          "type": ["entity.name.type.quince"]
+          "class": [
+            "entity.name.type.class.quince"
+          ],
+          "function": [
+            "entity.name.function.quince"
+          ],
+          "method": [
+            "entity.name.function.member.quince"
+          ],
+          "variable": [
+            "variable.other.readwrite.quince"
+          ],
+          "parameter": [
+            "variable.parameter.quince"
+          ],
+          "property": [
+            "variable.other.property.quince"
+          ],
+          "type": [
+            "entity.name.type.quince"
+          ]
         }
       }
     ],

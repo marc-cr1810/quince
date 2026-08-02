@@ -1,0 +1,13 @@
+{
+  "iconDefinitions": {
+    "quince_icon": {
+      "iconPath": "./quince-icon.png"
+    }
+  },
+  "fileExtensions": {
+    "qn": "quince_icon"
+  },
+  "languageIds": {
+    "quince": "quince_icon"
+  }
+}
