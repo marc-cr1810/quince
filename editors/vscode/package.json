@@ -19,13 +19,6 @@
     "*"
   ],
   "contributes": {
-    "iconThemes": [
-      {
-        "id": "quince-file-icons",
-        "label": "Quince File Icons",
-        "path": "./icons/quince-icon-theme.json"
-      }
-    ],
     "languages": [
       {
         "id": "quince",
@@ -37,7 +30,11 @@
           ".qn"
         ],
         "configuration": "./language-configuration.json",
-        "firstLine": "^#!.*\\bquince\\b"
+        "firstLine": "^#!.*\\bquince\\b",
+        "icon": {
+          "light": "./icons/quince-file.png",
+          "dark": "./icons/quince-file.png"
+        }
       }
     ],
     "grammars": [

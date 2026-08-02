@@ -8,7 +8,7 @@ use quince::color::ColorChoice;
 #[command(
     name = "quince",
     version,
-    about = "A dynamically-typed scripting language"
+    about = "A gradually-typed scripting language"
 )]
 pub struct Cli {
     /// When to use colored output [auto, always, never]

@@ -43,12 +43,39 @@ function getBinaryPath() {
         }
     }
 
-    // 3. Fallback: return path in first workspace folder if available
+    // 3. An installed Quince, found the way a shell finds one.
+    //
+    // This is what makes `cargo install quince` enough. Without it the only
+    // supported layout was a checkout with a `target/` directory in it, and
+    // anybody who installed the binary properly was told to run `cargo build`
+    // — the fallback below returned the bare name, and `fs.existsSync` resolves
+    // a bare name against the process working directory rather than PATH.
+    const onPath = findOnPath(binaryName);
+    if (onPath) return onPath;
+
+    // 4. Nothing found. Name the place a checkout would put it, so the message
+    // about it missing points somewhere the reader recognises.
     if (workspaceFolders && workspaceFolders.length > 0) {
         return path.join(workspaceFolders[0].uri.fsPath, 'target', 'debug', binaryName);
     }
 
     return binaryName;
+}
+
+/// Where `PATH` would find `name`, or null.
+function findOnPath(name) {
+    const entries = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
+    // Windows resolves a bare name against PATHEXT; the caller has already
+    // appended `.exe`, which is the only extension a Rust build produces.
+    for (const entry of entries) {
+        const candidate = path.join(entry, name);
+        try {
+            if (fs.statSync(candidate).isFile()) return candidate;
+        } catch {
+            // Not there, or not readable. Either way, keep looking.
+        }
+    }
+    return null;
 }
 
 function startLspServer(command) {
@@ -96,7 +123,9 @@ function activate(context) {
     tryStartClient().then(started => {
         if (!started) {
             vscode.window.showWarningMessage(
-                "Quince LSP binary not found. Run 'cargo build' or 'cargo build --release' in your workspace to enable Language Server features."
+                "Quince language server not found. Install it with `cargo install --path .` " +
+                "from a checkout, or run `cargo build` if you are working on Quince itself. " +
+                "A specific binary can be set with the `quince.lspPath` setting."
             );
         }
     }).catch(err => {
@@ -108,7 +137,10 @@ function activate(context) {
         vscode.commands.registerCommand('quince.restartServer', async () => {
             const command = getBinaryPath();
             if (!fs.existsSync(command)) {
-                vscode.window.showErrorMessage(`Quince binary not found at '${command}'. Please run 'cargo build' or 'cargo build --release'.`);
+                vscode.window.showErrorMessage(
+                `Quince binary not found at '${command}'. Install it with ` +
+                '`cargo install --path .`, or run `cargo build` if you are working on Quince itself.'
+            );
                 return;
             }
             if (client) {

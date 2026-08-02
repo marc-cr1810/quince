@@ -1,8 +1,21 @@
 [package]
 name = "quince"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
-description = "A dynamically-typed scripting language"
+description = "A gradually-typed scripting language with a language server"
+# No `license` field: the repository has no LICENSE file, and naming one here
+# would be asserting terms nobody has written down. `cargo install` does not
+# need it; `cargo publish` does, so it is the thing to add before publishing.
+repository = "https://github.com/marc-cr1810/quince"
+readme = "README.md"
+keywords = ["language", "interpreter", "scripting"]
+categories = ["development-tools"]
+
+# What `cargo install quince` puts on PATH. Named explicitly rather than left to
+# the package name, so the two cannot drift apart silently.
+[[bin]]
+name = "quince"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
