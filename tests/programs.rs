@@ -346,7 +346,7 @@ fn check_inference() {
         let Ok(program) = quince::compile(&source) else {
             continue;
         };
-        let types = quince::infer::infer(&program);
+        let types = quince::sema::infer::infer(&program);
 
         let input = std::fs::read_to_string(path.with_extension("in")).unwrap_or_default();
         let mut interp = Interp::with_io(
@@ -505,16 +505,16 @@ fn check_returns() {
 }
 
 /// Every native a program can reach, with the label this test names it by.
-fn every_native() -> Vec<(String, &'static quince::value::Native)> {
+fn every_native() -> Vec<(String, &'static quince::runtime::value::Native)> {
     let mut found = Vec::new();
-    for module in quince::stdlib::MODULES {
+    for module in quince::builtins::stdlib::MODULES {
         for (name, member) in module.members {
-            if let quince::stdlib::Member::Fn(native) = member {
+            if let quince::builtins::stdlib::Member::Fn(native) = member {
                 found.push((format!("{}.{name}", module.name), *native));
             }
         }
     }
-    for builtin in quince::class::BUILTINS {
+    for builtin in quince::runtime::class::BUILTINS {
         let seed = builtin.seed();
         for (name, native) in seed.methods {
             found.push((format!("{}.{name}", seed.name), *native));
@@ -523,13 +523,13 @@ fn every_native() -> Vec<(String, &'static quince::value::Native)> {
             found.push((format!("new.{}", seed.name), init));
         }
     }
-    for native in quince::interp::BUILTINS {
+    for native in quince::builtins::BUILTINS {
         found.push((format!("global.{}", native.name), *native));
     }
     found
 }
 
-fn native_named(label: &str) -> Option<&'static quince::value::Native> {
+fn native_named(label: &str) -> Option<&'static quince::runtime::value::Native> {
     every_native()
         .into_iter()
         .find_map(|(name, native)| (name == label).then_some(native))

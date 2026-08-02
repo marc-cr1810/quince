@@ -1,0 +1,1103 @@
+use super::*;
+
+use crate::builtins::convert::checked_trunc;
+use crate::runtime::class::Builtin;
+use crate::runtime::dict::Key;
+use crate::runtime::heap::Object;
+use crate::runtime::value::Value;
+use crate::syntax::ast::Op;
+use crate::syntax::token::Span;
+
+fn global(interp: &Interp, name: &str) -> Option<Value> {
+    interp.heap.globals(interp.globals).get(name).cloned()
+}
+
+fn run(source: &str) -> Interp {
+    let program = crate::compile(source).expect("the test program should parse");
+    let mut interp = Interp::with_output(Box::new(Vec::new()));
+    interp.run(&program).expect("the test program should run");
+    interp
+}
+
+/// The list `map` is building is rooted while the callback runs.
+///
+/// `map` is the first native to call Quince code, which makes it the first
+/// to cross a safe point with something of its own on the Rust stack. The
+/// receiver, the function, the element in flight, and the list being filled
+/// are all on `temps` for that reason — and the list is the one nothing else
+/// can reach, since it is not bound to a name until `map` returns.
+///
+/// The churn is *inside* the callback, and that detail is the test. A first
+/// version churned before the map and passed with the rooting deleted: the
+/// collections it counted had all happened already, and by the time the map
+/// ran the threshold had been raised past what eight small allocations could
+/// reach. Allocating during each call is what puts a real collection between
+/// two pushes into the list being built.
+///
+/// Checked by deleting the `temps.push` of `out` in `walk_list`, which makes
+/// this panic at `handle points at a collected object`.
+#[test]
+fn the_list_being_mapped_into_survives_collection() {
+    let interp = run("fn churn(k) {\n\
+         \x20   let scratch = []\n\
+         \x20   let i = 0\n\
+         \x20   while i < k {\n\
+         \x20       scratch.push([i])\n\
+         \x20       i = i + 1\n\
+         \x20   }\n\
+         }\n\
+         fn wrap(x) {\n\
+         \x20   churn(400)\n\
+         \x20   let boxed = [x, x]\n\
+         \x20   return boxed\n\
+         }\n\
+         let source = [1, 2, 3, 4, 5, 6, 7, 8]\n\
+         let mapped = source.map(wrap)\n\
+         let n = len(mapped)\n\
+         let third = mapped[2]");
+
+    assert!(interp.heap.collections > 0, "the collector never ran");
+    assert!(
+        matches!(global(&interp, "n"), Some(Value::Int(8))),
+        "the mapped list did not survive: got {:?}",
+        global(&interp, "n")
+    );
+    // Reaching into an element proves the results survived too, not just the
+    // list holding them.
+    let Some(Value::List(id)) = global(&interp, "third") else {
+        panic!("the third element should be a list");
+    };
+    assert_eq!(interp.heap.list(id), &[Value::Int(3), Value::Int(3)]);
+}
+
+/// `io`'s file half, which the corpus cannot hold.
+///
+/// A case writes nothing: `tests/cases` is checked in, and a suite that
+/// leaves files behind — or that races another case over the same name —
+/// stops being something anyone trusts. Here a temp directory named for the
+/// test is cheap, and the round trip is what actually needs proving.
+#[test]
+fn io_reads_back_what_it_wrote() {
+    let dir = std::env::temp_dir().join("quince-io-roundtrip");
+    std::fs::create_dir_all(&dir).expect("a temp directory should be creatable");
+    let path = dir.join("notes.txt");
+    let _ = std::fs::remove_file(&path);
+    // Escaped, because a Windows path is full of backslashes and the lexer
+    // reads `\n` in a string literal as a newline wherever it finds one.
+    let quoted = path.display().to_string().replace('\\', "\\\\");
+
+    let interp = run(&format!(
+        "import io\n\
+         let path = \"{quoted}\"\n\
+         let missing = io.exists(path)\n\
+         io.write(path, \"alpha\\nbeta\\n\")\n\
+         let there = io.exists(path)\n\
+         let whole = io.read(path)\n\
+         io.append(path, \"gamma\\n\")\n\
+         let lines = io.lines(path)\n\
+         let count = len(lines)\n\
+         let last = lines[2]"
+    ));
+
+    assert_eq!(global(&interp, "missing"), Some(Value::Bool(false)));
+    assert_eq!(global(&interp, "there"), Some(Value::Bool(true)));
+    assert_eq!(global(&interp, "whole"), Some(Value::from("alpha\nbeta\n")));
+    // Three lines, not four: a trailing newline ends the last one rather
+    // than starting an empty one.
+    assert_eq!(global(&interp, "count"), Some(Value::Int(3)));
+    assert_eq!(global(&interp, "last"), Some(Value::from("gamma")));
+
+    std::fs::remove_file(&path).expect("the test's own file should be removable");
+}
+
+#[test]
+fn reading_a_file_that_is_not_there_is_catchable() {
+    // The point of `ErrorKind::Io` having a class: a missing file is an
+    // ordinary thing to happen to a running program, so a program can decide
+    // what to do about it rather than being ended by it.
+    let missing = std::env::temp_dir().join("quince-does-not-exist-9f3c.txt");
+    let quoted = missing.display().to_string().replace('\\', "\\\\");
+    let interp = run(&format!(
+        "import io\n\
+         let caught = nil\n\
+         try {{\n\
+         \x20   io.read(\"{quoted}\")\n\
+         }} catch e {{\n\
+         \x20   caught = type(e)\n\
+         }}"
+    ));
+    assert_eq!(global(&interp, "caught"), Some(Value::from("IoError")));
+}
+
+/// Builds a list on the heap and hands back both halves, since a test that
+/// makes a cycle needs the handle as well as the value.
+fn list(interp: &mut Interp, items: Vec<Value>) -> (ObjId, Value) {
+    let id = interp.heap.alloc(Object::List(items));
+    (id, Value::List(id))
+}
+
+fn push(interp: &mut Interp, id: ObjId, value: Value) {
+    interp
+        .heap
+        .list_mut(id)
+        .expect("never frozen here")
+        .push(value);
+}
+
+#[test]
+fn numbers_compare_across_int_and_float() {
+    let mut interp = Interp::with_output(Box::new(Vec::new()));
+    assert!(interp.equals(&Value::Int(1), &Value::Float(1.0)).unwrap());
+    assert!(interp.equals(&Value::Float(1.0), &Value::Int(1)).unwrap());
+    assert!(!interp.equals(&Value::Int(1), &Value::Float(1.5)).unwrap());
+}
+
+#[test]
+fn unrelated_types_are_never_equal() {
+    // Strong typing: no coercion sneaks in through `==`.
+    let mut interp = Interp::with_output(Box::new(Vec::new()));
+    assert!(!interp.equals(&Value::Int(1), &Value::from("1")).unwrap());
+    assert!(!interp.equals(&Value::Int(1), &Value::Bool(true)).unwrap());
+    assert!(!interp.equals(&Value::Nil, &Value::Bool(false)).unwrap());
+}
+
+#[test]
+fn lists_compare_structurally() {
+    let mut interp = Interp::with_output(Box::new(Vec::new()));
+    let (_, a) = list(&mut interp, vec![Value::Int(1), Value::from("x")]);
+    let (_, b) = list(&mut interp, vec![Value::Int(1), Value::from("x")]);
+    let (_, c) = list(&mut interp, vec![Value::Int(2)]);
+    assert!(interp.equals(&a, &b).unwrap());
+    assert!(!interp.equals(&a, &c).unwrap());
+}
+
+/// Guards the self-referential case from running forever — for the one shape
+/// it can. Two distinct cycles still overflow the stack; see `equals`.
+#[test]
+fn identical_handles_short_circuit_comparison() {
+    let mut interp = Interp::with_output(Box::new(Vec::new()));
+    let (id, value) = list(&mut interp, vec![]);
+    push(&mut interp, id, value.clone());
+    assert!(interp.equals(&value, &value).unwrap());
+}
+
+#[test]
+fn a_type_name_is_a_global_unless_the_lexer_claimed_it() {
+    // The exception set is derived from `TokenKind::keyword`, so it can grow
+    // without anyone touching this file — a type named after a future keyword
+    // would silently stop being bound. Pinned here so that becomes a failure,
+    // and stated as two lists so the reason stays legible.
+    let interp = Interp::with_output(Box::new(Vec::new()));
+
+    for builtin in BUILTIN_TYPES {
+        let name = builtin.name();
+        let bound = global(&interp, name);
+        match TokenKind::keyword(name) {
+            Some(_) => assert!(
+                bound.is_none(),
+                "`{name}` is a keyword, so no global could ever be read under it"
+            ),
+            None => assert_eq!(
+                bound,
+                Some(Value::Class(interp.heap.builtin_class(*builtin))),
+                "`{name}` should be bound to its own class"
+            ),
+        }
+    }
+
+    // The two that are keywords today. Written out so that one of them
+    // ceasing to be a keyword is a decision rather than a diff.
+    assert!(global(&interp, "nil").is_none());
+    assert!(global(&interp, "class").is_none());
+}
+
+/// Which builtins can be extended, decided by the one thing that decides it:
+/// whether there is a conversion for `super.init` to call. Enumerated rather
+/// than spot-checked, so a builtin added later cannot land on either side of
+/// this line by accident.
+#[test]
+fn a_builtin_can_be_extended_exactly_when_it_converts() {
+    for builtin in BUILTIN_TYPES {
+        // `nil` and `class` cannot be written after `extends` at all — one is
+        // a keyword, the other is not bound as a global — so the two that are
+        // reachable here are the constructible ones and `function`.
+        if matches!(builtin, Builtin::Nil | Builtin::Class) {
+            continue;
+        }
+        let source = format!(
+            "class Sub extends {} {{\n op init(x) {{ super.init(x) }}\n}}",
+            builtin.name()
+        );
+        let program = crate::compile(&source).expect("should parse");
+        let mut interp = Interp::with_output(Box::new(Vec::new()));
+        let result = interp.run(&program);
+
+        match builtin.seed().init {
+            Some(_) => assert!(
+                result.is_ok(),
+                "`{}` converts, so it can be extended: {result:?}",
+                builtin.name()
+            ),
+            None => assert_eq!(
+                result.expect_err("no conversion, so no subclass").message,
+                format!("`Sub` cannot extend `{}`", builtin.name())
+            ),
+        }
+    }
+}
+
+/// Which class a global names, for reaching into its slots.
+fn class_of(interp: &Interp, name: &str) -> ObjId {
+    match global(interp, name) {
+        Some(Value::Class(id)) => id,
+        other => panic!("`{name}` should be a class, found {other:?}"),
+    }
+}
+
+/// Declaring an `op` fills its slot as well as the method table.
+///
+/// Nothing reads a slot yet, so this is the only way to see it — and it is
+/// worth seeing on its own, because the alternative failure is silent: an op
+/// that lands in `methods` and nowhere else simply never runs.
+#[test]
+fn declaring_an_op_fills_its_slot() {
+    let interp = run("class Money {\n\
+                      op init(c) { self.c = c }\n\
+                      op string() { return \"$\" }\n\
+                      fn plain() { return 1 }\n\
+                      }\n");
+    let class = interp.heap.class(class_of(&interp, "Money"));
+
+    for op in [Op::Init, Op::Str] {
+        assert!(
+            matches!(class.slot(op), Some(Value::Function(_))),
+            "`op {}` was declared but its slot is empty",
+            op.name()
+        );
+    }
+    // A slot is filled by `op`, never inferred from a name — the whole point
+    // of the keyword. `plain` is in the table and in no slot at all.
+    assert!(class.methods.contains_key("plain"));
+    for op in crate::syntax::ast::OPS {
+        if !matches!(op, Op::Init | Op::Str) {
+            assert!(
+                class.slot(*op).is_none(),
+                "`{}` was never declared but has a slot",
+                op.name()
+            );
+        }
+    }
+}
+
+/// Every slot inherits, not just `init`.
+///
+/// `init` copying down is what `class TypeError extends Error {}` already
+/// relied on; this pins that the same loop carries the rest, and that a
+/// subclass redeclaring one keeps its own.
+#[test]
+fn a_subclass_inherits_the_slots_it_does_not_declare() {
+    let interp = run("class Base {\n\
+                      op init() { }\n\
+                      op string() { return \"base\" }\n\
+                      op bool() { return false }\n\
+                      }\n\
+                      class Child extends Base {\n\
+                      op string() { return \"child\" }\n\
+                      }\n");
+    let base = interp.heap.class(class_of(&interp, "Base")).clone();
+    let child = interp.heap.class(class_of(&interp, "Child"));
+
+    assert_eq!(
+        child.slot(Op::Bool),
+        base.slot(Op::Bool),
+        "`op bool` should have been copied down"
+    );
+    assert_eq!(
+        child.slot(Op::Init),
+        base.slot(Op::Init),
+        "`op init` should have been copied down"
+    );
+    assert!(
+        child.slot(Op::Str) != base.slot(Op::Str),
+        "`Child`'s own `op string` should have won"
+    );
+}
+
+/// The payload is unobservable from Quince until the operators land, so the
+/// value `super.init` stored is checked here instead — and it has to be the
+/// converted value, not the argument.
+#[test]
+fn super_init_stores_what_the_conversion_produced() {
+    let interp = run("class Count extends int {\n\
+                      op init(x) { super.init(x) }\n\
+                      }\n\
+                      final n = Count(\"42\")\n");
+
+    let Some(Value::Instance(id)) = global(&interp, "n") else {
+        panic!("`n` should be an instance");
+    };
+    assert_eq!(interp.heap.instance(id).payload, Some(Value::Int(42)));
+}
+
+/// An implicit `op init` is the inherited conversion run as one, so the payload
+/// it stores has to be the converted value rather than the argument — the same
+/// assertion as for an explicit `super.init`, reached without writing one.
+#[test]
+fn declaring_no_op_init_still_converts() {
+    let interp = run("class Count extends int {}\nfinal n = Count(\"42\")\n");
+
+    let Some(Value::Instance(id)) = global(&interp, "n") else {
+        panic!("`n` should be an instance");
+    };
+    assert_eq!(interp.heap.instance(id).payload, Some(Value::Int(42)));
+}
+
+/// Equality and hashing are one decision, and this is the half a corpus case
+/// cannot state: two keys that compare equal must reach the same bucket, so the
+/// dict has to end up with one entry rather than two that happen to print alike.
+#[test]
+fn a_payload_hashes_as_the_value_it_equals() {
+    let interp = run("class Username extends string {}\n\
+                      final d = {}\n\
+                      d[Username(\"marc\")] = 1\n\
+                      d[\"marc\"] = 2\n");
+
+    let Some(Value::Dict(id)) = global(&interp, "d") else {
+        panic!("`d` should be a dict");
+    };
+    let dict = interp.heap.dict(id);
+    assert_eq!(dict.len(), 1, "an equal key must not make a second entry");
+    assert_eq!(
+        dict.get(&Key::Str(Rc::from("marc"))),
+        Some(&Value::Int(2)),
+        "the second write should have replaced the first"
+    );
+}
+
+/// `op eq` is what costs a class its use as a dict key, and this is the half a
+/// corpus case cannot state: that the very same class *without* the op is a
+/// perfectly good key. One `.err` file shows the refusal; only a pair shows
+/// that the op is the cause rather than the shape.
+#[test]
+fn declaring_op_eq_is_what_costs_the_dict_key() {
+    let interp = run("class Plain extends string {}\n\
+                      final d = {}\n\
+                      d[Plain(\"marc\")] = 1\n");
+    let Some(Value::Dict(id)) = global(&interp, "d") else {
+        panic!("`d` should be a dict");
+    };
+    assert_eq!(interp.heap.dict(id).len(), 1, "the base is a fine key");
+
+    let program = crate::compile(
+        "class Decides extends string {\n\
+         op eq(other) { return true }\n\
+         }\n\
+         final d = {}\n\
+         d[Decides(\"marc\")] = 1\n",
+    )
+    .expect("the test program should parse");
+    let mut interp = Interp::with_output(Box::new(Vec::new()));
+    let err = interp
+        .run(&program)
+        .expect_err("a class that decides `==` cannot be a key");
+    assert!(
+        err.message.contains("cannot be a dict key"),
+        "expected the key refusal, got: {}",
+        err.message
+    );
+}
+
+/// A subclass gets its payload from the ancestor that has one, however far up
+/// the chain that is, because `super`'s receiver is always the original `self`.
+#[test]
+fn a_payload_is_written_through_an_inherited_init() {
+    let interp = run("class Email extends string {\n\
+                      op init(s) { super.init(s) }\n\
+                      }\n\
+                      class Work extends Email {}\n\
+                      final e = Work(\"a@b.com\")\n");
+
+    let Some(Value::Instance(id)) = global(&interp, "e") else {
+        panic!("`e` should be an instance");
+    };
+    assert_eq!(
+        interp.heap.instance(id).payload,
+        Some(Value::from("a@b.com"))
+    );
+    // The subclass, not the class whose `init` ran.
+    assert_eq!(
+        interp.heap.class(interp.heap.instance(id).class).name,
+        "Work"
+    );
+}
+
+#[test]
+fn truncation_rejects_what_no_int_can_hold() {
+    let span = Span::new(0, 1);
+
+    assert_eq!(checked_trunc(3.7, span), Ok(3));
+    assert_eq!(checked_trunc(-3.7, span), Ok(-3));
+    assert_eq!(checked_trunc(-0.5, span), Ok(0));
+
+    // `as` would answer these with a saturated bound, silently. The boundary
+    // is worth pinning in both directions because it is not symmetric, and
+    // the asymmetry is easy to get wrong: this test caught a `>` that should
+    // have been `>=` and was quietly saturating 2^63 to `i64::MAX`.
+    assert_eq!(
+        checked_trunc(i64::MAX as f64, span).unwrap_err().kind,
+        ErrorKind::Overflow,
+        "i64::MAX as f64 rounds up to 2^63, which is out of range"
+    );
+    assert_eq!(
+        checked_trunc(9223372036854774784.0, span),
+        Ok(9223372036854774784),
+        "the largest float below 2^63 is in range and must convert"
+    );
+    assert_eq!(
+        checked_trunc(i64::MIN as f64, span),
+        Ok(i64::MIN),
+        "-2^63 is exact as an f64, so the low bound converts"
+    );
+    assert_eq!(
+        checked_trunc(f64::INFINITY, span).unwrap_err().kind,
+        ErrorKind::Overflow
+    );
+    // A NaN is not out of range, it is not a number at all — which is a
+    // different mistake, and gets a different kind.
+    assert_eq!(
+        checked_trunc(f64::NAN, span).unwrap_err().kind,
+        ErrorKind::Value
+    );
+}
+
+#[test]
+fn a_conversion_separates_the_wrong_type_from_the_wrong_value() {
+    // The whole reason `ErrorKind::Value` exists. Both of these are `int`
+    // refusing an argument, but one is fixed at the call and the other is
+    // fixed wherever the string came from.
+    let cases = [
+        ("int([1])", ErrorKind::Type),
+        ("int(nil)", ErrorKind::Type),
+        ("int(\"abc\")", ErrorKind::Value),
+        ("float(\"abc\")", ErrorKind::Value),
+    ];
+
+    for (source, expected) in cases {
+        let program = crate::compile(source).expect("should parse");
+        let mut interp = Interp::with_output(Box::new(Vec::new()));
+        let err = interp.run(&program).expect_err("should be refused");
+        assert_eq!(err.kind, expected, "{source}");
+    }
+}
+
+#[test]
+fn a_conversion_is_reached_through_the_class_a_name_is_bound_to() {
+    // Not a special form in `eval`: `int` is an ordinary global holding an
+    // ordinary class, so it converts just as well through another name.
+    let interp = run("final make = int\nfinal n = make(\"42\")");
+    assert_eq!(global(&interp, "n"), Some(Value::Int(42)));
+}
+
+#[test]
+fn a_loop_does_not_grow_the_heap_without_bound() {
+    // Two allocations an iteration — the scope and the list — so without a
+    // collector this settles at several thousand live objects.
+    let interp = run("let i = 0\nwhile i < 2000 {\n let x = [1, 2, 3]\n i = i + 1\n}");
+
+    assert!(interp.heap.collections > 0, "the collector never ran");
+    assert!(
+        interp.heap.live() < 600,
+        "heap grew to {} objects",
+        interp.heap.live()
+    );
+}
+
+#[test]
+fn a_loop_that_catches_does_not_grow_the_heap() {
+    // `catch` does not create the hazard here so much as stop hiding it.
+    // Every site that pushes a scope, a temp, or a frame restores it before
+    // propagating, but while an error was fatal a site that forgot would leak
+    // roots into a process about to exit, where nothing could observe it. A
+    // caught error resumes with those stacks still deep, so the same latent
+    // bug becomes unbounded growth — which is what this measures.
+    let interp = run("let i = 0\n\
+         while i < 2000 {\n\
+         \x20 try {\n\
+         \x20  throw Error(\"x\")\n\
+         \x20 } catch e {\n\
+         \x20  i = i + 1\n\
+         \x20 }\n\
+         }");
+
+    assert!(interp.heap.collections > 0, "the collector never ran");
+    assert!(
+        interp.heap.live() < 600,
+        "heap grew to {} objects",
+        interp.heap.live()
+    );
+    // All three stacks back to their depth at the `try`.
+    assert!(
+        interp.scopes.is_empty(),
+        "{} scopes left behind",
+        interp.scopes.len()
+    );
+    assert!(
+        interp.temps.is_empty(),
+        "{} temps left behind",
+        interp.temps.len()
+    );
+    assert_eq!(interp.depth, 0, "depth left at {}", interp.depth);
+}
+
+#[test]
+fn a_thrown_payload_survives_the_unwind() {
+    // The instance travels inside `QuinceError` through frames that root
+    // nothing: no scope and no `temps` entry refers to it for the whole
+    // unwind. It survives only because collection happens between statements
+    // and unwinding executes none.
+    //
+    // Churning first puts the heap over its collection threshold, so a safe
+    // point crossed on the way out would actually free the payload rather
+    // than merely being allowed to. Reading `e.n` afterwards is what would
+    // fail. This is the invariant a `finally` would have broken, by running
+    // statements during the unwind — see DESIGN.md.
+    let interp = run("class Deep extends Error {\n\
+         \x20   op init(message, n) {\n\
+         \x20       super.init(message)\n\
+         \x20       self.n = n\n\
+         \x20   }\n\
+         }\n\
+         fn churn(k) {\n\
+         \x20   let scratch = []\n\
+         \x20   let i = 0\n\
+         \x20   while i < k {\n\
+         \x20       scratch.push([i])\n\
+         \x20       i = i + 1\n\
+         \x20   }\n\
+         \x20   return len(scratch)\n\
+         }\n\
+         fn go(d) {\n\
+         \x20   if d <= 0 {\n\
+         \x20       throw Deep(\"bottom\", 42)\n\
+         \x20   }\n\
+         \x20   return go(d - 1)\n\
+         }\n\
+         churn(3000)\n\
+         let got = 0\n\
+         try {\n\
+         \x20   go(50)\n\
+         } catch e {\n\
+         \x20   got = e.n\n\
+         }");
+
+    assert!(interp.heap.collections > 0, "the collector never ran");
+    assert!(
+        matches!(global(&interp, "got"), Some(Value::Int(42))),
+        "the payload did not survive: got {:?}",
+        global(&interp, "got")
+    );
+}
+
+#[test]
+fn an_extension_survives_collection() {
+    // The one root the interpreter holds that no walk of the heap could
+    // reach: an extension's function is deliberately *not* in the class's
+    // method table, so `int` does not keep it alive and nothing else refers
+    // to it. Deleting the line that roots `extensions` makes this panic at
+    // `handle points at a collected object` rather than merely fail.
+    let interp = run("extend int { fn double() { return self * 2 } }\n\
+         let i = 0\n\
+         while i < 2000 {\n let junk = [0]\n i = i + 1\n }\n\
+         let n = 7.double()");
+
+    assert!(interp.heap.collections > 0, "the collector never ran");
+    assert!(
+        matches!(global(&interp, "n"), Some(Value::Int(14))),
+        "the extension did not survive: got {:?}",
+        global(&interp, "n")
+    );
+}
+
+#[test]
+fn a_declared_method_beats_an_extension_on_an_ancestor() {
+    // The half of the lookup order a corpus case cannot show on its own: both
+    // walks cover the whole chain, and the *methods* walk finishes first, so
+    // a subclass's own method wins over an extension added to its parent —
+    // not merely over one added to itself.
+    let interp = run("class Animal { fn speak() { return \"...\" } }\n\
+         class Dog extends Animal { fn name() { return \"dog\" } }\n\
+         extend Animal { fn name() { return \"animal\" } }\n\
+         let through_dog = Dog().name()\n\
+         let through_animal = Animal().name()");
+
+    let Some(Value::Str(dog)) = global(&interp, "through_dog") else {
+        panic!("`Dog().name()` should have answered");
+    };
+    assert_eq!(&*dog, "dog", "the declared method has to win");
+
+    let Some(Value::Str(animal)) = global(&interp, "through_animal") else {
+        panic!("`Animal().name()` should have answered");
+    };
+    assert_eq!(&*animal, "animal", "and the extension still answers for it");
+}
+
+#[test]
+fn a_modifier_closes_one_class_and_not_its_ancestors() {
+    // Openness belongs to the declaration that said the word, and no walk of
+    // the chain goes looking for it. `Dog` closing itself leaves `Animal` open
+    // to both routes — which is what the two statements after `Dog` running at
+    // all prove — and `Cat` is open because it said nothing.
+    let interp = run("class Animal { fn speak() { return \"...\" } }\n\
+         sealed class Dog extends Animal {}\n\
+         class Cat extends Animal {}\n\
+         extend Animal { fn legs() { return 4 } }");
+
+    let openness = |name: &str| match global(&interp, name) {
+        Some(Value::Class(id)) => interp.heap.class(id).openness,
+        other => panic!("`{name}` should be a class, got {other:?}"),
+    };
+    assert!(openness("Dog").closes_inheritance());
+    assert!(openness("Dog").closes_extension());
+    for open in ["Animal", "Cat"] {
+        assert!(
+            !openness(open).closes_inheritance() && !openness(open).closes_extension(),
+            "`{open}` should have stayed open"
+        );
+    }
+}
+
+#[test]
+fn each_modifier_closes_only_its_own_door() {
+    // The table in `Openness`, measured on real class objects rather than on
+    // the enum: `final` leaves `extend` alone, and `complete` leaves the
+    // hierarchy alone. Both halves are invisible to a corpus case, which can
+    // only ever show the refusals.
+    let interp = run("final class F {}\n\
+         complete class C {}\n\
+         extend F { fn tag() { return 1 } }\n\
+         class Sub extends C {}");
+
+    let openness = |name: &str| match global(&interp, name) {
+        Some(Value::Class(id)) => interp.heap.class(id).openness,
+        other => panic!("`{name}` should be a class, got {other:?}"),
+    };
+    assert!(openness("F").closes_inheritance());
+    assert!(!openness("F").closes_extension(), "`final` is not `sealed`");
+    assert!(openness("C").closes_extension());
+    assert!(
+        !openness("C").closes_inheritance(),
+        "`complete` is not `sealed`"
+    );
+}
+
+#[test]
+fn a_captured_scope_survives_collection() {
+    // The closure is reachable only through `f`, and its captured scope only
+    // through the closure. Tracing has to follow both links.
+    let interp = run("fn make() {\n\
+         let n = [1, 2, 3]\n\
+         fn get() { return n }\n\
+         return get\n\
+         }\n\
+         let f = make()\n\
+         let i = 0\n\
+         while i < 2000 {\n let junk = [0]\n i = i + 1\n }\n\
+         let survived = f()");
+
+    assert!(interp.heap.collections > 0, "the collector never ran");
+    let Some(Value::List(id)) = global(&interp, "survived") else {
+        panic!("the closure did not return its captured list");
+    };
+    assert_eq!(interp.heap.list(id).len(), 3);
+}
+
+#[test]
+fn the_iteration_snapshot_survives_the_list_it_came_from() {
+    // The first iteration overwrites every element, so the lists the *later*
+    // iterations still have to visit are reachable only from the snapshot
+    // held in `exec_for`'s Rust frame.
+    let interp = run("let items = [[1], [2], [3]]\n\
+         let total = 0\n\
+         for pair in items {\n\
+         items[0] = 0\n\
+         items[1] = 0\n\
+         items[2] = 0\n\
+         let i = 0\n\
+         while i < 400 {\n let junk = [0]\n i = i + 1\n }\n\
+         total = total + len(pair)\n\
+         }");
+
+    assert!(interp.heap.collections > 0, "the collector never ran");
+    assert_eq!(global(&interp, "total"), Some(Value::Int(3)));
+}
+
+/// Churns enough objects to force several collections, then returns `value`.
+fn churn(value: &str) -> String {
+    format!(
+        "fn churn() {{\n\
+         let i = 0\n\
+         while i < 3000 {{ let junk = [0]; i = i + 1 }}\n\
+         return {value}\n\
+         }}\n"
+    )
+}
+
+#[test]
+fn a_list_element_survives_evaluating_a_later_one() {
+    // `mk()`'s list lives only in `eval_seq`'s Rust-local `Vec` while
+    // `churn()` runs. Unrooted, its slot was reused by a scope and `len`
+    // panicked with "expected a list, found Env".
+    let interp = run(&format!(
+        "fn mk() {{ return [1, 2, 3] }}\n\
+         {}\
+         let pair = [mk(), churn()]\n\
+         let kept = len(pair[0])",
+        churn("0")
+    ));
+
+    assert!(interp.heap.collections > 0, "the collector never ran");
+    assert_eq!(global(&interp, "kept"), Some(Value::Int(3)));
+}
+
+#[test]
+fn an_operand_survives_evaluating_the_other() {
+    // Structural equality reads both lists out of the heap, so a collected
+    // left operand is a panic rather than a wrong answer.
+    let interp = run(&format!(
+        "fn mk() {{ return [1, 2, 3] }}\n\
+         {}\
+         let same = mk() == churn()",
+        churn("[1, 2, 3]")
+    ));
+
+    assert!(interp.heap.collections > 0, "the collector never ran");
+    assert_eq!(global(&interp, "same"), Some(Value::Bool(true)));
+}
+
+#[test]
+fn the_left_operand_survives_evaluating_the_right() {
+    // The path `+` on lists takes, and the reason the rooting had to land
+    // before concatenation did.
+    let interp = run(&format!(
+        "fn mk() {{ return [1, 2, 3] }}\n\
+         {}\
+         let kept = len(mk() + churn())",
+        churn("[4]")
+    ));
+
+    assert!(interp.heap.collections > 0, "the collector never ran");
+    assert_eq!(global(&interp, "kept"), Some(Value::Int(4)));
+}
+
+#[test]
+fn a_slice_target_survives_evaluating_its_bounds() {
+    // The list being sliced sits in a Rust frame while the bounds run, and
+    // a bound is an arbitrary expression that can reach a safe point. Pins
+    // that `Slice` goes through `eval_seq` rather than hand-rolling it.
+    let interp = run(&format!(
+        "fn mk() {{ return [1, 2, 3, 4] }}\n\
+         {}\
+         let kept = len(mk()[1:churn()])",
+        churn("3")
+    ));
+
+    assert!(interp.heap.collections > 0, "the collector never ran");
+    assert_eq!(global(&interp, "kept"), Some(Value::Int(2)));
+}
+
+#[test]
+fn a_bound_method_keeps_its_receiver_alive() {
+    // The list is reachable from nowhere but the bound method: no variable
+    // names it, and it is not inside any other object. If `trace` skipped
+    // the receiver, `push` would later write through a handle whose slot
+    // had been reused.
+    let interp = run(&format!(
+        "fn mk() {{ return [1, 2, 3] }}\n\
+         let m = mk().push\n\
+         {}\
+         let junk = churn()\n\
+         m(4)",
+        churn("0")
+    ));
+
+    assert!(interp.heap.collections > 0, "the collector never ran");
+
+    let Some(Value::BoundMethod(id)) = global(&interp, "m") else {
+        panic!("`m` should be a bound method");
+    };
+    let Value::List(list) = interp.heap.bound_method(id).receiver else {
+        panic!("the receiver should be a list");
+    };
+    assert_eq!(
+        interp.heap.list(list).len(),
+        4,
+        "the push should have landed"
+    );
+}
+
+#[test]
+fn an_instance_survives_its_own_constructor() {
+    // Slot 0 is the root, and it stays pointing at the instance because
+    // `self` cannot be reassigned. This passed with a `temps` root too, and
+    // still passes now that the root is gone — what makes it hold is the
+    // resolver rule, which `self_cannot_be_reassigned` pins down.
+    let interp = run(&format!(
+        "{}\
+         class C {{\n\
+         op init(n) {{\n\
+         self.n = n\n\
+         let junk = churn()\n\
+         }}\n\
+         }}\n\
+         let c = C(7)\n\
+         let kept = c.n",
+        churn("0")
+    ));
+
+    assert!(interp.heap.collections > 0, "the collector never ran");
+    assert_eq!(global(&interp, "kept"), Some(Value::Int(7)));
+}
+
+#[test]
+fn a_class_survives_the_instance_that_is_all_that_names_it() {
+    // Nothing refers to the class but the instance's `class` handle: the
+    // name it was declared under went out of scope with `mk`. Reaching it
+    // is what `type` and every later method lookup depend on.
+    let interp = run(&format!(
+        "fn mk() {{\n\
+         class Hidden {{ fn who() {{ return 42 }} }}\n\
+         return Hidden()\n\
+         }}\n\
+         let obj = mk()\n\
+         {}\
+         let junk = churn()\n\
+         let kept = obj.who()\n\
+         let name = type(obj)",
+        churn("0")
+    ));
+
+    assert!(interp.heap.collections > 0, "the collector never ran");
+    assert_eq!(global(&interp, "kept"), Some(Value::Int(42)));
+    assert_eq!(global(&interp, "name"), Some(Value::from("Hidden")));
+}
+
+#[test]
+fn a_parent_class_survives_the_subclass_that_names_it() {
+    // `Base` goes out of scope with `build`, leaving the subclass's `parent`
+    // handle as the only thing that reaches it. Method lookup walks that
+    // chain, so losing it turns an inherited call into a panic.
+    let interp = run(&format!(
+        "fn build() {{\n\
+         class Base {{ fn greet() {{ return 42 }} }}\n\
+         class Sub extends Base {{}}\n\
+         return Sub()\n\
+         }}\n\
+         let obj = build()\n\
+         {}\
+         let junk = churn()\n\
+         let kept = obj.greet()",
+        churn("0")
+    ));
+
+    assert!(interp.heap.collections > 0, "the collector never ran");
+    assert_eq!(global(&interp, "kept"), Some(Value::Int(42)));
+}
+
+#[test]
+fn the_scope_holding_super_survives_with_the_methods_that_close_over_it() {
+    // A subclass's methods close over a scope whose only slot is the parent
+    // class. Nothing names that scope, so it is reachable only as a method's
+    // captured environment — and `super.speak()` reads straight out of it.
+    //
+    // No new root was needed for it, which is the point: making `super` a
+    // captured local rather than a field on the class means the collector
+    // work was already done. This is the test that would notice if that
+    // stopped being true — deleting `Function`'s env tracing fails it.
+    let interp = run(&format!(
+        "fn build() {{\n\
+         class Base {{ fn speak() {{ return 1 }} }}\n\
+         class Sub extends Base {{ fn speak() {{ return super.speak() + 1 }} }}\n\
+         return Sub()\n\
+         }}\n\
+         let obj = build()\n\
+         {}\
+         let junk = churn()\n\
+         let kept = obj.speak()",
+        churn("0")
+    ));
+
+    assert!(interp.heap.collections > 0, "the collector never ran");
+    assert_eq!(global(&interp, "kept"), Some(Value::Int(2)));
+}
+
+#[test]
+fn a_field_survives_collection_with_its_instance() {
+    // The list is reachable only through the field, so this is the instance
+    // half of what `Dict::trace` already does for a dict.
+    let interp = run(&format!(
+        "class Box {{ op init() {{ self.items = [1, 2, 3] }} }}\n\
+         let b = Box()\n\
+         {}\
+         let junk = churn()\n\
+         let kept = len(b.items)",
+        churn("0")
+    ));
+
+    assert!(interp.heap.collections > 0, "the collector never ran");
+    assert_eq!(global(&interp, "kept"), Some(Value::Int(3)));
+}
+
+/// The payload half of the same guarantee, which needs a payload that is
+/// actually a handle: a string is an `Rc` and a collection cannot touch it, so
+/// only a list or dict ancestor puts anything at risk. The payload is not a
+/// field, so `Dict::trace` does not cover it and `Instance::trace` must.
+#[test]
+fn a_payload_survives_collection_with_its_instance() {
+    let interp = run(&format!(
+        "class Bag extends dict {{ op init(d) {{ super.init(d) }} }}\n\
+         let b = Bag({{\"a\": 1, \"b\": 2}})\n\
+         {}\
+         let junk = churn()\n\
+         let kept = b.keys()",
+        churn("0")
+    ));
+
+    assert!(interp.heap.collections > 0, "the collector never ran");
+    let Some(Value::List(id)) = global(&interp, "kept") else {
+        panic!("`keys` returns a list");
+    };
+    assert_eq!(interp.heap.list(id).len(), 2);
+}
+
+#[test]
+fn a_method_held_in_a_field_survives_evaluating_the_arguments() {
+    // A field holding a function is reachable only through that field, and
+    // an argument is free to overwrite it. A *method* is safe without this
+    // — the rooted receiver reaches its class, and the class its methods —
+    // so the hazard belongs to fields alone. The closure has to be a local
+    // one: a top-level `fn` is a global, and globals are always rooted.
+    let interp = run(&format!(
+        "class Holder {{}}\n\
+         fn build() {{\n\
+         fn seven(n) {{ return 7 }}\n\
+         let h = Holder()\n\
+         h.f = seven\n\
+         return h\n\
+         }}\n\
+         {}\
+         fn clear(h) {{\n\
+         h.f = nil\n\
+         return churn()\n\
+         }}\n\
+         let h = build()\n\
+         let kept = h.f(clear(h))",
+        churn("0")
+    ));
+
+    assert!(interp.heap.collections > 0, "the collector never ran");
+    assert_eq!(global(&interp, "kept"), Some(Value::Int(7)));
+}
+
+#[test]
+fn a_receiver_survives_evaluating_the_arguments() {
+    // The receiver exists only in `eval_method_call`'s Rust frame while the
+    // argument runs, and evaluating an argument reaches a safe point. A
+    // dict receiver rather than a list because `remove` returns something
+    // drawn from it, so a collected receiver is a wrong answer and not only
+    // a panic.
+    let interp = run(&format!(
+        "fn mk() {{ return {{\"k\": 7}} }}\n\
+         {}\
+         let got = mk().remove(churn())",
+        churn("\"k\"")
+    ));
+
+    assert!(interp.heap.collections > 0, "the collector never ran");
+    assert_eq!(global(&interp, "got"), Some(Value::Int(7)));
+}
+
+#[test]
+fn an_argument_survives_evaluating_a_later_argument() {
+    let interp = run(&format!(
+        "fn mk() {{ return [1, 2, 3] }}\n\
+         fn first(a, b) {{ return a }}\n\
+         {}\
+         let kept = len(first(mk(), churn()))",
+        churn("0")
+    ));
+
+    assert!(interp.heap.collections > 0, "the collector never ran");
+    assert_eq!(global(&interp, "kept"), Some(Value::Int(3)));
+}
+
+#[test]
+fn the_callee_survives_evaluating_the_arguments() {
+    // A closure built by an expression is reachable from nowhere but the
+    // Rust frame until the call actually begins.
+    let interp = run(&format!(
+        "fn make() {{ fn id(x) {{ return x }} return id }}\n\
+         {}\
+         let kept = make()(churn())",
+        churn("7")
+    ));
+
+    assert!(interp.heap.collections > 0, "the collector never ran");
+    assert_eq!(global(&interp, "kept"), Some(Value::Int(7)));
+}
+
+#[test]
+fn a_dict_entry_survives_evaluating_a_later_one() {
+    let interp = run(&format!(
+        "fn mk() {{ return [1, 2, 3] }}\n\
+         {}\
+         let d = {{\"a\": mk(), \"b\": churn()}}\n\
+         let kept = len(d[\"a\"])",
+        churn("0")
+    ));
+
+    assert!(interp.heap.collections > 0, "the collector never ran");
+    assert_eq!(global(&interp, "kept"), Some(Value::Int(3)));
+}
+
+#[test]
+fn an_assigned_value_survives_evaluating_its_target() {
+    // `xs[churn()] = mk()` evaluates the value first, then the target.
+    let interp = run(&format!(
+        "fn mk() {{ return [1, 2, 3] }}\n\
+         {}\
+         let xs = [0, 0]\n\
+         xs[churn()] = mk()\n\
+         let kept = len(xs[1])",
+        churn("1")
+    ));
+
+    assert!(interp.heap.collections > 0, "the collector never ran");
+    assert_eq!(global(&interp, "kept"), Some(Value::Int(3)));
+}
+
+#[test]
+fn a_dict_survives_collection_with_its_contents() {
+    let interp = run(&format!(
+        "let d = {{\"kept\": [1, 2, 3]}}\n\
+         {}\
+         let ignored = churn()\n\
+         let kept = len(d[\"kept\"])",
+        churn("0")
+    ));
+
+    assert!(interp.heap.collections > 0, "the collector never ran");
+    assert_eq!(global(&interp, "kept"), Some(Value::Int(3)));
+}
+
+#[test]
+fn an_unreachable_recursive_function_is_collected() {
+    // A function whose scope holds the function: the cycle that rules out
+    // reference counting. Redefining `f` should still reclaim the old one.
+    let interp = run("let i = 0\nwhile i < 2000 {\n fn f() { return f }\n i = i + 1\n}");
+
+    assert!(
+        interp.heap.live() < 600,
+        "heap grew to {} objects",
+        interp.heap.live()
+    );
+}

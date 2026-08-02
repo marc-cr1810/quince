@@ -305,7 +305,7 @@ fn area(shape: Shape): float {
 
 - **`match` is an expression**, and a statement only in the sense that any expression is.
   Every arm produces a value, and the type of the whole is the join of the arms' types —
-  computed the way `infer.rs` already joins the branches of an `if`.
+  computed the way the inference pass already joins the branches of an `if`.
 - **Arms are `Pattern => Expr`, comma-separated.** An arm needing statements uses a block,
   whose value is its last expression.
 - **Arms are tried in order** and the first match wins. An arm made unreachable by an earlier

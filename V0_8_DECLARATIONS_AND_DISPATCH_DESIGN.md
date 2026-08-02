@@ -88,7 +88,7 @@ Rules:
 - **Modifier ordering.** The canonical order is visibility, then `const`: `public const fn`,
   `private const fn`. The parser accepts any order and normalizes. Omitting visibility
   defaults to `public`, and an `op` is always public, so `const op` is the whole form.
-- **Enforced at resolution**, by `resolver.rs`, before anything runs:
+- **Enforced at resolution**, by `sema/resolve/walk.rs`, before anything runs:
   - Field assignment (`self.x = val`) or index mutation (`self.items[0] = val`) inside a
     `const fn` or `const op` is refused.
   - Calling a non-const method on `self` from inside a `const fn` is refused:

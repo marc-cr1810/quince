@@ -128,32 +128,59 @@ as the reference implementation to test the VM against.
 
 ### Modules
 
-Flat `src/*.rs`, matching the wrapt layout.
+One directory per stage, and one file per question that stage answers.
 
-| Module | Responsibility |
+The layout was flat `src/*.rs` through v0.6, matching the wrapt project it was
+started from. It stopped working before v0.7 began: `interp.rs` had reached 5,700
+lines and `infer.rs` 2,000, and the four milestone documents each add work to both.
+The reshape below is what those documents asked for — the test applied to every
+split was whether v0.7 through v0.10 give it something new to hold.
+
+| Directory | Responsibility |
 |---|---|
-| `main.rs` | entry point, wires CLI to the pipeline |
-| `cli.rs` | clap definitions — `run`, `repl` |
-| `repl.rs` | the interactive prompt — editing, highlighting, completion |
-| `color.rs` | ANSI styles, and the decision to emit them at all |
-| `lexer.rs` | source → `Token` stream, tracks spans |
-| `token.rs` | `Token`, `TokenKind` |
-| `ast.rs` | `Expr`, `Stmt` node definitions |
-| `parser.rs` | recursive-descent + Pratt for expression precedence |
-| `resolver.rs` | binds every name to a slot, or to the global scope |
-| `value.rs` | `Value` enum, `ObjId`, heap object types |
-| `heap.rs` | the arena, allocation, mark-and-sweep collection |
-| `interp.rs` | tree-walking evaluator |
-| `env.rs` | scopes and variable binding |
-| `dict.rs` | insertion-ordered map, and the values admitted as keys |
-| `class.rs` | the type every value belongs to, and where its behaviour is found |
-| `error.rs` | `QuinceError` with spans, user-facing diagnostics |
-| `stdlib.rs` | the modules the language ships — `math`, `io`, `time`, `random` |
-| `lsp.rs` | the language server — diagnostics, completion, hover, symbols |
+| `syntax/` | text → tokens → AST: `lexer`, `token`, `parser/`, `ast/`, `doc` |
+| `sema/` | everything decided before the program runs: `resolve/`, `infer/`, `types`, `symbols` |
+| `runtime/` | the object model: `value`, `heap`, `class`, `env`, `dict` |
+| `interp/` | the tree-walking evaluator, one file per job it has |
+| `builtins/` | the library in Rust: the natives per type, and `stdlib/` per module |
+| `error/` | `QuinceError` with spans, its kinds, and how one is drawn |
+| `lsp/` | the language server, one file per request the editor makes |
+| `repl/` | the interactive prompt — editing, highlighting, completion |
+
+and four files that answer to nobody: `main.rs` (entry point), `cli.rs` (clap
+definitions), `color.rs` (ANSI styles, and the decision to emit them at all), and
+`cursor.rs` (reading the text around a cursor, shared by the two editing surfaces).
+
+Three of the splits are worth naming, because each was made for a stated reason
+rather than for size alone:
+
+- **`interp/` splits by question, not by node type.** `exec` runs a statement,
+  `eval` evaluates an expression, `call` calls a thing, `ops` answers an operator,
+  `object` finds a member, `index` subscripts, `module` imports, `error` raises,
+  `show` renders. That is the seam the milestones cut along: v0.7's run-time
+  assignment checks are one file, v0.8's overload dispatch is one file, v0.10's
+  pattern matching is one more beside `exec`. A split by AST node would have put
+  each of those in all of them. It is still one `Interp` and one `impl` block.
+- **`sema/types.rs` is separate from the pass that fills it.** v0.7 tranche 2 —
+  `Type` gaining parameters, so `list[int]` can be spelled at all — is the item
+  every later milestone waits on, and it is a change to the representation and the
+  matching rules rather than to the walk. `symbols.rs` is likewise separate
+  because `Symbol` is what both editing surfaces render, and it should not move
+  when inference does.
+- **`builtins/` is split by receiver, and `types.rs` is the registry.** A method is
+  in the file for the type it acts on, and exactly one table says which native
+  answers which name. v0.10 adds `set`, `array`, `bytes`, and `range`; each is a
+  file there and a variant in `runtime::heap::Object`, and the registry is the only
+  thing both have to touch.
 
 Hand-written lexer and parser, no parser-generator dependency. For a language whose
 syntax we control and will change often, hand-rolled recursive descent stays easier to
 evolve and produces far better error messages.
+
+Tests stay next to what they test. A `#[cfg(test)] mod tests` at the foot of a small
+file, and a `tests.rs` beside the split ones — `interp/tests.rs`, `parser/tests.rs` —
+because a test suite that walks the whole evaluator has no one file to belong to and
+splitting it would mean duplicating its fixtures four ways.
 
 ## Resolution
 

@@ -1,0 +1,234 @@
+//! The parts of a declaration that are not the code inside it.
+//!
+//! A parameter, a function's header, an import list, and the modifier words a
+//! binding or a class carries. These are what the milestones after v0.6 grow:
+//! v0.7 puts a type annotation and a visibility word on [`Param`] and
+//! [`FnDecl`], v0.8 adds `const`, `override`, and `explicit`, and v0.9 adds a
+//! type-parameter list.
+
+
+use crate::syntax::ast::{Block, Op};
+use crate::syntax::doc::Doc;
+use crate::syntax::token::Span;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Param {
+    pub name: String,
+    pub span: Span,
+    /// Whether this is the `self` the parser inserted, rather than a parameter
+    /// someone wrote.
+    ///
+    /// A flag rather than a comparison against [`SELF`], because the name is
+    /// only unambiguous while `self` is a keyword — an invariant that lives in
+    /// the lexer and would be silently assumed here. The parser knows which
+    /// parameter it invented, so it says so.
+    pub receiver: bool,
+}
+
+/// The receiver's name inside a method body.
+///
+/// `self` is bound as an ordinary parameter that the parser inserts, rather
+/// than as something the evaluator injects. Everything downstream then treats
+/// it as a local: the resolver gives it a slot, a closure nested in a method
+/// captures it through the scope chain like any other name, and `read` needs no
+/// special case. What the keyword buys is the error when it is used outside a
+/// method, which would otherwise read `undefined variable`.
+pub const SELF: &str = "self";
+
+/// The parent class's name inside a method body.
+///
+/// Bound the same way, but as a slot in a scope wrapped around the methods of a
+/// class that extends another, rather than as a parameter — its value is fixed
+/// when the class is declared, not per call. A closure nested in a method
+/// reaches it through the same chain that carries [`SELF`].
+pub const SUPER: &str = "super";
+
+/// A method the language calls on the program's behalf.
+///
+/// These are the methods nobody writes a call to: `Point(1, 2)` reaches `init`,
+/// `len(x)` reaches `len`, `if x` reaches `bool`, `a + b` reaches `add`.
+/// Declared with `op` rather than `fn` so that being one is stated rather than
+/// inferred from the name, which is what makes the misspelling an error instead
+/// of a method nothing ever calls.
+///
+/// A closed set on purpose. `Op::from_name` is the only way in, so `op lenght`
+/// cannot compile, and every member has to be listed in [`OPS`](super::OPS) to be reachable
+/// — see `every_listed_op_round_trips_through_its_name`.
+///
+/// The declaration order is load-bearing. [`Op::index`] is the discriminant, and
+/// it indexes `Class::slots`, so [`OPS`](super::OPS) has to list the members in the same
+/// order — two ops sharing an index would not fail loudly the way a missing
+#[derive(Clone, Debug, PartialEq)]
+pub enum ImportNames {
+    /// `import math` — the module itself, under the name it was imported by.
+    Module,
+    /// `from math import floor, ceil` — each name, bound to what the module
+    /// declared under it.
+    Names(Vec<ImportName>),
+}
+
+/// One name in a `from … import` list.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImportName {
+    pub name: String,
+    /// Its own span, so a module that declares three of the four names asked for
+    /// can have the caret put under the fourth.
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct FnDecl {
+    pub name: String,
+    /// Where the name was written, which the body's span cannot stand in for: a
+    /// report about a *declaration* should underline the word being declared,
+    /// not the twenty lines under it.
+    pub name_span: Span,
+    /// For a method, `self` is `params[0]`; see [`SELF`].
+    pub params: Vec<Param>,
+    pub body: Block,
+    /// Set when the declaration used `op`, which the parser allows only inside a
+    /// class body — so a plain function always leaves this `None`.
+    pub op: Option<Op>,
+    /// The `##` block written above it, already checked against `params`.
+    ///
+    /// Checked at the parser rather than kept raw, so that a `@param` naming
+    /// something this function does not take is refused where the parameter
+    /// list is in hand — which is the only place the report can say what it
+    /// *does* take.
+    pub doc: Option<Doc>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BindKind {
+    /// `let`: the name may be reassigned.
+    Let,
+    /// `final`: the name is bound once. The object it names is untouched, so a
+    /// `final` list still grows — see [`BindKind::Const`] for the other one.
+    Final,
+    /// `const`: the name is bound once *and* the value is frozen, deeply, and
+    /// through every other name that already reaches it.
+    Const,
+}
+
+impl BindKind {
+    pub fn mutable(&self) -> bool {
+        matches!(self, BindKind::Let)
+    }
+
+    pub fn freezes(&self) -> bool {
+        matches!(self, BindKind::Const)
+    }
+
+    /// How the keyword is written, for error messages that quote it back.
+    pub fn word(&self) -> &'static str {
+        match self {
+            BindKind::Let => "let",
+            BindKind::Final => "final",
+            BindKind::Const => "const",
+        }
+    }
+}
+
+/// What a class declaration leaves open.
+///
+/// There are exactly two ways to attach behaviour to a type from outside — a
+/// subclass, and an `extend` block — so there are four states, and each has its
+/// own word rather than being spelled by stacking modifiers. See DESIGN.md.
+///
+/// | | inherit | `extend` |
+/// |---|---|---|
+/// | [`Openness::Open`] | yes | yes |
+/// | [`Openness::Final`] | no | yes |
+/// | [`Openness::Complete`] | yes | no |
+/// | [`Openness::Sealed`] | no | no |
+///
+/// The two predicates below are exhaustive matches on purpose: a fifth variant
+/// cannot be added without answering for both doors, which is the only way the
+/// table above and the code can be made to stay in step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Openness {
+    /// `class Point { … }`.
+    Open,
+    /// `final class Point { … }` — no subclass, but its vocabulary may grow.
+    Final,
+    /// `complete class Point { … }` — the method table is done; subclasses are
+    /// still welcome, since a subclass adds nothing to the class it descends
+    /// from.
+    Complete,
+    /// `sealed class Point { … }` — neither door. A composite rather than a
+    /// third door: `sealed` is `final` and `complete` at once, given its own
+    /// word so the common case reads as one.
+    Sealed,
+}
+
+impl Openness {
+    /// Whether a class may name this one after `extends`.
+    pub fn closes_inheritance(self) -> bool {
+        matches!(self, Openness::Final | Openness::Sealed)
+    }
+
+    /// Whether an `extend` block may add a method to this one.
+    pub fn closes_extension(self) -> bool {
+        matches!(self, Openness::Complete | Openness::Sealed)
+    }
+
+    /// The keyword as written, for a report that quotes it back. `None` is the
+    /// declaration that used no modifier and so has nothing to quote.
+    pub fn word(self) -> Option<&'static str> {
+        match self {
+            Openness::Open => None,
+            Openness::Final => Some("final"),
+            Openness::Complete => Some("complete"),
+            Openness::Sealed => Some("sealed"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+
+    #[test]
+    fn the_four_states_are_the_four_combinations() {
+        // The table in `Openness`'s docs, written once more where a change to
+        // either predicate has to disagree with it. `Sealed` being exactly the
+        // other two at once is the claim worth pinning: it is a spelling of the
+        // pair, not a third door.
+        let table = [
+            (Openness::Open, false, false, None),
+            (Openness::Final, true, false, Some("final")),
+            (Openness::Complete, false, true, Some("complete")),
+            (Openness::Sealed, true, true, Some("sealed")),
+        ];
+        for (openness, inheritance, extension, word) in table {
+            assert_eq!(openness.closes_inheritance(), inheritance, "{openness:?}");
+            assert_eq!(openness.closes_extension(), extension, "{openness:?}");
+            assert_eq!(openness.word(), word, "{openness:?}");
+        }
+
+        // Every state reached, so the four rows above are the whole table and not
+        // four of five.
+        let states: Vec<_> = table
+            .iter()
+            .map(|(o, ..)| (o.closes_inheritance(), o.closes_extension()))
+            .collect();
+        for combination in [(false, false), (true, false), (false, true), (true, true)] {
+            assert!(states.contains(&combination), "{combination:?} unreachable");
+        }
+    }
+
+    #[test]
+    fn a_modifier_is_spelled_the_way_it_is_written() {
+        // The words the parser matches and the words a report quotes back are the
+        // same list, so a rename cannot land in one and not the other.
+        for openness in [Openness::Final, Openness::Complete, Openness::Sealed] {
+            let word = openness.word().expect("a modifier has a word");
+            assert!(
+                crate::syntax::token::KEYWORDS.contains(&word),
+                "`{word}` is not a reserved word, so it cannot be a modifier"
+            );
+        }
+    }
+
+}

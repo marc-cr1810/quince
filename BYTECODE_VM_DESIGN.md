@@ -6,7 +6,7 @@ This design document outlines the technical proposals, architectural specificati
 
 ## 1. Executive Summary
 
-Quince currently executes programs via an AST tree-walking interpreter (`src/interp.rs`). While ergonomic and ideal for language bootstrapping, tree-walking incurs significant host stack recursion overhead, CPU cache misses, and restricted garbage collection safe-points.
+Quince currently executes programs via an AST tree-walking interpreter (`src/interp/`). While ergonomic and ideal for language bootstrapping, tree-walking incurs significant host stack recursion overhead, CPU cache misses, and restricted garbage collection safe-points.
 
 The proposed architecture introduces:
 1. **A Bytecode Virtual Machine**: Converts AST nodes into a compact, linear instruction stream executed on a fast, stack-based VM loop.

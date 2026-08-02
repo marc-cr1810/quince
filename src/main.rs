@@ -11,7 +11,7 @@ use clap::Parser as _;
 use quince::color::Style;
 use quince::error::QuinceError;
 use quince::interp::Interp;
-use quince::lexer::Lexer;
+use quince::syntax::lexer::Lexer;
 
 use crate::cli::{Cli, Command, Dump};
 

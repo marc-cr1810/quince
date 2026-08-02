@@ -532,7 +532,7 @@ body, instantiation with explicit arguments, header recording, `is`. The core, a
 tranche the rest genuinely require.
 
 **Tranche 2 — inference and defaulting.** `let s: Stack[int] = Stack()`, and bare `Stack()`
-defaulting to `Unknown`. Separate from tranche 1 because it touches `infer.rs` rather than
+defaulting to `Unknown`. Separate from tranche 1 because it touches `sema/infer/` rather than
 the class machinery.
 
 **Tranche 3 — bounds.** One resolution check, reusing v0.7 §4.1's matching.

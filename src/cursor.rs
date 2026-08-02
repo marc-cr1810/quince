@@ -13,9 +13,9 @@
 //! the caller has. That line is the point: this is the last place either
 //! surface touches raw text, and it is deliberately incapable of guessing.
 
-use quince::infer::Type;
-use quince::lexer::Lexer;
-use quince::token::TokenKind;
+use quince::sema::types::Type;
+use quince::syntax::lexer::Lexer;
+use quince::syntax::token::TokenKind;
 
 /// The dotted path `text` ends with, with every argument list normalised to `()`.
 ///

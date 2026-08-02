@@ -51,14 +51,14 @@ hour of work, and because a class that can answer `+` and not `|` is arbitrary.
 
 This milestone is not starting from nothing, and the pieces it builds on constrain it.
 
-- **`infer.rs`** answers what class an expression belongs to, with `Unknown` as a real
+- **`sema/infer/`** answers what class an expression belongs to, with `Unknown` as a real
   answer. Annotations are the mechanism by which a program turns an `Unknown` into a
   stated fact — the pass is where they will be read, not a thing to be written beside it.
 - **`Type` is `Class(String)`** and so cannot express `list[int]`. Giving it parameters is
   the first real work item; see §7.
 - **`Native` records `returns` and `params`** — what a builtin hands back, and what its
   parameters are called. It does *not* record their types.
-- **`doc.rs`** parses `##` blocks and checks `@param` names against the declaration.
+- **`syntax/doc.rs`** parses `##` blocks and checks `@param` names against the declaration.
   Annotations and documentation describe the same parameters and must compose.
 - **`Symbol`** is what both editing surfaces render. Annotations reach the editor by
   landing there, not by a second path.
@@ -169,7 +169,7 @@ fn process(data: const list[int]) {
 ```
 
 The annotation and the `@param` describe the same parameter and are not redundant: one
-says what may be passed, the other says what it means. `doc.rs` already refuses a `@param`
+says what may be passed, the other says what it means. `syntax/doc.rs` already refuses a `@param`
 naming something the declaration does not take, and hover renders both.
 
 **`const T` value qualifiers.** `const` already exists and already means exactly this: a
@@ -316,7 +316,7 @@ table the runtime check uses rather than a second copy of it.
 
 The bottom two rows are not an omission. An arithmetic or bitwise op may answer with
 whatever its class means by that operation — a set returning a set from `|`, a matrix
-returning a matrix from `*` — which is exactly why `infer.rs` calls `m + m` on a class
+returning a matrix from `*` — which is exactly why the inference pass calls `m + m` on a class
 `Unknown` rather than assuming a fixed type. An annotation on one of those is checked
 against what the body returns and against nothing else.
 

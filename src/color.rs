@@ -1,5 +1,5 @@
-use clap::ValueEnum;
 use std::io::IsTerminal;
+use clap::ValueEnum;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Default)]
 pub enum ColorChoice {
