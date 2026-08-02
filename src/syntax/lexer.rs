@@ -77,6 +77,7 @@ impl<'a> Lexer<'a> {
                 ',' => TokenKind::Comma,
                 '.' => TokenKind::Dot,
                 ':' => TokenKind::Colon,
+                '?' => TokenKind::Question,
                 ';' => TokenKind::Semi,
 
                 '+' => TokenKind::Plus,

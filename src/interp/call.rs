@@ -12,14 +12,15 @@
 use std::rc::Rc;
 
 use crate::error::{ErrorKind, QuinceError, Result};
-use crate::interp::error::{an, check_arity, frozen};
+use crate::interp::error::{an, check_arity, does_not_hold, frozen};
 use crate::interp::{Attr, Flow, Interp, MAX_DEPTH, out_of_stack};
-use crate::runtime::class::{Builtin, Instance};
+use crate::runtime::class::{BUILTINS as BUILTIN_TYPES, Builtin, Instance};
 use crate::runtime::dict::{Dict, Key};
 use crate::runtime::env::Env;
 use crate::runtime::heap::{ObjId, Object};
 use crate::runtime::value::Value;
-use crate::syntax::ast::{Expr, Op};
+use crate::sema::types::holds;
+use crate::syntax::ast::{Expr, Op, TypeExpr, TypeName};
 use crate::syntax::token::Span;
 
 impl Interp {
@@ -68,7 +69,15 @@ impl Interp {
                     Some(func.env),
                     func.decl.body.slot_count,
                 )));
-                for (index, arg) in args.into_iter().enumerate() {
+                for (index, mut arg) in args.into_iter().enumerate() {
+                    // Against the parameter's annotation, at the boundary the
+                    // value actually crosses. The span is the call's, because
+                    // that is where the wrong value was written — the
+                    // declaration is right and is somewhere else.
+                    if let Some(ty) = func.decl.params.get(index).and_then(|p| p.ty.clone()) {
+                        let named = format!("`{}`", func.decl.params[index].name);
+                        arg = self.coerced(&ty, arg, &named, span)?;
+                    }
                     self.heap.env_mut(scope).set(index as u16, arg);
                 }
 
@@ -88,10 +97,18 @@ impl Interp {
                     None => err,
                 });
 
-                match result? {
-                    Flow::Return(value) => Ok(value),
-                    Flow::Normal => Ok(Value::Nil),
+                let mut produced = match result? {
+                    Flow::Return(value) => value,
+                    Flow::Normal => Value::Nil,
+                };
+                // A declared return is checked on the way out, which catches the
+                // implicit `nil` a function that falls off its end produces —
+                // the case an annotation most often exists to rule out.
+                if let Some(ty) = func.decl.returns.clone() {
+                    let named = format!("`{}`\u{2019}s return", func.decl.name);
+                    produced = self.coerced(&ty, produced, &named, span)?;
                 }
+                Ok(produced)
             }
 
             Value::BoundMethod(id) => {
@@ -291,6 +308,89 @@ impl Interp {
 
     /// Runs a conversion and keeps what it produced as `id`'s payload.
     ///
+    /// The value as the annotation `ty` says it should be, or a refusal.
+    ///
+    /// Three things in the order §3.3 and §4.1 need them: the check, so a
+    /// refusal reports the value the program wrote; the widening, because
+    /// `let x: float = 0` has to *store* a float or `type(x)` would disagree
+    /// with the annotation next to it; and the freeze, at the boundary the value
+    /// crosses.
+    ///
+    /// Hands the value back rather than checking in place, because the widening
+    /// makes this a conversion and not only a test — and a caller that bound the
+    /// original would have an `int` under an annotation reading `float`.
+    pub(super) fn coerced(
+        &mut self,
+        ty: &TypeExpr,
+        value: Value,
+        what: &str,
+        span: Span,
+    ) -> Result<Value> {
+        // A name that is not a type at all is a different mistake from a value
+        // that does not hold, and reporting it as the second blames the value
+        // for the annotation being wrong. Checked here rather than at
+        // resolution because that is where the answer is: a class is an
+        // ordinary binding, and which ones exist is not known until they run.
+        if let TypeName::Named(name) = &ty.name
+            && !self.names_a_type(name)
+        {
+            return Err(self.no_such_type(name, ty.span));
+        }
+        if !holds(ty, &value, &self.heap) {
+            return Err(does_not_hold(&self.heap, ty, &value, what, span));
+        }
+        // The one widening §4.1 admits, made real. Narrowing is not symmetric
+        // and is not here: `let n: int = 3.7` would have to choose a rounding,
+        // and `int(x)` is how a program says which.
+        let value = match (&ty.name, &value) {
+            (TypeName::Named(name), Value::Int(n)) if name == "float" => Value::Float(*n as f64),
+            _ => value,
+        };
+        // `const T` freezes deeply, exactly as a `const` binding does — the same
+        // word at a place a binding cannot reach.
+        if ty.frozen {
+            self.heap.freeze(&value);
+        }
+        Ok(value)
+    }
+
+    /// Whether `name` names a class that exists.
+    ///
+    /// The builtins, and whatever the program bound at the top level. A class
+    /// declared inside a function and used as an annotation in the same scope
+    /// is not found — which is a gap, and the honest one: this has no scope in
+    /// hand, and the alternative is threading one through every check for a
+    /// shape nothing in the corpus writes.
+    fn names_a_type(&self, name: &str) -> bool {
+        if BUILTIN_TYPES.iter().any(|builtin| builtin.name() == name) {
+            return true;
+        }
+        matches!(
+            self.heap.globals(self.globals).get(name),
+            Some(Value::Class(_))
+        )
+    }
+
+    /// Reports an annotation naming something that is not a type.
+    fn no_such_type(&self, name: &str, span: Span) -> crate::error::Raised {
+        let mut known: Vec<&str> = BUILTIN_TYPES.iter().map(|builtin| builtin.name()).collect();
+        let declared: Vec<String> = self
+            .heap
+            .globals(self.globals)
+            .iter()
+            .filter(|(_, value)| matches!(value, Value::Class(_)))
+            .map(|(key, _)| key.to_string())
+            .collect();
+        known.extend(declared.iter().map(String::as_str));
+
+        let err = QuinceError::new(format!("there is no type called `{name}`"), span)
+            .with_kind(ErrorKind::Name);
+        match crate::error::did_you_mean(name, known) {
+            Some(suggestion) => err.with_help(format!("did you mean `{suggestion}`?")),
+            None => err,
+        }
+    }
+
     /// Runs the initializer of every field the class and its ancestors declared.
     ///
     /// Ancestors first, so a subclass redeclaring a name writes last and wins —
@@ -315,7 +415,11 @@ impl Interp {
                 continue;
             };
             for field in declared {
-                let value = self.eval(&field.value, env)?;
+                let mut value = self.eval(&field.value, env)?;
+                if let Some(ty) = field.ty.clone() {
+                    let named = format!("`{}`", field.name);
+                    value = self.coerced(&ty, value, &named, span)?;
+                }
                 if field.bind.freezes() {
                     self.heap.freeze(&value);
                 }

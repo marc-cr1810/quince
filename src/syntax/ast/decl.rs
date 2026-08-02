@@ -15,6 +15,9 @@ use crate::syntax::token::Span;
 pub struct Param {
     pub name: String,
     pub span: Span,
+    /// What the caller may pass, if the declaration said. `None` is the
+    /// unannotated parameter, which is whatever it is handed.
+    pub ty: Option<TypeExpr>,
     /// Whether this is the `self` the parser inserted, rather than a parameter
     /// someone wrote.
     ///
@@ -89,6 +92,8 @@ pub struct FnDecl {
     /// Set when the declaration used `op`, which the parser allows only inside a
     /// class body — so a plain function always leaves this `None`.
     pub op: Option<Op>,
+    /// What calling it hands back, if the declaration said.
+    pub returns: Option<TypeExpr>,
     /// How far it reaches: who may call the method, or whether an importing
     /// module sees the function.
     ///
@@ -134,6 +139,81 @@ impl BindKind {
             BindKind::Final => "final",
             BindKind::Const => "const",
         }
+    }
+}
+
+/// A type as the program wrote it.
+///
+/// The *source* form, kept beside the declaration it annotates: a name, its
+/// arguments, and the two suffixes/prefixes that qualify it. [`crate::sema::types::Type`]
+/// is the answer the pass works in, and this turns into one — but the two are
+/// deliberately different things. A report about an annotation has to underline
+/// the words the program typed, which needs spans this carries and that carries
+/// nothing of.
+///
+/// v0.9 gives [`TypeExpr::args`] something more to hold; until then `list[int]`
+/// is the only shape that fills it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TypeExpr {
+    pub name: TypeName,
+    /// `list[int]`'s `int`, in the order written.
+    pub args: Vec<TypeExpr>,
+    /// Whether a `?` followed it, admitting `nil`.
+    pub nullable: bool,
+    /// Whether `const` preceded it, freezing the value deeply as it crosses the
+    /// boundary — see v0.7 §3.3. The same word and the same meaning as the
+    /// binding form, at a place a binding cannot reach.
+    pub frozen: bool,
+    pub span: Span,
+}
+
+/// What an annotation names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TypeName {
+    /// A class: `int`, `string`, `list`, or one the program declared.
+    Named(String),
+    /// `any`, or `_`, which are two spellings of one type.
+    ///
+    /// One variant and not two, because the difference is only how it was
+    /// typed. `_` is preferred in a type-argument position, where it reads as
+    /// "this parameter, unconstrained", and `any` as a whole annotation — a
+    /// house style rather than a rule, so nothing here enforces it.
+    Any,
+}
+
+impl TypeExpr {
+    /// Whether `nil` holds as this type.
+    pub fn admits_nil(&self) -> bool {
+        self.nullable
+    }
+
+    /// How the annotation reads back, for a report that quotes it.
+    ///
+    /// Rebuilt from the parse rather than sliced out of the source, so a
+    /// message says the same thing whatever whitespace was written.
+    pub fn written(&self) -> String {
+        let mut text = String::new();
+        if self.frozen {
+            text.push_str("const ");
+        }
+        match &self.name {
+            TypeName::Named(name) => text.push_str(name),
+            TypeName::Any => text.push_str("any"),
+        }
+        if !self.args.is_empty() {
+            text.push('[');
+            for (index, arg) in self.args.iter().enumerate() {
+                if index > 0 {
+                    text.push_str(", ");
+                }
+                text.push_str(&arg.written());
+            }
+            text.push(']');
+        }
+        if self.nullable {
+            text.push('?');
+        }
+        text
     }
 }
 
@@ -221,6 +301,8 @@ pub struct FieldDecl {
     /// a binding.
     pub bind: BindKind,
     pub visibility: Visibility,
+    /// What the field holds, if the declaration said.
+    pub ty: Option<TypeExpr>,
     /// What it holds when an instance is built.
     ///
     /// Not optional in this milestone: a declaration with no initializer needs

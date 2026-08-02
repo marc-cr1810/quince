@@ -12,8 +12,29 @@ use crate::runtime::class::Instance;
 use crate::runtime::dict::{Dict, Key};
 use crate::runtime::heap::{Heap, ObjId, Object};
 use crate::runtime::value::Value;
-use crate::syntax::ast::BinaryOp;
+use crate::syntax::ast::{BinaryOp, TypeExpr};
 use crate::syntax::token::Span;
+
+/// Refuses a value that does not hold as the annotation it was checked against.
+///
+/// One constructor for all four boundaries — a binding, an argument, a return,
+/// and a field — because they are one mistake and should read as one. `what`
+/// names the boundary, so the sentence says where rather than making the caret
+/// carry it alone.
+pub(crate) fn does_not_hold(
+    heap: &Heap,
+    ty: &TypeExpr,
+    value: &Value,
+    what: &str,
+    span: Span,
+) -> Raised {
+    let (message, help) = crate::sema::types::refusal(ty, value, heap, what);
+    let err = QuinceError::new(message, span).with_kind(ErrorKind::Type);
+    match help {
+        Some(help) => err.with_help(help),
+        None => err,
+    }
+}
 
 impl Interp {
     /// Raises `value`, which has to be an instance of `Error`.

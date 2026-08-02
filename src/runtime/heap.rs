@@ -564,6 +564,7 @@ mod tests {
             owner: None,
             decl: std::rc::Rc::new(crate::syntax::ast::FnDecl {
                 visibility: crate::syntax::ast::Visibility::Public,
+                returns: None,
                 doc: None,
                 name: "f".to_string(),
                 name_span: crate::syntax::token::Span::new(0, 0),

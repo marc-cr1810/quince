@@ -5,7 +5,7 @@
 
 use crate::error::Result;
 use crate::syntax::ast::{BindKind, Stmt, StmtKind};
-use crate::syntax::parser::Parser;
+use crate::syntax::parser::{Parser, declaration};
 use crate::syntax::token::TokenKind;
 
 impl Parser {
@@ -20,7 +20,21 @@ impl Parser {
         };
         let word = format!("`{}`", bind.word());
 
-        let (name, _) = self.expect_ident(&format!("after {word}"))?;
+        let (name, name_span) = self.expect_ident(&format!("after {word}"))?;
+        let ty = self.annotation()?;
+        // An annotated binding is initialized or it is an error: there is no
+        // `int` to synthesize and no honest default. The rule that lets
+        // `let items: list[int]` mean `[]` is a constructor rule and waits for
+        // v0.8 with the rest of them — v0.7 §3.2.
+        if ty.is_some() && !self.check(&TokenKind::Assign) {
+            return Err(declaration(
+                format!("`{name}` is annotated but not initialized"),
+                start.to(name_span),
+            )
+            .with_help(
+                "an annotation says what the name will hold, not what to put there — give it a value",
+            ));
+        }
         self.expect(TokenKind::Assign, &format!("in a {word} binding"))?;
         let value = self.expression()?;
         let span = start.to(value.span);
@@ -32,6 +46,7 @@ impl Parser {
                 name,
                 value,
                 bind,
+                ty,
                 visibility: modifiers.visibility,
                 doc: modifiers.doc,
             },

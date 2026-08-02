@@ -8,7 +8,7 @@
 use crate::error::Result;
 use crate::syntax::ast::{
     self, BindKind, FieldDecl, FnDecl, ImportName, ImportNames, Op, Openness, Param, Stmt, StmtKind,
-    Var,
+    TypeExpr, TypeName, Var,
 };
 use crate::syntax::doc::Doc;
 use crate::syntax::parser::{Modifiers, Parser, declaration, syntax};
@@ -91,14 +91,19 @@ impl Parser {
             params.push(Param {
                 name: ast::SELF.to_string(),
                 span: name_span,
+                // The receiver's type is the class, and the class is not in hand
+                // here — nor would writing it help, since nobody passes `self`.
+                ty: None,
                 receiver: true,
             });
         }
         while !self.check(&TokenKind::RParen) {
             let (name, span) = self.expect_ident("in the parameter list")?;
+            let ty = self.annotation()?;
             params.push(Param {
                 name,
                 span,
+                ty,
                 receiver: false,
             });
             if !self.eat(&TokenKind::Comma) {
@@ -143,6 +148,8 @@ impl Parser {
             doc.check(&params)?;
         }
 
+        let returns = self.annotation()?;
+
         let body = self.block()?;
         Ok(FnDecl {
             name,
@@ -150,6 +157,7 @@ impl Parser {
             params,
             body,
             op,
+            returns,
             visibility,
             doc,
         })
@@ -171,6 +179,7 @@ impl Parser {
         let word = format!("`{}`", bind.word());
 
         let (name, name_span) = self.expect_ident(&format!("after {word}"))?;
+        let ty = self.annotation()?;
         self.expect(TokenKind::Assign, &format!("in a {word} field"))?;
         let value = self.expression()?;
         self.end_of_statement()?;
@@ -180,6 +189,7 @@ impl Parser {
             name_span,
             bind,
             visibility: modifiers.visibility,
+            ty,
             value,
             doc: modifiers.doc,
         })
@@ -208,6 +218,89 @@ impl Parser {
             "the second would replace the first without a word — rename it, or delete the \
              one you meant to be rid of",
         ))
+    }
+
+    /// An annotation after a `:`, when one is written.
+    ///
+    /// The `:` is the marker, so this answers `None` without consuming anything
+    /// when there is no annotation — which is what lets every declaration form
+    /// call it unconditionally.
+    pub(super) fn annotation(&mut self) -> Result<Option<TypeExpr>> {
+        if !self.eat(&TokenKind::Colon) {
+            return Ok(None);
+        }
+        self.type_expr().map(Some)
+    }
+
+    /// A type: `int`, `int?`, `list[string]`, `any`, `_`, `const dict[string, int]`.
+    ///
+    /// Recursive through the argument list, which is what makes
+    /// `list[dict[string, int]]` fall out rather than be a case.
+    pub(super) fn type_expr(&mut self) -> Result<TypeExpr> {
+        let start = self.peek().span;
+        // `const` first, because it qualifies whatever follows rather than being
+        // part of the name — `const list[int]`, never `list[const int]`.
+        let frozen = self.eat(&TokenKind::Const);
+
+        let name = match self.peek().kind.clone() {
+            TokenKind::Any => {
+                self.advance();
+                TypeName::Any
+            }
+            // `_` is an ordinary identifier everywhere else, and is the wildcard
+            // only here. Recognising it in type position costs nothing a program
+            // can observe: this grammar is new, so no `_` was ever written in it.
+            TokenKind::Ident(word) if word == "_" => {
+                self.advance();
+                TypeName::Any
+            }
+            TokenKind::Ident(word) => {
+                self.advance();
+                TypeName::Named(word)
+            }
+            other => {
+                return Err(syntax(
+                    format!("expected a type, found {other}"),
+                    self.peek().span,
+                ));
+            }
+        };
+
+        let mut args = Vec::new();
+        if self.eat(&TokenKind::LBracket) {
+            loop {
+                args.push(self.type_expr()?);
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
+                // A trailing comma before the `]`, as the argument lists and
+                // collection literals already allow.
+                if self.check(&TokenKind::RBracket) {
+                    break;
+                }
+            }
+            self.expect(TokenKind::RBracket, "after the type arguments")?;
+        }
+
+        let nullable = self.eat(&TokenKind::Question);
+        // `int??` is not a second kind of absent. Refused here, where both `?`s
+        // are in hand, rather than left to mean the same as one.
+        if nullable && self.check(&TokenKind::Question) {
+            return Err(declaration(
+                "a type is nullable or it is not — `??` says nothing `?` did not",
+                start.to(self.peek().span),
+            )
+            .with_help("write one `?`"));
+        }
+
+        let end = self.tokens[self.pos.saturating_sub(1)].span;
+        Ok(TypeExpr {
+            name,
+            args,
+            nullable,
+            frozen,
+            span: start.to(end),
+        })
     }
 
     /// The documentation attached to a token, parsed and checked for shape.

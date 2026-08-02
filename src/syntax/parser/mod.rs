@@ -73,6 +73,16 @@ impl Parser {
         }
     }
 
+    /// Parses a bare type, for the tests that assert about one.
+    ///
+    /// A type is not a statement, so there is no entry point that reaches
+    /// `type_expr` from a string — and a test that wrapped one in a `let` would
+    /// be asserting about the binding's checks as much as about the annotation.
+    #[cfg(test)]
+    pub fn parse_type_for_test(mut self) -> Result<crate::syntax::ast::TypeExpr> {
+        self.type_expr()
+    }
+
     /// Parses a whole program.
     ///
     /// Stops at the first error rather than recovering; reporting several errors

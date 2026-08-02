@@ -35,11 +35,17 @@ impl Interp {
                 name,
                 value,
                 bind,
+                ty,
                 visibility: _,
                 doc: _,
                 slot,
             } => {
-                let value = self.eval(value, env)?;
+                let mut value = self.eval(value, env)?;
+                // Against the annotation before the name is bound, so a refused
+                // value is never observable under the name that refused it.
+                if let Some(ty) = ty {
+                    value = self.coerced(ty, value, &format!("`{name}`"), stmt.span)?;
+                }
                 // Freezing before binding, so that a `const` can never be
                 // observed thawed — not that anything runs in between, but the
                 // order is the thing a reader checks first.

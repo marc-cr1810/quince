@@ -1,0 +1,58 @@
+let x: int = 8
+let opt: int? = 10
+let absent: string? = nil
+let anything: any = "held"
+let top: _? = nil
+
+# `float` accepts an int and widens it, so the value stored is the float.
+let widened: float = 3
+print(widened)
+print(type(widened))
+
+fn magnitude(x: float, y: float): float {
+    return x * x + y * y
+}
+print(magnitude(3.0, 4.0))
+# Widened at the boundary too, not only at a binding.
+print(magnitude(3, 4))
+
+fn maybe(flag: bool): string? {
+    if flag {
+        return "here"
+    }
+    return nil
+}
+print(maybe(true))
+print(maybe(false))
+
+class Point {
+    let px: int = 0
+    let py: int = 0
+
+    op init(a: int, b: int) {
+        self.px = a
+        self.py = b
+    }
+
+    fn sum(): int {
+        return self.px + self.py
+    }
+}
+print(Point(3, 4).sum())
+
+# A subclass holds as its parent.
+class Base {
+    op init() { }
+}
+class Derived extends Base {
+    op init() { }
+}
+fn takes(b: Base): string {
+    return type(b)
+}
+print(takes(Derived()))
+print(x)
+print(opt)
+print(absent)
+print(anything)
+print(top)

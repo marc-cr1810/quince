@@ -1,0 +1,8 @@
+Error: quince::NameError
+
+ × there is no type called `strng`
+  ╭─[err_annotation_unknown_type.qn:1:8]
+1 │ let x: strng = "a"
+  ·        ─────
+  ╰────
+  help: did you mean `string`?

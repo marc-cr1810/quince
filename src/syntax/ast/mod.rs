@@ -13,7 +13,8 @@ pub mod decl;
 pub mod op;
 
 pub use decl::{
-    BindKind, FieldDecl, FnDecl, ImportName, ImportNames, Openness, Param, SELF, SUPER, Visibility,
+    BindKind, FieldDecl, FnDecl, ImportName, ImportNames, Openness, Param, SELF, SUPER, TypeExpr,
+    TypeName, Visibility,
 };
 pub use op::{BinaryOp, LogicalOp, OPS, Op, Reflect, UnaryOp};
 
@@ -159,6 +160,8 @@ pub enum StmtKind {
         name: String,
         value: Expr,
         bind: BindKind,
+        /// What the name holds, if the declaration said.
+        ty: Option<TypeExpr>,
         /// Whether an importing module sees this name. Meaningful only at the
         /// top level — the parser refuses a visibility word on a binding inside
         /// a function, where there is no importer to hide it from.

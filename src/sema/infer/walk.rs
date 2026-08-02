@@ -14,7 +14,9 @@ use std::rc::Rc;
 use crate::builtins::stdlib;
 use crate::sema::infer::{Binding, ClassInfo, FILE, lookup, module_native};
 use crate::sema::symbols::{Kind, Symbol, described_by, module_symbols, symbol_for};
-use crate::sema::types::{Type, binary, builtin_ancestor, builtin_constructor, module_member, returned_by};
+use crate::sema::types::{
+    Type, binary, builtin_ancestor, builtin_constructor, module_member, returned_by, stated,
+};
 use crate::syntax::ast::{
     Block, Expr, ExprKind, FnDecl, ImportNames, SELF, Stmt, StmtKind, UnaryOp,
 };
@@ -181,10 +183,10 @@ impl Infer {
         for decl in methods {
             self.scopes.push(decl.body.span);
             for param in &decl.params {
-                let ty = if param.receiver {
-                    Type::class(class)
-                } else {
-                    Type::Unknown
+                let ty = match (param.receiver, &param.ty) {
+                    (true, _) => Type::class(class),
+                    (false, Some(stated_as)) => stated(stated_as),
+                    (false, None) => Type::Unknown,
                 };
                 self.bind(&param.name, Kind::Parameter, ty, decl.body.span.start);
             }
@@ -258,8 +260,14 @@ impl Infer {
             StmtKind::Expr(expr) | StmtKind::Throw(expr) => {
                 self.expr(expr);
             }
-            StmtKind::Let { name, value, bind, doc, .. } => {
-                let ty = self.expr(value);
+            StmtKind::Let { name, value, bind, ty, doc, .. } => {
+                // What the program said beats what the initializer looks like:
+                // `let x: float = 3` stores a float, so a pass reporting `int`
+                // would be describing a value that never existed.
+                let ty = match ty {
+                    Some(stated_as) => stated(stated_as),
+                    None => self.expr(value),
+                };
                 let symbol = Symbol::new(name, Kind::Variable, ty)
                     .declared_with(bind.word())
                     .with_doc(doc.clone());
@@ -381,8 +389,13 @@ impl Infer {
             // A parameter carries no information at all until v0.7 lets one be
             // annotated — except the receiver, which is the one parameter the
             // language itself filled in.
-            let ty = match (param.receiver, &class) {
-                (true, Some(class)) => Type::class(class.clone()),
+            let ty = match (param.receiver, &class, &param.ty) {
+                (true, Some(class), _) => Type::class(class.clone()),
+                // What the declaration said, which is the whole point of it
+                // being written: a parameter was `Unknown` until v0.7 because
+                // it is whatever the caller passed, and an annotation is the
+                // caller being told what that has to be.
+                (false, _, Some(stated_as)) => stated(stated_as),
                 _ => Type::Unknown,
             };
             let symbol = Symbol::new(&param.name, Kind::Parameter, ty)
@@ -422,10 +435,17 @@ impl Infer {
         if !self.computing.insert(key) {
             return Type::Unknown;
         }
-        let mut returns: Option<Type> = None;
-        self.returned(&decl.body.stmts, &mut returns);
+        // A declared return needs no walk: the language enforces it at run
+        // time, so what the body does cannot disagree with what it says.
+        let ty = match &decl.returns {
+            Some(stated_as) => stated(stated_as),
+            None => {
+                let mut returns: Option<Type> = None;
+                self.returned(&decl.body.stmts, &mut returns);
+                returns.unwrap_or_else(|| Type::class("nil"))
+            }
+        };
         self.computing.remove(&key);
-        let ty = returns.unwrap_or_else(|| Type::class("nil"));
         self.returns.insert(key, ty.clone());
         ty
     }

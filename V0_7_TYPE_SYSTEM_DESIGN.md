@@ -609,11 +609,29 @@ yet: there is no syntax to write an annotation until tranche 3 and no typed cont
 tranche 4, so every type the pass infers still has an empty argument list. The header
 belongs with tranche 4, which is also where its O(1) comparison first has a caller.
 
-**Tranche 3 — annotations and `const T`.** Parsing `: T`, `T?`, `any`, `_`, and `const T`
-on bindings, parameters, and returns; the §4.1 matching table; the run-time checks at
-assignment, argument, and `return`. Natives need parameter *types* to be checkable, which
-is a third pass over the 52 static declarations — batch it with anything else those tables
-need, because the pass itself is the expensive part, not the field.
+**Tranche 3 — annotations and `const T`.** ✅ **Landed, less the natives.** `: T`, `T?`,
+`any`, `_`, and `const T` parse on bindings, parameters, returns, and fields; the §4.1
+matching table is one function; the run-time checks fire at each of those four boundaries.
+
+Three things worth recording:
+
+- **`float` widening is a conversion, not a test.** §4.1 says the value stored is the
+  float, so the check hands a value *back* rather than answering yes or no — otherwise
+  `let x: float = 0` binds an int under an annotation reading `float` and `type(x)`
+  contradicts the line above it.
+- **Annotations reach the inference pass**, which is what §2 meant by them being the
+  mechanism that turns an `Unknown` into a stated fact. The corpus cross-check found this
+  on its own: it refused `let widened: float = 3` because the pass still said `int`.
+  `Type` gained nullability in the same change, for the same reason — `string?` holding
+  `nil` was the second thing it caught.
+- **An unknown type name is a run-time check**, not the resolution check §5 lists. A class
+  is an ordinary binding, so which names are types is not known until they run — the same
+  argument §3.6 makes about module exports. It reports as a `NameError` naming the
+  annotation rather than as a `TypeError` blaming the value.
+
+**Natives still take no parameter types.** The 52-declaration pass is not done, so a call
+into the library is unchecked. That is a smaller scope of the same mechanism rather than a
+half-built one: `print(x)` is exactly as checked as it was in v0.6.
 
 **Tranche 4 — containers.** `list[T]`, `dict[K, V]`, `dict[K]`, the modification checks,
 and `d[key]` answering `V?`. Depends on 2 and 3, and is the tranche that breaks a running

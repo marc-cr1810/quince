@@ -376,12 +376,18 @@ fn check_inference() {
             // Asked from the end of the file, which is where an editor asks
             // about a top-level name and where the program has just stopped.
             let claimed = types.of_name(&global, source.len() as u32);
-            let Some(claimed) = claimed.class_name() else {
+            let Some(named) = claimed.class_name() else {
                 continue;
             };
             claims += 1;
             let actual = value.type_name(&interp.heap);
-            if claimed != actual {
+            // A nullable claim is satisfied by `nil` as well as by its class:
+            // `string?` says the name holds one or the other, so finding either
+            // is the claim coming true rather than failing.
+            if actual == "nil" && claimed.admits_nil() {
+                continue;
+            }
+            if named != actual {
                 failures.push(format!(
                     "{name}: `{global}` was inferred as `{claimed}` and is a `{actual}`"
                 ));

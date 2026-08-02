@@ -27,9 +27,10 @@ use std::sync::Arc;
 
 use crate::builtins::stdlib;
 use crate::runtime::class::BUILTINS;
+use crate::runtime::heap::Heap;
 use crate::runtime::value::{Native, Value};
 use crate::sema::infer::ClassInfo;
-use crate::syntax::ast::BinaryOp;
+use crate::syntax::ast::{BinaryOp, TypeExpr, TypeName};
 
 
 /// A type's name, shared rather than copied.
@@ -64,6 +65,13 @@ pub struct ClassType {
     /// A `Vec` rather than a fixed arity because the arities differ — `list[T]`
     /// takes one, `dict[K, V]` two, and v0.9's parameter packs take any number.
     pub args: Vec<Type>,
+    /// Whether `nil` holds as this — the `?` in `int?`.
+    ///
+    /// Part of the type and not a wrapper around it, because §4.1 treats `int`
+    /// and `int?` as two annotations rather than one modified: they hold
+    /// different values, they are written in one breath, and a wrapper would
+    /// make every reader of a type unwrap before asking anything.
+    pub nullable: bool,
 }
 
 /// What the pass worked out about a value.
@@ -96,6 +104,7 @@ impl Type {
         Type::Class(ClassType {
             name: Arc::from(name.as_ref()),
             args: Vec::new(),
+            nullable: false,
         })
     }
 
@@ -104,7 +113,31 @@ impl Type {
         Type::Class(ClassType {
             name: Arc::from(name.as_ref()),
             args,
+            nullable: false,
         })
+    }
+
+    /// The same type, admitting `nil` — `int` becomes `int?`.
+    pub fn nullable(self) -> Type {
+        match self {
+            Type::Class(class) => Type::Class(ClassType {
+                nullable: true,
+                ..class
+            }),
+            other => other,
+        }
+    }
+
+    /// Whether `nil` holds as this.
+    ///
+    /// `Unknown` admits it: the pass has not been told what the name holds, and
+    /// refusing `nil` would be a claim it has no basis for. §3.2's table.
+    pub fn admits_nil(&self) -> bool {
+        match self {
+            Type::Class(class) => class.nullable,
+            Type::Unknown => true,
+            Type::Module(_) => false,
+        }
     }
 
     /// The class this is an instance of, or `None` for anything else.
@@ -169,16 +202,22 @@ impl std::fmt::Display for Type {
             // something anybody typed. The wildcard is the nearest true thing.
             Type::Unknown => write!(f, "_"),
             Type::Module(name) => write!(f, "module {name}"),
-            Type::Class(class) if class.args.is_empty() => write!(f, "{}", class.name),
             Type::Class(class) => {
-                write!(f, "{}[", class.name)?;
-                for (index, arg) in class.args.iter().enumerate() {
-                    if index > 0 {
-                        write!(f, ", ")?;
+                write!(f, "{}", class.name)?;
+                if !class.args.is_empty() {
+                    write!(f, "[")?;
+                    for (index, arg) in class.args.iter().enumerate() {
+                        if index > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{arg}")?;
                     }
-                    write!(f, "{arg}")?;
+                    write!(f, "]")?;
                 }
-                write!(f, "]")
+                if class.nullable {
+                    write!(f, "?")?;
+                }
+                Ok(())
             }
         }
     }
@@ -315,9 +354,162 @@ pub(crate) fn binary(op: BinaryOp, lhs: &Type, rhs: &Type) -> Type {
     }
 }
 
+/// The type an annotation states.
+///
+/// The bridge from what the program wrote to what the pass works in — the whole
+/// reason §2 calls annotations "the mechanism by which a program turns an
+/// `Unknown` into a stated fact". Without this the pass would keep inferring
+/// from the initializer and quietly disagree with the declaration beside it,
+/// which is what `what_the_pass_claims_is_what_the_programs_produce` catches.
+///
+/// `any` becomes `Unknown`, which is not quite the same thing and is the honest
+/// answer available today: §3.2 distinguishes what the pass *concluded* from
+/// what the program *said*, and [`Type`] has no way to carry the difference
+/// until it gains nullability. Both admit every value, so nothing downstream is
+/// misled — only an inlay hint would want to tell them apart, and that is
+/// tranche 7.
+pub fn stated(ty: &TypeExpr) -> Type {
+    match &ty.name {
+        TypeName::Any => Type::Unknown,
+        TypeName::Named(name) => {
+            let stated = Type::generic(name, ty.args.iter().map(stated).collect());
+            match ty.nullable {
+                true => stated.nullable(),
+                false => stated,
+            }
+        }
+    }
+}
+
+/// Whether `value` holds as the annotation `ty`, per v0.7 §4.1.
+///
+/// The one statement of the matching rules. Every check the milestone
+/// enforces — a binding, an argument, a return, and in tranche 4 a container's
+/// elements — asks this, so the table is written once and a program cannot find
+/// a boundary that answers differently from the others.
+///
+/// The rules that are not a plain "same class", in the order they are decided:
+///
+/// - **`nil` needs a `?`.** Non-nullable by default is the whole point, so this
+///   is checked before anything about the class.
+/// - **`any` admits everything but `nil`**, and `any?` everything.
+/// - **`float` accepts an int and widens it.** `1 + 2.0` is a float everywhere
+///   in the evaluator, so `let x: float = 0` being refused would be a rule that
+///   contradicts the next line. Narrowing is not symmetric: `let n: int = 3.7`
+///   stays an error, because it would have to choose a rounding and `int(x)` is
+///   how a program says which.
+/// - **A subclass holds as its parent.** `UserClass` admits an instance of it or
+///   of anything descending from it.
+/// - **Arguments are not checked here.** Nothing can carry them until tranche 4
+///   gives the containers parameters; when it does, this is the function that
+///   grows an arm, and §4.1's invariance is the rule it grows.
+pub fn holds(ty: &TypeExpr, value: &Value, heap: &Heap) -> bool {
+    if matches!(value, Value::Nil) {
+        return ty.admits_nil();
+    }
+    let name = match &ty.name {
+        // Anything that is not `nil`, and `nil` was answered above.
+        TypeName::Any => return true,
+        TypeName::Named(name) => name.as_str(),
+    };
+
+    let actual = value.type_name(heap);
+    if actual == name {
+        return true;
+    }
+    // An int is a float when a float was asked for, and never the other way.
+    if name == "float" && actual == "int" {
+        return true;
+    }
+    descends_from(heap, value, name)
+}
+
+/// Whether `value`'s class is `name` or descends from it.
+fn descends_from(heap: &Heap, value: &Value, name: &str) -> bool {
+    let mut current = Some(value.class(heap));
+    while let Some(id) = current {
+        if heap.class(id).name == name {
+            return true;
+        }
+        current = heap.class(id).parent;
+    }
+    false
+}
+
+/// Why `value` does not hold as `ty`, and what to write instead.
+///
+/// Beside [`holds`] because the two have to agree about what was wrong, and a
+/// message assembled at the raise site is a message that drifts from the rule.
+/// `what` names the boundary — a binding, a parameter, a return — and leads the
+/// sentence, so the caret is not the only thing saying where.
+///
+/// The `nil` case is separated because it is a different mistake with a
+/// different fix. "expected `int`, found nil" would send someone looking for the
+/// wrong value; what they need to know is that the annotation forbids absence
+/// and that one character admits it.
+pub fn refusal(ty: &TypeExpr, value: &Value, heap: &Heap, what: &str) -> (String, Option<String>) {
+    let written = ty.written();
+    if matches!(value, Value::Nil) && !ty.admits_nil() {
+        return (
+            format!("{what} is `{written}`, which does not admit `nil`"),
+            Some(match ty.name {
+                // `any` is the stated top type *minus* `nil`, so the fix is the
+                // same character and the resulting type has its own name.
+                TypeName::Any => "write `any?` for the type that admits everything".to_string(),
+                TypeName::Named(_) => format!("write `{written}?` if it may be absent"),
+            }),
+        );
+    }
+
+    let actual = value.type_name(heap);
+    let message = format!("{what} is `{written}`, but this is {}", an(actual));
+    // Advice only where there is some. Restating the message as a `help:` line
+    // is worse than no line at all — it doubles the reading and answers nothing.
+    // Narrowing is the one case with a real answer, and §4.1's asymmetry is
+    // exactly why: the conversion exists, the language just will not pick the
+    // rounding on the program's behalf.
+    let help = match (&ty.name, actual) {
+        (TypeName::Named(name), "float") if name == "int" => {
+            Some("write `int(x)` to say which way it should round".to_string())
+        }
+        _ => None,
+    };
+    (message, help)
+}
+
+/// `a` or `an`, for a type name read aloud in a sentence.
+fn an(name: &str) -> String {
+    match name.starts_with(['a', 'e', 'i', 'o', 'u']) {
+        true => format!("an {name}"),
+        false => format!("a {name}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The annotation `src` would parse to, for a test asserting about one.
+    fn annotation(src: &str) -> TypeExpr {
+        let tokens = crate::syntax::lexer::Lexer::new(src)
+            .tokenize()
+            .expect("the annotation lexes");
+        crate::syntax::parser::Parser::new(tokens)
+            .parse_type_for_test()
+            .expect("the annotation parses")
+    }
+
+    #[test]
+    fn an_annotation_reads_back_as_it_was_written() {
+        for src in ["int", "int?", "list[int]", "dict[string, int]", "any", "any?"] {
+            assert_eq!(annotation(src).written(), src);
+        }
+        // `_` is the other spelling of `any`, and a report quotes the type back
+        // rather than the characters — there is one type and it has one name.
+        assert_eq!(annotation("_").written(), "any");
+        assert_eq!(annotation("_?").written(), "any?");
+        assert_eq!(annotation("const list[int]").written(), "const list[int]");
+    }
 
     #[test]
     fn a_type_without_arguments_is_written_as_its_name() {
@@ -356,6 +548,39 @@ mod tests {
         assert_eq!(ints.args(), &[Type::class("int")]);
         assert!(Type::class("list").args().is_empty());
         assert!(Type::Unknown.args().is_empty());
+    }
+
+    #[test]
+    fn a_stated_annotation_becomes_the_type_it_names() {
+        assert_eq!(stated(&annotation("int")), Type::class("int"));
+        assert_eq!(stated(&annotation("int?")), Type::class("int").nullable());
+        assert_eq!(
+            stated(&annotation("list[int]")),
+            Type::generic("list", vec![Type::class("int")])
+        );
+        // `any` has no `Type` of its own yet — §3.2 distinguishes what the pass
+        // concluded from what the program said, and `Type` cannot carry the
+        // difference until it has somewhere to put it. Both admit every value.
+        assert_eq!(stated(&annotation("any")), Type::Unknown);
+        assert_eq!(stated(&annotation("_")), Type::Unknown);
+    }
+
+    #[test]
+    fn only_a_nullable_type_admits_nil() {
+        assert!(!Type::class("int").admits_nil());
+        assert!(Type::class("int").nullable().admits_nil());
+        // `Unknown` admits it: the pass has not been told, and refusing would be
+        // a claim it has no basis for.
+        assert!(Type::Unknown.admits_nil());
+        assert!(!Type::module("math").admits_nil());
+
+        assert_eq!(Type::class("int").nullable().to_string(), "int?");
+        assert_eq!(
+            Type::generic("list", vec![Type::class("int")])
+                .nullable()
+                .to_string(),
+            "list[int]?"
+        );
     }
 
     #[test]

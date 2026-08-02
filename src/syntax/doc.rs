@@ -426,6 +426,7 @@ mod tests {
         let params = vec![Param {
             name: "r".to_string(),
             span: Span::new(0, 0),
+            ty: None,
             receiver: false,
         }];
         let err = doc.check(&params).expect_err("a drifted name is refused");
@@ -444,6 +445,7 @@ mod tests {
             .map(|name| Param {
                 name: name.to_string(),
                 span: Span::new(0, 0),
+                ty: None,
                 receiver: false,
             })
             .collect::<Vec<_>>();
@@ -460,11 +462,13 @@ mod tests {
             Param {
                 name: "self".to_string(),
                 span: Span::new(0, 0),
+                ty: None,
                 receiver: true,
             },
             Param {
                 name: "w".to_string(),
                 span: Span::new(0, 0),
+                ty: None,
                 receiver: false,
             },
         ];
