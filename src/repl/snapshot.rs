@@ -91,8 +91,11 @@ impl Snapshot {
             // same object `import` produced — there is no second list.
             Value::Module(id) => {
                 let named = format!("module {}", interp.heap.globals(*id).name().unwrap_or_default());
-                if !self.members.contains_key(&named) {
-                    let members = interp
+                // Lazily, because the walk is only worth doing the first time a
+                // module is seen — the same module reached twice has the same
+                // members both times.
+                self.members.entry(named).or_insert_with(|| {
+                    interp
                         .heap
                         .globals(*id)
                         .iter()
@@ -109,9 +112,8 @@ impl Snapshot {
                                 Type::class(held.type_name(&interp.heap)),
                             ),
                         })
-                        .collect();
-                    self.members.insert(named, members);
-                }
+                        .collect()
+                });
             }
             Value::Instance(id) => {
                 let instance = interp.heap.instance(*id);
