@@ -576,13 +576,31 @@ fn what_the_pass_cannot_decide_it_does_not_report() {
 fn a_literals_elements_are_checked_against_the_annotation() {
     // The elements are right there in the source, so "the pass could be wrong"
     // is no defence — it can see exactly what is in the list.
+    // Named the way the run-time check names it, because both are now looking
+    // at the same thing: the element, not the joined type of all of them.
     assert_eq!(
         warnings("let xs: list[int] = [\"a\"]\n"),
-        vec!["`xs` is `list[int]`, but this is `list[string]`"]
+        vec!["item 0 is `int`, but this is a string"]
     );
     assert_eq!(
         warnings("let d: dict[string, int] = {\"a\": \"b\"}\n"),
-        vec!["`d` is `dict[string, int]`, but this is `dict[string, string]`"]
+        vec!["the value is `int`, but this is a string"]
+    );
+
+    // One bad element among good ones. Asking what the elements *agree* on
+    // answers "nothing" and says only that the pass cannot name the element
+    // type — while the question that matters is whether each one fits.
+    assert_eq!(
+        warnings("let xs: list[int] = [1, \"a\"]\n"),
+        vec!["item 1 is `int`, but this is a string"]
+    );
+    // Every one of them, not just the first.
+    assert_eq!(
+        warnings("let xs: list[int] = [\"a\", 2, \"c\"]\n"),
+        vec![
+            "item 0 is `int`, but this is a string",
+            "item 2 is `int`, but this is a string",
+        ]
     );
 
     let quiet = [
@@ -590,9 +608,6 @@ fn a_literals_elements_are_checked_against_the_annotation() {
         "let xs: list[int] = [1, 2]\n",
         // Widening, one level down.
         "let xs: list[float] = [1, 2]\n",
-        // Elements that disagree answer with the bare `list`, so there is
-        // nothing to compare and nothing to say.
-        "let xs: list[int] = [1, \"a\"]\n",
         // An empty literal says nothing about its elements.
         "let xs: list[int] = []\n",
         // The annotation says nothing about them either.
@@ -608,8 +623,18 @@ fn a_literals_elements_are_checked_against_the_annotation() {
 
     // And it does disagree all the way down when it should.
     assert_eq!(
-        warnings("let xs: list[list[int]] = [[\"a\"]]\n").len(),
-        1
+        warnings("let xs: list[list[int]] = [[\"a\"]]\n"),
+        vec!["item 0 is `int`, but this is a string"]
+    );
+    // The `dict[K]` shorthand leaves values unconstrained, so only the keys are
+    // asked about — §3.10, and the same rule the run-time check follows.
+    assert_eq!(
+        warnings("let d: dict[string] = {\"a\": nil, \"b\": 1}\n"),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        warnings("let d: dict[string] = {1: \"x\"}\n"),
+        vec!["the key is `string`, but this is an int"]
     );
 }
 

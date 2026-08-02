@@ -14,11 +14,30 @@
 //! So every rule below is one-sided. Nothing is reported unless the pass knows
 //! both types and they definitely disagree — `Unknown` on either side reports
 //! nothing, and so does anything this cannot decide.
+//!
+//! # What the later milestones need from this
+//!
+//! [`against`] dispatches on the *shape* of a container annotation: `list[T]`
+//! is one argument applied to every element, `dict[K, V]` is two applied
+//! positionally, and `dict[K]` is the shorthand where the second is elided.
+//! That is a per-type rule and not a general one, which is deliberate — the
+//! three containers v0.7 has are the three shapes it knows.
+//!
+//! v0.9's `tuple[A, B]` is a fourth and fits the same frame: fixed arity,
+//! positional, one argument per element by index. Its check is another arm.
+//!
+//! **A variadic pack is not.** `tuple[T...]` has no arity to zip against, so
+//! the comparison stops being "pair the arguments up" and becomes "match the
+//! declared shape against the actual ones" — one argument may stand for any
+//! number of elements, and which ones it covers depends on what surrounds it.
+//! That is a change to [`fits`], which currently refuses to answer when the
+//! two argument lists differ in length. It answers `true` there, so a pack
+//! arriving before the matcher does is silence rather than a wrong report.
 
 use crate::error::{ErrorKind, QuinceError, Raised};
 use crate::sema::infer::Types;
 use crate::sema::types::{Type, stated};
-use crate::syntax::ast::{Block, FieldDecl, Stmt, StmtKind, TypeExpr};
+use crate::syntax::ast::{Block, Expr, ExprKind, FieldDecl, Stmt, StmtKind, TypeExpr, TypeName};
 
 /// Every type mistake decidable from the source, in source order.
 ///
@@ -44,10 +63,7 @@ fn one(stmt: &Stmt, types: &Types, found: &mut Vec<Raised>) {
             name, value, ty, ..
         } => {
             if let Some(ty) = ty {
-                let held = types.of_expr(value.span.start);
-                if let Some(err) = disagrees(ty, &held, &format!("`{name}`"), types, value.span) {
-                    found.push(err);
-                }
+                against(ty, value, &format!("`{name}`"), types, found);
             }
         }
         StmtKind::Class { methods, fields, .. } => {
@@ -92,10 +108,58 @@ fn check_field(field: &FieldDecl, types: &Types, found: &mut Vec<Raised>) {
     let Some(ty) = &field.ty else {
         return;
     };
-    let held = types.of_expr(field.value.span.start);
-    if let Some(err) = disagrees(ty, &held, &format!("`{}`", field.name), types, field.value.span) {
+    against(ty, &field.value, &format!("`{}`", field.name), types, found);
+}
+
+/// Checks an initializer against the annotation it is being bound to.
+///
+/// A *literal* is checked element by element rather than as a whole, and that
+/// distinction is the whole point. Asking what `[1, "a"]`'s elements agree on
+/// answers "nothing", which says only that the pass cannot name the element
+/// type — while the question that matters is whether each element fits the
+/// annotation, and `"a"` plainly does not. Joining first threw that away.
+///
+/// It is also what lets the report name the element the way the run-time check
+/// does, since both are now looking at the same thing.
+fn against(
+    ty: &TypeExpr,
+    value: &Expr,
+    what: &str,
+    types: &Types,
+    found: &mut Vec<Raised>,
+) {
+    match (&value.kind, ty.args.as_slice()) {
+        // `list[T]` over a list literal.
+        (ExprKind::List(items), [element]) if names(ty, "list") => {
+            for (index, item) in items.iter().enumerate() {
+                against(element, item, &format!("item {index}"), types, found);
+            }
+            return;
+        }
+        // `dict[K, V]` over a dict literal. The `dict[K]` shorthand leaves
+        // values unconstrained, so only the keys are asked about there.
+        (ExprKind::Dict(pairs), [key] | [key, _]) if names(ty, "dict") => {
+            let value_ty = ty.args.get(1);
+            for (k, v) in pairs {
+                against(key, k, "the key", types, found);
+                if let Some(value_ty) = value_ty {
+                    against(value_ty, v, "the value", types, found);
+                }
+            }
+            return;
+        }
+        _ => {}
+    }
+
+    let held = types.of_expr(value.span.start);
+    if let Some(err) = disagrees(ty, &held, what, types, value.span) {
         found.push(err);
     }
+}
+
+/// Whether an annotation names a particular type.
+fn names(ty: &TypeExpr, name: &str) -> bool {
+    matches!(&ty.name, TypeName::Named(written) if written == name)
 }
 
 /// The report for an initializer that cannot hold, or `None` for every case
