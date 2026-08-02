@@ -252,7 +252,7 @@ fn a_function_declared_below_is_still_callable_above() {
 #[test]
 fn an_imported_module_is_a_module() {
     let src = "import math\n";
-    assert_eq!(of(src, "math"), Type::Module("math".to_string()));
+    assert_eq!(of(src, "math"), Type::module("math"));
 }
 
 #[test]

@@ -89,10 +89,10 @@ impl DocumentState {
                     // editor stops offering what the language would refuse.
                     let inside = types.class_at(offset);
                     types
-                        .members_of(&class)
+                        .members_of(&class.name)
                         .into_iter()
                         .filter(|symbol| !(on_class_object && symbol.kind == Kind::Field))
-                        .filter(|symbol| types.may_offer(symbol.visibility, &class, inside))
+                        .filter(|symbol| types.may_offer(symbol.visibility, &class.name, inside))
                         .collect()
                 }
                 None => Vec::new(),

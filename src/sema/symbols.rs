@@ -113,7 +113,10 @@ impl Symbol {
             // them spells it — and `fn init(name): nil` reads as a claim rather
             // than as the absence of one.
             Some("nil") | None => String::new(),
-            Some(class) => format!(": {class}"),
+            // Through `Display` rather than the name alone, so a `list[int]`
+            // renders as one. Reading `class_name` here is what made every
+            // parameterised type print as its bare head.
+            Some(_) => format!(": {ty}"),
         };
         match self.kind {
             Kind::Function | Kind::Method => format!(

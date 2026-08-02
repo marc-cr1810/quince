@@ -291,7 +291,7 @@ impl Infer {
                 match names {
                     ImportNames::Module => {
                         let ty = if known {
-                            Type::Module(module.clone())
+                            Type::module(module)
                         } else {
                             Type::Unknown
                         };
@@ -398,7 +398,7 @@ impl Infer {
             self.bind(
                 crate::syntax::ast::SUPER,
                 Kind::Variable,
-                Type::Class(parent),
+                Type::class(parent),
                 decl.body.span.start,
             );
         }
@@ -622,7 +622,7 @@ impl Infer {
             }
 
             ExprKind::Super { name, .. } => match self.parent() {
-                Some(parent) => self.read(&Type::Class(parent), name),
+                Some(parent) => self.read(&Type::class(parent), name),
                 None => Type::Unknown,
             },
 
@@ -667,6 +667,7 @@ impl Infer {
     fn read(&mut self, target: &Type, name: &str) -> Type {
         match target {
             Type::Class(class) => {
+                let class = &*class.name;
                 if self.method(class, name).is_some()
                     || builtin_ancestor(&self.classes, class, name).is_some()
                 {
@@ -754,9 +755,9 @@ impl Infer {
                     // The program's own method first, so a class extending a
                     // builtin that overrides `sort` is answered by what it
                     // wrote rather than by the table it inherited from.
-                    Type::Class(class) => match self.method(class, name) {
+                    Type::Class(class) => match self.method(&class.name, name) {
                         Some(decl) => self.return_of(&decl),
-                        None => builtin_ancestor(&self.classes, class, name)
+                        None => builtin_ancestor(&self.classes, &class.name, name)
                             .map_or(Type::Unknown, returned_by),
                     },
                     Type::Module(module) => {

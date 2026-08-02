@@ -593,11 +593,21 @@ A declared field is initialized when the instance is built, ancestors first, *be
 which is what makes `let balance = 0` followed by `self.balance = opening` read the way it
 looks.
 
-**Tranche 2 — `Type` gains parameters.** `Type::Class(String)` becomes something that can
-carry arguments, and a reified header appears on every allocation that has arguments to
-carry. This is the item the first draft did not mention and it is the one everything else
-waits on — here and in both milestones after. It ripples through `join`, `of_path`,
-`members_of`, the operator table in `binary`, and the corpus cross-check.
+**Tranche 2 — `Type` gains parameters.** ✅ **Landed, in half.** `Type::Class(String)` is
+now a name and a list of arguments, so `list[int]` can be expressed. This is the item the
+first draft did not mention and it is the one everything else waits on — here and in both
+milestones after.
+
+It rippled through far less than this predicted: nine pattern sites and a handful of
+render paths, because `Type::class(name)` kept its signature and `class_name()` kept
+answering the bare head. Invariance (§4.1) came free — it is structural equality on the
+argument list, not a rule anything implements. Types now have a `Display`, so `list[int]`
+renders the same in a signature, a hint, and an error.
+
+**The reified header did not land, and should not have.** Nothing can carry type arguments
+yet: there is no syntax to write an annotation until tranche 3 and no typed container until
+tranche 4, so every type the pass infers still has an empty argument list. The header
+belongs with tranche 4, which is also where its O(1) comparison first has a caller.
 
 **Tranche 3 — annotations and `const T`.** Parsing `: T`, `T?`, `any`, `_`, and `const T`
 on bindings, parameters, and returns; the §4.1 matching table; the run-time checks at
@@ -688,6 +698,13 @@ Recorded because they were open in an earlier draft and someone will want to rev
   `other.balance` on any `Account`, not only on `self` — which is what makes `op eq` and
   a `richer_than` writable at all. What decides is where the code was written.
 - **No static `acc.balance` check.** §5.
+- **A type's name is shared, not interned.** Interning to a numeric handle was the plan
+  going into tranche 2 and is not what landed. The argument for it was §3.9's O(1)
+  comparison — but that requirement belongs to the *reified descriptor* on an allocation,
+  which `Type` is not: `Type` is the compile-time pass's, where equality is never hot. A
+  shared `Arc<str>` gets the cheap clone, which was the real cost, without the global
+  state. `Name` is an alias precisely so tranche 4 can decide the descriptor's
+  representation on its own merits, and change this one line if the answer is the same.
 
 ---
 

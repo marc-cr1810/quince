@@ -424,7 +424,7 @@ impl Types {
                 }
                 continue;
             };
-            let class = class.clone();
+            let class = class.name.clone();
             ty = match called(segment) {
                 Some(name) => self.of_method(&class, name),
                 None => self.member(&class, segment),
