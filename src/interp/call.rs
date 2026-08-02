@@ -541,14 +541,10 @@ impl Interp {
         // declaration and this question is asked somewhere else, so the two
         // carry different spans while naming one type.
         match value.base(&self.heap).handle() {
-            Some(id) => self.heap.descriptor(id).is_some_and(|held| {
-                held.args.len() == ty.args.len()
-                    && held
-                        .args
-                        .iter()
-                        .zip(&ty.args)
-                        .all(|(ours, theirs)| ours.same_as(theirs))
-            }),
+            Some(id) => self
+                .heap
+                .descriptor(id)
+                .is_some_and(|held| held.same_args_as(ty)),
             None => false,
         }
     }

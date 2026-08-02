@@ -208,9 +208,20 @@ impl TypeExpr {
     /// type; `const` says what happens at a boundary the value crosses, not
     /// what the value is.
     pub fn same_as(&self, other: &TypeExpr) -> bool {
-        self.name == other.name
-            && self.nullable == other.nullable
-            && self.args.len() == other.args.len()
+        self.name == other.name && self.nullable == other.nullable && self.same_args_as(other)
+    }
+
+    /// Whether this and `other` were written with the same type arguments.
+    ///
+    /// The arguments *alone*, which is what `is` compares against a reified
+    /// descriptor. Deliberately not [`TypeExpr::same_as`] over the whole type:
+    /// the descriptor is the annotation the value crossed, and that annotation's
+    /// own nullability belongs to the binding rather than to the value in it.
+    /// `let xs: list[int]? = [1]` leaves a descriptor reading `list[int]?`, and
+    /// `xs is list[int]` is still true — the list is a list of ints whatever the
+    /// name that held it was allowed to be.
+    pub fn same_args_as(&self, other: &TypeExpr) -> bool {
+        self.args.len() == other.args.len()
             && self
                 .args
                 .iter()
@@ -403,6 +414,60 @@ impl Openness {
 mod tests {
     use super::*;
 
+
+    /// Parses a bare annotation, for the tests below.
+    fn annotation(src: &str) -> TypeExpr {
+        let tokens = crate::syntax::lexer::Lexer::new(src)
+            .tokenize()
+            .expect("the annotation lexes");
+        crate::syntax::parser::Parser::new(tokens)
+            .parse_type_for_test()
+            .expect("the annotation parses")
+    }
+
+    #[test]
+    fn one_type_written_twice_is_one_type() {
+        // The trap this exists for. `TypeExpr` carries a `Span`, so `==` on two
+        // identical annotations written in two places is `false` — and `is`
+        // compares a descriptor written at a declaration against a type written
+        // somewhere else, so `==` had it answering `false` for `xs is list[int]`.
+        //
+        // The derive cannot simply be removed: `Expr` holds a `TypeExpr` and
+        // derives `PartialEq` for the parser's own tests. So the trap stays and
+        // this is what keeps anything from walking into it again.
+        let here = annotation("list[int]");
+        let there = annotation("   list[int]");
+        assert_ne!(here, there, "the spans differ, so the values differ");
+        assert!(here.same_as(&there), "and yet it is one type");
+
+        assert!(annotation("int").same_as(&annotation("int")));
+        assert!(!annotation("int").same_as(&annotation("string")));
+        assert!(!annotation("int").same_as(&annotation("int?")));
+        assert!(!annotation("list[int]").same_as(&annotation("list[string]")));
+        assert!(!annotation("list[int]").same_as(&annotation("list")));
+        assert!(
+            annotation("dict[string, list[int]]").same_as(&annotation("dict[string, list[int]]")),
+            "nesting compares all the way down"
+        );
+    }
+
+    #[test]
+    fn const_says_nothing_about_what_a_value_is() {
+        // `const` is what happens at a boundary the value crosses, not what the
+        // value is — so it is not part of type identity.
+        assert!(annotation("const list[int]").same_as(&annotation("list[int]")));
+    }
+
+    #[test]
+    fn arguments_compare_apart_from_the_nullability_around_them() {
+        // What `is` needs. A descriptor reading `list[int]?` was left by a
+        // binding that was allowed to hold `nil`; the list in it is still a list
+        // of ints, so `xs is list[int]` has to be true.
+        let held = annotation("list[int]?");
+        let asked = annotation("list[int]");
+        assert!(!held.same_as(&asked), "the types differ");
+        assert!(held.same_args_as(&asked), "the arguments do not");
+    }
 
     #[test]
     fn the_four_states_are_the_four_combinations() {
