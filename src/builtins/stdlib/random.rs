@@ -3,7 +3,7 @@
 use crate::error::{ErrorKind, QuinceError, Result};
 use crate::runtime::class::Builtin;
 use crate::runtime::heap::Heap;
-use crate::runtime::value::{Native, Value};
+use crate::runtime::value::{Arg, Native, Value};
 use crate::syntax::token::Span;
 
 use super::math::number;
@@ -53,7 +53,7 @@ pub fn next_u64(state: &mut u64) -> u64 {
 static SEED: Native = Native {
     name: "seed",
     arity: Some(1),
-    params: &["n"],
+    params: &[Arg::of("n", &[Builtin::Int])],
     returns: Some(Builtin::Nil),
     doc: "Sets the generator's starting point, so a run can be repeated exactly.",
     func: |interp, args, span| {
@@ -68,7 +68,7 @@ static SEED: Native = Native {
 static RAND_INT: Native = Native {
     name: "int",
     arity: Some(2),
-    params: &["low", "high"],
+    params: &[Arg::of("low", &[Builtin::Int]), Arg::of("high", &[Builtin::Int])],
     returns: Some(Builtin::Int),
     doc: "A random integer between `low` and `high`, including both ends.",
     func: |interp, args, span| {
@@ -111,7 +111,7 @@ static RAND_FLOAT: Native = Native {
 static CHOICE: Native = Native {
     name: "choice",
     arity: Some(1),
-    params: &["items"],
+    params: &[Arg::of("items", &[Builtin::List])],
     returns: None,
     doc: "One item picked from `items`, so its type is whatever the list holds.",
     func: |interp, args, span| {

@@ -629,9 +629,22 @@ Three things worth recording:
   argument §3.6 makes about module exports. It reports as a `NameError` naming the
   annotation rather than as a `TypeError` blaming the value.
 
-**Natives still take no parameter types.** The 52-declaration pass is not done, so a call
-into the library is unchecked. That is a smaller scope of the same mechanism rather than a
-half-built one: `print(x)` is exactly as checked as it was in v0.6.
+**Natives now take parameter types**, done as a follow-up rather than in the tranche. The
+framing "a call into the library is unchecked" was wrong and worth correcting: every
+builtin already refused a bad argument, in a check hand-written in its own body. What was
+missing was that the *tables* did not record the types, so each refused in its own words —
+three sentences for one mistake — and the inference pass could not see the rule at all.
+
+A parameter now declares the set of builtin types it admits. A **set**, because several
+accept a union no annotation can spell: `math.floor` takes an int or a float and there is
+no `int | float` to write. Widening never arises as a result — a parameter admitting both
+accepts each as itself, so nothing is converted on the way in. An empty set admits
+anything, which is most of them, and is the honest answer for `print`'s values and
+`push`'s item.
+
+Left deliberately untyped: the conversions (`int(x)`, `list(x)`) and `len`, whose own
+messages say more than a list of accepted types would — and, for `len`, whose real rule is
+"anything answering `op len`", which no set of builtins can state.
 
 **Tranche 4 — containers.** ✅ **Landed.** `list[T]`, `dict[K, V]`, `dict[K]`, the
 modification checks, and `d[key]` answering `V?`.

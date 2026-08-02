@@ -588,3 +588,74 @@ fn every_native_names_the_parameters_it_takes() {
     }
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
 }
+
+/// A declared parameter type has to admit everything the implementation does.
+///
+/// The risk this milestone's native tables introduce: a declaration narrower
+/// than the body is a working program refused, and it fails at the call rather
+/// than anywhere near the table that got it wrong. `math` is the family where
+/// the union matters — every one of these takes an int or a float — and it is
+/// also the only family safe to call from a test, since the rest touch the
+/// filesystem, the clock, or the RNG.
+///
+/// The others are covered by the corpus rather than from here, for that reason.
+#[test]
+fn a_declared_parameter_admits_what_the_builtin_actually_takes() {
+    let numeric = [
+        "floor(2.5)", "floor(2)", "ceil(2.5)", "ceil(2)", "round(2.5)", "round(2)",
+        "abs(-2.5)", "abs(-2)", "sqrt(4.0)", "sqrt(4)", "pow(2, 3)", "pow(2.0, 3.0)",
+        "min(1, 2.0)", "max(1.0, 2)",
+    ];
+    let mut failures = Vec::new();
+    for call in numeric {
+        let src = format!("from math import floor, ceil, round, abs, sqrt, pow, min, max\n{call}\n");
+        let program = match quince::compile(&src) {
+            Ok(program) => program,
+            Err(err) => {
+                failures.push(format!("{call}: did not compile: {}", err.message));
+                continue;
+            }
+        };
+        let mut interp = Interp::with_output(Box::new(Vec::new()));
+        if let Err(err) = interp.run(&program) {
+            failures.push(format!("{call}: {}", err.message));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "a declaration refuses what its body accepts:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// Every parameter that names types names ones that exist, and reads back
+/// sensibly when a report quotes it.
+#[test]
+fn a_declared_parameter_reads_back_as_a_type() {
+    let known: Vec<&str> = quince::runtime::class::BUILTINS
+        .iter()
+        .map(|builtin| builtin.name())
+        .collect();
+    for (label, native) in every_native() {
+        for param in native.params {
+            for accepted in param.accepts {
+                assert!(
+                    known.contains(&accepted.name()),
+                    "`{label}` accepts `{}`, which is not a builtin type",
+                    accepted.name()
+                );
+            }
+            // An empty set is "anything" and says so; a non-empty one quotes
+            // the types it names.
+            let written = param.written();
+            match param.accepts.is_empty() {
+                true => assert_eq!(written, "any", "`{label}`'s `{}`", param.name),
+                false => assert!(
+                    written.contains('`'),
+                    "`{label}`'s `{}` reads as {written}",
+                    param.name
+                ),
+            }
+        }
+    }
+}

@@ -19,7 +19,7 @@ use crate::interp::show::Ask;
 use crate::runtime::class::Builtin;
 use crate::runtime::dict::Dict;
 use crate::runtime::heap::{Heap, Object};
-use crate::runtime::value::{Native, Value};
+use crate::runtime::value::{Arg, Native, Value};
 use crate::syntax::token::Span;
 
 /// The argument named as a type, for a conversion that cannot accept it at all.
@@ -62,7 +62,7 @@ pub(crate) fn checked_trunc(f: f64, span: Span) -> Result<i64> {
 pub static INT_INIT: Native = Native {
     name: "int",
     arity: Some(1),
-    params: &["value"],
+    params: &[Arg::any("value")],
     returns: Some(Builtin::Int),
     doc: "An int made from `value`. A float truncates toward zero, a string is parsed, and a bool is `1` or `0`.",
     // Dispatching on the base, so a class extending `int` converts as the int it
@@ -93,7 +93,7 @@ pub static INT_INIT: Native = Native {
 pub static FLOAT_INIT: Native = Native {
     name: "float",
     arity: Some(1),
-    params: &["value"],
+    params: &[Arg::any("value")],
     returns: Some(Builtin::Float),
     doc: "A float made from `value`.",
     func: |interp, args, span| match &args[0].base(&interp.heap).clone() {
@@ -116,7 +116,7 @@ pub static FLOAT_INIT: Native = Native {
 pub static STR_INIT: Native = Native {
     name: "string",
     arity: Some(1),
-    params: &["value"],
+    params: &[Arg::any("value")],
     returns: Some(Builtin::Str),
     doc: "The value rendered as a string, the same way `print` writes it. A class may answer for itself with `op string`.",
     func: |interp, args, _span| {
@@ -129,7 +129,7 @@ pub static STR_INIT: Native = Native {
 pub static BOOL_INIT: Native = Native {
     name: "bool",
     arity: Some(1),
-    params: &["value"],
+    params: &[Arg::any("value")],
     returns: Some(Builtin::Bool),
     doc: "Whether `value` is truthy. A class may answer for itself with `op bool`.",
     func: |interp, args, _span| Ok(Value::Bool(interp.is_truthy(&args[0])?)),
@@ -142,7 +142,7 @@ pub static BOOL_INIT: Native = Native {
 pub static LIST_INIT: Native = Native {
     name: "list",
     arity: None,
-    params: &["items"],
+    params: &[Arg::any("items")],
     returns: Some(Builtin::List),
     doc: "A new list, empty or holding what `value` iterates to.",
     func: |interp, args, span| match args {
@@ -167,7 +167,7 @@ pub static LIST_INIT: Native = Native {
 pub static DICT_INIT: Native = Native {
     name: "dict",
     arity: None,
-    params: &["entries"],
+    params: &[Arg::any("entries")],
     returns: Some(Builtin::Dict),
     doc: "A new dict, empty or built from `value`.",
     func: |interp, args, span| match args {

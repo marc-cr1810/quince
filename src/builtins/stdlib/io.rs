@@ -3,7 +3,7 @@
 use crate::error::{ErrorKind, QuinceError, Raised, Result};
 use crate::runtime::class::Builtin;
 use crate::runtime::heap::{Heap, Object};
-use crate::runtime::value::{Native, Value};
+use crate::runtime::value::{Arg, Native, Value};
 use crate::syntax::token::Span;
 
 use super::{Member, Module};
@@ -58,7 +58,7 @@ fn io_error(what: &str, path: &str, err: std::io::Error, span: Span) -> Raised {
 static READ: Native = Native {
     name: "read",
     arity: Some(1),
-    params: &["path"],
+    params: &[Arg::of("path", &[Builtin::Str])],
     returns: Some(Builtin::Str),
     doc: "The whole contents of the file at `path`, as one string.",
     func: |interp, args, span| {
@@ -73,7 +73,7 @@ static READ: Native = Native {
 static WRITE: Native = Native {
     name: "write",
     arity: Some(2),
-    params: &["path", "contents"],
+    params: &[Arg::of("path", &[Builtin::Str]), Arg::of("contents", &[Builtin::Str])],
     returns: Some(Builtin::Nil),
     doc: "Writes `contents` to `path`, replacing what was there.",
     func: |interp, args, span| {
@@ -89,7 +89,7 @@ static WRITE: Native = Native {
 static APPEND: Native = Native {
     name: "append",
     arity: Some(2),
-    params: &["path", "contents"],
+    params: &[Arg::of("path", &[Builtin::Str]), Arg::of("contents", &[Builtin::Str])],
     returns: Some(Builtin::Nil),
     doc: "Adds `contents` to the end of `path`, creating the file if it is not there.",
     func: |interp, args, span| {
@@ -112,7 +112,7 @@ static APPEND: Native = Native {
 static EXISTS: Native = Native {
     name: "exists",
     arity: Some(1),
-    params: &["path"],
+    params: &[Arg::of("path", &[Builtin::Str])],
     returns: Some(Builtin::Bool),
     doc: "Whether there is anything at `path`. The one member that answers rather than raising.",
     func: |interp, args, span| {
@@ -124,7 +124,7 @@ static EXISTS: Native = Native {
 static LINES: Native = Native {
     name: "lines",
     arity: Some(1),
-    params: &["path"],
+    params: &[Arg::of("path", &[Builtin::Str])],
     returns: Some(Builtin::List),
     doc: "The lines of the file at `path`, without their line endings.",
     func: |interp, args, span| {

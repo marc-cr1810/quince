@@ -1,0 +1,8 @@
+Error: quince::TypeError
+
+ × `separator` is `string`, but this is an int
+  ╭─[err_native_argument.qn:1:7]
+1 │ print("a,b".split(5))
+  ·       ──────────────
+  ╰────
+  help: `split` takes `string` there

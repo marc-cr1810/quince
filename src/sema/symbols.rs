@@ -201,7 +201,7 @@ pub fn symbol_of_native(native: &'static Native, kind: Kind) -> Symbol {
         keyword: None,
         // A native carries no visibility word; the tables have none to write.
         visibility: Visibility::Public,
-        params: native.params.iter().map(|name| name.to_string()).collect(),
+        params: native.params.iter().map(|arg| arg.name.to_string()).collect(),
     }
 }
 

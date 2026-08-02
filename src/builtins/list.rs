@@ -6,7 +6,7 @@ use crate::interp::Interp;
 use crate::interp::error::frozen;
 use crate::runtime::class::Builtin;
 use crate::runtime::heap::{Heap, ObjId, Object};
-use crate::runtime::value::{Native, Value};
+use crate::runtime::value::{Arg, Native, Value};
 use crate::syntax::ast::BinaryOp;
 use crate::syntax::token::Span;
 
@@ -38,7 +38,7 @@ pub static REVERSE: Native = Native {
 pub static FIND: Native = Native {
     name: "find",
     arity: Some(2),
-    params: &["item"],
+    params: &[Arg::any("item")],
     returns: Some(Builtin::Int),
     doc: "Where `item` first appears in the list, or `-1` if it is not there.",
     func: |interp, args, span| {
@@ -178,7 +178,7 @@ pub(super) fn walk_list(
 pub static MAP: Native = Native {
     name: "map",
     arity: Some(2),
-    params: &["f"],
+    params: &[Arg::any("f")],
     returns: Some(Builtin::List),
     doc: "A new list holding `f` applied to each item.",
     func: |interp, args, span| {
@@ -201,7 +201,7 @@ pub static MAP: Native = Native {
 pub static FILTER: Native = Native {
     name: "filter",
     arity: Some(2),
-    params: &["f"],
+    params: &[Arg::any("f")],
     returns: Some(Builtin::List),
     doc: "A new list holding the items `f` answered truthily for.",
     func: |interp, args, span| {
@@ -293,7 +293,7 @@ pub(super) fn merge_sort(
 pub static PUSH: Native = Native {
     name: "push",
     arity: Some(2),
-    params: &["item"],
+    params: &[Arg::any("item")],
     returns: Some(Builtin::Nil),
     doc: "Adds `item` to the end of the list.",
     func: |interp, args, span| match &args[0] {

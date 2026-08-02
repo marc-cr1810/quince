@@ -18,7 +18,7 @@ use crate::runtime::class::{BUILTINS as BUILTIN_TYPES, Builtin, Instance};
 use crate::runtime::dict::{Dict, Key};
 use crate::runtime::env::Env;
 use crate::runtime::heap::{ObjId, Object};
-use crate::runtime::value::Value;
+use crate::runtime::value::{Native, Value};
 use crate::sema::types::holds;
 use crate::syntax::ast::{Expr, ExprKind, Op, TypeExpr, TypeName};
 use crate::syntax::token::Span;
@@ -30,6 +30,7 @@ impl Interp {
                 if let Some(arity) = native.arity {
                     check_arity(native.name, arity, args.len(), span)?;
                 }
+                self.check_native_args(native, &args, span)?;
                 // `args` lives in this frame and nothing roots it. That is safe
                 // only while no builtin reaches a safe point; the first one to
                 // call back into Quince has to root them here first.
@@ -499,6 +500,51 @@ impl Interp {
             (TypeName::Named(name), Value::Int(n)) if name == "float" => Value::Float(*n as f64),
             _ => value,
         })
+    }
+
+    /// Refuses an argument a builtin's declaration does not admit.
+    ///
+    /// The library's half of what an annotation does for a function someone
+    /// wrote, and worded by the same rule so the two read alike: a wrong
+    /// argument to `split` now says what a wrong argument to `fn f(s: string)`
+    /// says. Before this the tables recorded parameter *names* and not types, so
+    /// each builtin refused in its own words — three sentences for one mistake —
+    /// and the inference pass could not see the rule at all.
+    ///
+    /// A parameter that names no types admits anything, which is most of them:
+    /// `print` takes any value, `push` takes any item, and a conversion refuses
+    /// in its own words because "cannot convert a list to an int" says more than
+    /// a list of what `int` accepts would.
+    fn check_native_args(&mut self, native: &Native, args: &[Value], span: Span) -> Result<()> {
+        // A type's method is called on a receiver that `arity` counts and the
+        // caller does not write, so the declared parameters line up with the
+        // *end* of `args`. `every_native_names_the_parameters_it_takes` is what
+        // keeps that offset from being a guess.
+        let offset = args.len().saturating_sub(native.params.len());
+        for (index, param) in native.params.iter().enumerate() {
+            let Some(value) = args.get(offset + index) else {
+                continue;
+            };
+            if param.admits(value, &self.heap) {
+                continue;
+            }
+            return Err(QuinceError::new(
+                format!(
+                    "`{}` is {}, but this is {}",
+                    param.name,
+                    param.written(),
+                    an(value.type_name(&self.heap))
+                ),
+                span,
+            )
+            .with_kind(ErrorKind::Type)
+            .with_help(format!(
+                "`{}` takes {} there",
+                native.name,
+                param.written()
+            )));
+        }
+        Ok(())
     }
 
     /// Whether `value` has the type `ty`, as `is` asks it.

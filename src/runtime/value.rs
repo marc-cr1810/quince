@@ -57,6 +57,63 @@ pub struct BoundMethod {
     pub method: Value,
 }
 
+/// One parameter of a builtin: what a caller writes there, and what it may be.
+///
+/// The types are a *set* rather than one type, because several of these accept
+/// a union no annotation can spell — `math.floor` takes an int or a float, and
+/// there is no `int | float` in the language for it to declare. Widening never
+/// arises as a result: a parameter that takes both accepts each as itself, so
+/// nothing is converted on the way in.
+///
+/// An empty set admits anything, which is the honest answer for `print`'s
+/// values and for `list.push`'s item.
+#[derive(Debug)]
+pub struct Arg {
+    pub name: &'static str,
+    pub accepts: &'static [Builtin],
+}
+
+impl Arg {
+    /// A parameter that admits any value.
+    pub const fn any(name: &'static str) -> Arg {
+        Arg {
+            name,
+            accepts: &[],
+        }
+    }
+
+    /// A parameter that admits one of `accepts`.
+    pub const fn of(name: &'static str, accepts: &'static [Builtin]) -> Arg {
+        Arg { name, accepts }
+    }
+
+    /// Whether `value` may be passed here.
+    pub fn admits(&self, value: &Value, heap: &Heap) -> bool {
+        if self.accepts.is_empty() {
+            return true;
+        }
+        // Through the *base*, so a class extending `string` is a string here —
+        // the same unwrapping every other builtin does to its receiver.
+        let class = value.base(heap).class(heap);
+        self.accepts
+            .iter()
+            .any(|builtin| heap.class(class).name == builtin.name())
+    }
+
+    /// How the accepted set reads in a report — `int` or `int or float`.
+    pub fn written(&self) -> String {
+        let names: Vec<&str> = self.accepts.iter().map(|b| b.name()).collect();
+        match names.split_last() {
+            None => "any".to_string(),
+            Some((last, [])) => format!("`{last}`"),
+            Some((last, rest)) => {
+                let listed: Vec<String> = rest.iter().map(|n| format!("`{n}`")).collect();
+                format!("{} or `{last}`", listed.join(", "))
+            }
+        }
+    }
+}
+
 /// A function implemented in Rust.
 pub struct Native {
     pub name: &'static str,
@@ -73,7 +130,7 @@ pub struct Native {
     ///
     /// `every_native_names_the_parameters_it_takes` holds the two counts in
     /// step. Without it the editor would confidently label the wrong argument.
-    pub params: &'static [&'static str],
+    pub params: &'static [Arg],
     /// The type this always produces, or `None` for one whose answer depends on
     /// what it was given.
     ///

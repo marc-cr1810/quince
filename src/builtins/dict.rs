@@ -6,7 +6,7 @@ use crate::interp::error::frozen;
 use crate::interp::index::key_of;
 use crate::runtime::class::Builtin;
 use crate::runtime::heap::Object;
-use crate::runtime::value::{Native, Value};
+use crate::runtime::value::{Arg, Native, Value};
 
 pub static KEYS: Native = Native {
     name: "keys",
@@ -67,7 +67,7 @@ pub static VALUES: Native = Native {
 pub static GET: Native = Native {
     name: "get",
     arity: Some(3),
-    params: &["key", "default"],
+    params: &[Arg::of("key", &[Builtin::Nil, Builtin::Bool, Builtin::Int, Builtin::Float, Builtin::Str]), Arg::any("default")],
     returns: None,
     doc: "The value stored under `key`, or `default` if there is none — so its type is whatever the dict holds.",
     func: |interp, args, span| match args[0].base(&interp.heap) {
@@ -94,7 +94,7 @@ pub static GET: Native = Native {
 pub static REMOVE: Native = Native {
     name: "remove",
     arity: Some(2),
-    params: &["key"],
+    params: &[Arg::of("key", &[Builtin::Nil, Builtin::Bool, Builtin::Int, Builtin::Float, Builtin::Str])],
     returns: None,
     doc: "Takes `key` out of the dict and answers with what it held. Raises if the key is not there.",
     func: |interp, args, span| match &args[0] {

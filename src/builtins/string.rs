@@ -5,7 +5,7 @@ use std::rc::Rc;
 use crate::error::{ErrorKind, QuinceError, Result};
 use crate::runtime::class::Builtin;
 use crate::runtime::heap::{Heap, Object};
-use crate::runtime::value::{Native, Value};
+use crate::runtime::value::{Arg, Native, Value};
 use crate::syntax::token::Span;
 
 /// The receiver of a string method.
@@ -49,7 +49,7 @@ pub(super) fn text_arg(
 pub static REPEAT: Native = Native {
     name: "repeat",
     arity: Some(2),
-    params: &["times"],
+    params: &[Arg::of("times", &[Builtin::Int])],
     returns: Some(Builtin::Str),
     doc: "The string written `n` times, end to end.",
     func: |interp, args, span| {
@@ -107,7 +107,7 @@ pub static TRIM: Native = Native {
 pub static STARTS_WITH: Native = Native {
     name: "starts_with",
     arity: Some(2),
-    params: &["prefix"],
+    params: &[Arg::of("prefix", &[Builtin::Str])],
     returns: Some(Builtin::Bool),
     doc: "Whether the string begins with `prefix`.",
     func: |interp, args, span| {
@@ -119,7 +119,7 @@ pub static STARTS_WITH: Native = Native {
 pub static ENDS_WITH: Native = Native {
     name: "ends_with",
     arity: Some(2),
-    params: &["suffix"],
+    params: &[Arg::of("suffix", &[Builtin::Str])],
     returns: Some(Builtin::Bool),
     doc: "Whether the string ends with `suffix`.",
     func: |interp, args, span| {
@@ -131,7 +131,7 @@ pub static ENDS_WITH: Native = Native {
 pub static REPLACE: Native = Native {
     name: "replace",
     arity: Some(3),
-    params: &["from", "to"],
+    params: &[Arg::of("from", &[Builtin::Str]), Arg::of("to", &[Builtin::Str])],
     returns: Some(Builtin::Str),
     doc: "The string with every `from` replaced by `to`.",
     func: |interp, args, span| {
@@ -157,7 +157,7 @@ pub static REPLACE: Native = Native {
 pub static SPLIT: Native = Native {
     name: "split",
     arity: Some(2),
-    params: &["separator"],
+    params: &[Arg::of("separator", &[Builtin::Str])],
     returns: Some(Builtin::List),
     doc: "The string cut at every `separator`, as a list of strings. The separator is not kept, and it may not be empty — use `chars`.",
     func: |interp, args, span| {
@@ -197,7 +197,7 @@ pub static CHARS: Native = Native {
 pub static JOIN: Native = Native {
     name: "join",
     arity: Some(2),
-    params: &["items"],
+    params: &[Arg::of("items", &[Builtin::List])],
     returns: Some(Builtin::Str),
     doc: "The list's items rendered and joined with the string between them.",
     func: |interp, args, span| {

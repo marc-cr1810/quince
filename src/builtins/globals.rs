@@ -9,7 +9,7 @@ use std::rc::Rc;
 use crate::error::{ErrorKind, QuinceError};
 use crate::interp::show::Ask;
 use crate::runtime::class::Builtin;
-use crate::runtime::value::{Native, Value};
+use crate::runtime::value::{Arg, Native, Value};
 use crate::syntax::ast::Op;
 
 /// The globals every program starts with.
@@ -22,7 +22,7 @@ pub static BUILTINS: &[&Native] = &[&PRINT, &LEN, &TYPE];
 static PRINT: Native = Native {
     name: "print",
     arity: None,
-    params: &["values"],
+    params: &[Arg::any("values")],
     returns: Some(Builtin::Nil),
     doc: "Writes its arguments to standard output, separated by spaces, and ends the line.",
     func: |interp, args, _span| {
@@ -41,7 +41,7 @@ static PRINT: Native = Native {
 static LEN: Native = Native {
     name: "len",
     arity: Some(1),
-    params: &["value"],
+    params: &[Arg::any("value")],
     returns: Some(Builtin::Int),
     doc: "How many characters are in a string, items in a list, or entries in a dict. A class may answer for itself with `op len`.",
     // Not a method, so it does not come through `call_method`'s substitution and
@@ -79,7 +79,7 @@ static LEN: Native = Native {
 static TYPE: Native = Native {
     name: "type",
     arity: Some(1),
-    params: &["value"],
+    params: &[Arg::any("value")],
     returns: Some(Builtin::Str),
     doc: "The name of the value's type, as a string.",
     func: |interp, args, _span| Ok(Value::Str(Rc::from(args[0].type_name(&interp.heap)))),

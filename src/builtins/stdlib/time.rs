@@ -2,7 +2,7 @@
 
 use crate::error::{ErrorKind, QuinceError};
 use crate::runtime::class::Builtin;
-use crate::runtime::value::{Native, Value};
+use crate::runtime::value::{Arg, Native, Value};
 
 use super::math::number;
 use super::{Member, Module};
@@ -40,7 +40,7 @@ static NOW: Native = Native {
 static SLEEP: Native = Native {
     name: "sleep",
     arity: Some(1),
-    params: &["seconds"],
+    params: &[Arg::of("seconds", &[Builtin::Int, Builtin::Float])],
     returns: Some(Builtin::Nil),
     doc: "Pauses for `seconds`.",
     func: |interp, args, span| {

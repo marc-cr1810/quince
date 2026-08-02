@@ -3,7 +3,7 @@
 use crate::error::{ErrorKind, QuinceError, Result};
 use crate::runtime::class::Builtin;
 use crate::runtime::heap::Heap;
-use crate::runtime::value::{Native, Value};
+use crate::runtime::value::{Arg, Native, Value};
 use crate::syntax::token::Span;
 
 use super::{Member, Module};
@@ -53,7 +53,7 @@ pub(super) fn number(name: &str, args: &[Value], heap: &Heap, span: Span) -> Res
 static FLOOR: Native = Native {
     name: "floor",
     arity: Some(1),
-    params: &["n"],
+    params: &[Arg::of("n", &[Builtin::Int, Builtin::Float])],
     returns: Some(Builtin::Int),
     doc: "The largest integer that is not greater than `n`.",
     func: |interp, args, span| {
@@ -66,7 +66,7 @@ static FLOOR: Native = Native {
 static CEIL: Native = Native {
     name: "ceil",
     arity: Some(1),
-    params: &["n"],
+    params: &[Arg::of("n", &[Builtin::Int, Builtin::Float])],
     returns: Some(Builtin::Int),
     doc: "The smallest integer that is not less than `n`.",
     func: |interp, args, span| {
@@ -79,7 +79,7 @@ static CEIL: Native = Native {
 static ROUND: Native = Native {
     name: "round",
     arity: Some(1),
-    params: &["n"],
+    params: &[Arg::of("n", &[Builtin::Int, Builtin::Float])],
     returns: Some(Builtin::Int),
     doc: "`n` rounded to the nearest integer, halves away from zero.",
     func: |interp, args, span| {
@@ -92,7 +92,7 @@ static ROUND: Native = Native {
 static ABS: Native = Native {
     name: "abs",
     arity: Some(1),
-    params: &["n"],
+    params: &[Arg::of("n", &[Builtin::Int, Builtin::Float])],
     returns: None,
     doc: "The magnitude of `n`, keeping the type it was given: an int stays an int.",
     func: |interp, args, span| match args[0].base(&interp.heap) {
@@ -104,7 +104,7 @@ static ABS: Native = Native {
 static SQRT: Native = Native {
     name: "sqrt",
     arity: Some(1),
-    params: &["n"],
+    params: &[Arg::of("n", &[Builtin::Int, Builtin::Float])],
     returns: Some(Builtin::Float),
     doc: "The square root of `n`. Refused for a negative `n` rather than answered with a NaN.",
     func: |interp, args, span| {
@@ -135,7 +135,7 @@ static SQRT: Native = Native {
 static POW: Native = Native {
     name: "pow",
     arity: Some(2),
-    params: &["base", "exponent"],
+    params: &[Arg::of("base", &[Builtin::Int, Builtin::Float]), Arg::of("exponent", &[Builtin::Int, Builtin::Float])],
     returns: Some(Builtin::Float),
     doc: "`base` raised to `exponent`, always as a float.",
     func: |interp, args, span| {
@@ -152,7 +152,7 @@ static POW: Native = Native {
 static MIN: Native = Native {
     name: "min",
     arity: Some(2),
-    params: &["a", "b"],
+    params: &[Arg::of("a", &[Builtin::Int, Builtin::Float]), Arg::of("b", &[Builtin::Int, Builtin::Float])],
     returns: None,
     doc: "The smaller of two numbers, keeping the type of whichever won.",
     func: |interp, args, span| pick(args, &interp.heap, span, "min"),
@@ -161,7 +161,7 @@ static MIN: Native = Native {
 static MAX: Native = Native {
     name: "max",
     arity: Some(2),
-    params: &["a", "b"],
+    params: &[Arg::of("a", &[Builtin::Int, Builtin::Float]), Arg::of("b", &[Builtin::Int, Builtin::Float])],
     returns: None,
     doc: "The larger of two numbers, keeping the type of whichever won.",
     func: |interp, args, span| pick(args, &interp.heap, span, "max"),
