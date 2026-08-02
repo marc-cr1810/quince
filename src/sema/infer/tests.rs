@@ -519,3 +519,66 @@ fn a_coalesce_answers_the_type_that_survives_it() {
     let at = src.find("let after").expect("the marker is there") as u32;
     assert_eq!(types(src).of_name("name", at), Type::class("string"));
 }
+
+/// What the static check says about a program, as messages.
+fn warnings(src: &str) -> Vec<String> {
+    let program = crate::compile(src).expect("the test program compiles");
+    let types = infer(&program);
+    crate::sema::check::check(&program, &types)
+        .iter()
+        .map(|err| err.message.clone())
+        .collect()
+}
+
+#[test]
+fn a_literal_that_cannot_hold_is_reported_before_it_runs() {
+    assert_eq!(
+        warnings("let x: int = \"s\"\n"),
+        vec!["`x` is `int`, but this is a string"]
+    );
+    assert_eq!(
+        warnings("let x: int = nil\n"),
+        vec!["`x` is `int`, which does not admit `nil`"]
+    );
+    // A field is a binding too.
+    assert_eq!(
+        warnings("class C {\n    let n: int = \"s\"\n}\n"),
+        vec!["`n` is `int`, but this is a string"]
+    );
+}
+
+#[test]
+fn what_the_pass_cannot_decide_it_does_not_report() {
+    // The whole design of the check: silence wherever it could be wrong, so a
+    // squiggle that does appear is worth believing.
+    let quiet = [
+        // §4.1's widening.
+        "let x: float = 1\n",
+        // A nullable annotation holding its `nil`.
+        "let x: int? = nil\n",
+        // The top type.
+        "let x: any = 1\n",
+        "let x: _? = nil\n",
+        // The pass cannot see a parameter's value, so it knows nothing here.
+        "fn f(n) {\n    let x: int = n\n}\n",
+        // A subclass holds as its parent.
+        "class A {\n    op init() { }\n}\nclass B extends A {\n    op init() { }\n}\nlet x: A = B()\n",
+        // Element types the pass does not infer: a list literal is a `list`,
+        // and guessing about its contents is what would cry wolf.
+        "let xs: list[int] = [\"a\"]\n",
+        // Not a type at all, so not this check's business — the annotation is
+        // reported when it is applied.
+        "let x: Nonexistent = 1\n",
+    ];
+    for src in quiet {
+        assert_eq!(warnings(src), Vec::<String>::new(), "for {src:?}");
+    }
+}
+
+#[test]
+fn a_narrowing_int_is_told_how_to_choose() {
+    assert_eq!(
+        warnings("let n: int = 3.7\n"),
+        vec!["`n` is `int`, but this is a float"]
+    );
+}

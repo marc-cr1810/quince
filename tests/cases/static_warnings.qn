@@ -1,0 +1,19 @@
+# What the editor squiggles is what the language will refuse when it runs —
+# these all still fail at run time, which is where §5 puts enforcement.
+let ok: int = 1
+let widened: float = 1
+let absent: int? = nil
+let top: any = "held"
+print(ok)
+print(widened)
+print(absent)
+print(top)
+
+class Base {
+    op init() { }
+}
+class Derived extends Base {
+    op init() { }
+}
+let held: Base = Derived()
+print(type(held))

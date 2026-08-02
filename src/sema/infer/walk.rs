@@ -261,12 +261,18 @@ impl Infer {
                 self.expr(expr);
             }
             StmtKind::Let { name, value, bind, ty, doc, .. } => {
+                // The initializer is walked either way, so every expression in
+                // it has a recorded type — a hover inside one, and the static
+                // check comparing it against the annotation, both need that.
+                // Walking only when unannotated left the right-hand side of
+                // `let x: int = "s"` invisible to the pass.
+                let found = self.expr(value);
                 // What the program said beats what the initializer looks like:
                 // `let x: float = 3` stores a float, so a pass reporting `int`
                 // would be describing a value that never existed.
                 let ty = match ty {
                     Some(stated_as) => stated(stated_as),
-                    None => self.expr(value),
+                    None => found,
                 };
                 let symbol = Symbol::new(name, Kind::Variable, ty)
                     .declared_with(bind.word())
@@ -280,7 +286,7 @@ impl Infer {
                     .insert(decl.name.clone(), returns.clone());
                 self.bind_symbol(symbol_for(decl, Kind::Function, returns), scope);
             }
-            StmtKind::Class { name, methods, doc, .. } => {
+            StmtKind::Class { name, methods, fields, doc, .. } => {
                 // The name holds the class object, not an instance of it —
                 // `Point` is a `class` and `Point()` is a `Point`. Saying
                 // otherwise would make every mention of a class name look like
@@ -291,6 +297,12 @@ impl Infer {
                     .returning(Type::class(name.clone()))
                     .with_doc(doc.clone());
                 self.bind_symbol(symbol, scope);
+                // A field's initializer is ordinary code and needs a type
+                // recorded for it, the same as a binding's — a hover inside one
+                // and the static check both read it.
+                for field in fields {
+                    self.expr(&field.value);
+                }
                 self.methods(name, methods);
             }
             StmtKind::Extend { target, methods, .. } => self.methods(&target.name, methods),

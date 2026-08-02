@@ -33,6 +33,7 @@ impl Interp {
 
             StmtKind::Let {
                 name,
+                name_span: _,
                 value,
                 bind,
                 ty,

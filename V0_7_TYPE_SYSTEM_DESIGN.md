@@ -719,8 +719,34 @@ to be less small than that, and for the same reason each time: a check in the wr
 `&` and `|` used to be refused by the lexer with "did you mean `&&`?", which was the right
 answer while they meant nothing and is wrong now.
 
-**Tranche 7 — editor tooling.** Inlay hints, type completion, smart-cast-aware and
-visibility-aware completion, once there are types to show.
+**Tranche 7 — editor tooling.** ✅ **Landed.** Two of the four items were already done:
+visibility-aware completion arrived with tranche 1, and smart-cast-aware completion fell
+out of tranche 5 for free — narrowing is a re-binding scoped to the block, and the lookup
+already prefers the innermost scope, so `members_before` picked it up with no wiring.
+
+What was left:
+
+- **Inlay hints**, for the unannotated case only, and only where the pass is certain.
+  `Unknown` gets no hint: a margin full of `: _` is an editor saying nothing, loudly.
+- **Type completion after `:`**, which needed a predicate telling an annotation's colon
+  from a dict literal's and a slice's. The rule is the innermost bracket still open in
+  front of it — `{` is a dict, `[` is a slice, `(` and nothing are annotations, which is
+  what makes `fn f(n: ` work and `xs[1:` not. It lives in `cursor`, which both surfaces
+  share, because a REPL completing differently from the editor would be two languages.
+- **Static type diagnostics**, as a *warning* rather than an error. §5 keeps enforcement at
+  run time and this does not move it — the language still refuses `let x: int = "s"` when
+  the binding executes. The editor says so first.
+
+That last one reverses §5's reasoning for the editor and only for the editor. A *refusal*
+firing only where inference happened to succeed would be a rule nobody could state; a
+*squiggle* doing the same is ordinary editor behaviour. So every rule in `sema/check` is
+one-sided: nothing is reported unless the pass knows both types and they definitely
+disagree, and `Unknown` on either side reports nothing.
+
+It found two gaps in the pass on its first run. An annotated binding's initializer was
+never walked, so the right-hand side of `let x: int = "s"` had no recorded type at all —
+which also meant no hover inside it. And a class field's initializer was never walked
+either. Both are fixed, and both were invisible until something asked.
 
 ---
 

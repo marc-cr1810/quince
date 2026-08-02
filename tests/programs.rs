@@ -387,7 +387,20 @@ fn check_inference() {
             if actual == "nil" && claimed.admits_nil() {
                 continue;
             }
-            if named != actual {
+            // A claim of `Base` is satisfied by a `Derived`, because §4.1 says
+            // a subclass holds as its parent — so an annotated binding is
+            // inferred as what it was *annotated* while holding something more
+            // specific, and both are true at once.
+            let mut current = Some(value.class(&interp.heap));
+            let mut descends = false;
+            while let Some(id) = current {
+                if interp.heap.class(id).name == named {
+                    descends = true;
+                    break;
+                }
+                current = interp.heap.class(id).parent;
+            }
+            if !descends {
                 failures.push(format!(
                     "{name}: `{global}` was inferred as `{claimed}` and is a `{actual}`"
                 ));

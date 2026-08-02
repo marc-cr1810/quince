@@ -178,3 +178,49 @@ pub fn import_site(text: &str) -> Option<ImportSite> {
         _ => None,
     }
 }
+
+/// Whether the cursor is where a type goes.
+///
+/// A `:` back along the line, with nothing but an identifier being typed
+/// between. Text rather than the tree, for the reason every completion here is
+/// text: typing `:` is what stops the document parsing, so the moment the
+/// answer is wanted is the moment there is no tree to ask.
+///
+/// The two other `:` in the grammar are ruled out by what precedes them. A dict
+/// literal's `:` follows a `{` or a `,` on the same line, and a slice's follows
+/// a `[` — so a bracket seen before the colon means this is not a type.
+pub fn in_type_position(line: &str, col: usize) -> bool {
+    let col = col.min(line.len());
+    let before = &line[..col];
+    let Some(colon) = before.rfind(':') else {
+        return false;
+    };
+
+    // Everything since the colon has to be part of a type. A type is a name, a
+    // bracketed argument list, and the two qualifiers — so anything else means
+    // the colon is behind us and the cursor has moved on.
+    let written = &before[colon + 1..];
+    if !written
+        .chars()
+        .all(|c| c.is_alphanumeric() || matches!(c, '_' | '[' | ']' | ',' | '?' | ' '))
+    {
+        return false;
+    }
+
+    // Which colon it was. A dict literal's sits inside `{`, and a slice's
+    // inside `[` — so the innermost bracket still open in front of it decides.
+    // A parameter list's `(` is not one of those, which is what makes
+    // `fn f(n: ` an annotation and `xs[1:` not.
+    let mut open: Vec<char> = Vec::new();
+    for c in before[..colon].chars() {
+        match c {
+            '{' | '[' | '(' => open.push(c),
+            '}' | ']' | ')' => {
+                open.pop();
+            }
+            _ => {}
+        }
+    }
+    !matches!(open.last(), Some('{' | '['))
+}
+

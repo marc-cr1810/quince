@@ -44,6 +44,7 @@ impl Parser {
             kind: StmtKind::Let {
                 slot: None,
                 name,
+                name_span,
                 value,
                 bind,
                 ty,

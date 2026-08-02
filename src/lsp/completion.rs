@@ -14,7 +14,7 @@ use lsp_types::{
 use quince::sema::symbols::{Kind, Symbol};
 use quince::syntax::doc::Doc;
 use quince::syntax::token::KEYWORDS;
-use crate::cursor::{ImportSite, import_site};
+use crate::cursor::{ImportSite, import_site, in_type_position};
 use crate::lsp::DocumentState;
 use crate::lsp::position::position_to_offset;
 
@@ -87,6 +87,14 @@ pub(crate) fn get_completions(state: Option<&DocumentState>, pos: Position) -> V
             .collect();
     }
 
+    // In type position, the only things that can follow are types. Offering the
+    // names in scope there would be offering a value where a type goes.
+    if let Some(line) = state.text.lines().nth(pos.line as usize)
+        && in_type_position(line, pos.character as usize)
+    {
+        return type_completions(state);
+    }
+
     // An `import` line wants one of two lists and they are not the same list.
     // A module is not there until asked for — that is the whole point of
     // `import`, and offering `math` to a file that never imported it undoes it
@@ -144,6 +152,48 @@ pub(crate) fn get_completions(state: Option<&DocumentState>, pos: Position) -> V
     if let Some(types) = &state.types {
         let offset = position_to_offset(&state.text, pos);
         items.extend(types.in_scope(offset).iter().map(item_of));
+    }
+    items
+}
+
+/// Every type that can be named here.
+///
+/// The builtins, the classes the program declared, and its aliases. An alias is
+/// offered because it is a type someone wrote to be used — leaving it out would
+/// make the editor disagree with the reason it exists.
+fn type_completions(state: &DocumentState) -> Vec<CompletionItem> {
+    let mut items: Vec<CompletionItem> = quince::runtime::class::BUILTINS
+        .iter()
+        .map(|builtin| CompletionItem {
+            label: builtin.name().to_string(),
+            kind: Some(CompletionItemKind::CLASS),
+            detail: Some(match builtin.name() {
+                "list" | "dict" => format!("{}[…] — takes type arguments", builtin.name()),
+                name => name.to_string(),
+            }),
+            ..Default::default()
+        })
+        .collect();
+
+    // `any` is a keyword rather than a type object, so it is not in `BUILTINS`
+    // and has to be offered on its own account. `_` means the same and is not
+    // offered: one spelling per idea in a list someone reads top to bottom.
+    items.push(CompletionItem {
+        label: "any".to_string(),
+        kind: Some(CompletionItemKind::KEYWORD),
+        detail: Some("any value except `nil` — `any?` admits it".to_string()),
+        ..Default::default()
+    });
+
+    if let Some(types) = &state.types {
+        for name in types.class_names() {
+            items.push(CompletionItem {
+                label: name.clone(),
+                kind: Some(CompletionItemKind::CLASS),
+                detail: Some(format!("class {name}")),
+                ..Default::default()
+            });
+        }
     }
     items
 }

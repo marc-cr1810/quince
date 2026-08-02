@@ -1,7 +1,8 @@
 use super::*;
 
-use lsp_types::{HoverContents, MarkedString, Position};
+use lsp_types::{HoverContents, MarkedString, Position, Range};
 
+use crate::cursor::in_type_position;
 use crate::lsp::completion::{get_completions, text_before_dot};
 use crate::lsp::hover::{get_hover, get_signature_help};
 use crate::lsp::position::{offset_to_position, position_to_offset};
@@ -392,4 +393,68 @@ fn a_natives_result_is_what_the_native_says_it_is() {
     let labels = completions_after("let sep = \", \"\nlet line = sep.join([\"a\", \"b\"])\nline");
     assert!(labels.contains(&"upper".to_string()), "{labels:?}");
     assert!(!labels.contains(&"push".to_string()), "{labels:?}");
+}
+
+#[test]
+fn a_colon_in_a_declaration_offers_types() {
+    // A document that parsed, and then the `:` that stops it parsing — which is
+    // the only state anyone is ever in when they want this list.
+    let valid = "class Point {\n    op init() { }\n}\nalias Score = int\n";
+    let before = &format!("{valid}let x:");
+    let state = typed(&[valid, before]);
+    let labels: Vec<String> = get_completions(Some(&state), end_of(before))
+        .into_iter()
+        .map(|item| item.label)
+        .collect();
+    // The builtins, the keyword that is not one, and what the program declared.
+    assert!(labels.contains(&"int".to_string()), "{labels:?}");
+    assert!(labels.contains(&"string".to_string()), "{labels:?}");
+    assert!(labels.contains(&"any".to_string()), "{labels:?}");
+    assert!(labels.contains(&"Point".to_string()), "{labels:?}");
+    // A value in scope is not a type, so it is not offered here.
+    assert!(!labels.contains(&"print".to_string()), "{labels:?}");
+}
+
+#[test]
+fn a_colon_that_is_not_an_annotation_offers_no_types() {
+    // The grammar's other two colons. A dict literal's follows a `{` or a `,`,
+    // and a slice's follows a `[` — both on the same line, which is what tells
+    // them apart from an annotation without a tree to ask.
+    for line in ["let d = {\"a\":", "let s = xs[1:", "let d = {\"a\": 1, \"b\":"] {
+        assert!(
+            !in_type_position(line, line.len()),
+            "{line:?} is not type position"
+        );
+    }
+    for line in ["let x:", "let x: ", "fn f(n:", "fn f(): ", "let xs: list[i"] {
+        assert!(
+            in_type_position(line, line.len()),
+            "{line:?} is type position"
+        );
+    }
+}
+
+#[test]
+fn a_hint_is_offered_only_where_the_program_said_nothing() {
+    let src = "let n = 8\nlet named: string = \"a\"\nlet unknown = nothing()\n";
+    let state = DocumentState::new(src.to_string(), None);
+    let whole = Range {
+        start: Position { line: 0, character: 0 },
+        end: Position { line: 9, character: 0 },
+    };
+    let hints = crate::lsp::hints::get_inlay_hints(Some(&state), whole);
+    let labels: Vec<String> = hints
+        .iter()
+        .map(|hint| match &hint.label {
+            lsp_types::InlayHintLabel::String(text) => text.clone(),
+            other => panic!("expected a plain label, got {other:?}"),
+        })
+        .collect();
+    // `n` is inferred and unannotated, so it gets one. `named` said it already.
+    // `unknown` is `Unknown`, and a margin full of `: _` is an editor saying
+    // nothing loudly.
+    assert_eq!(labels, vec![": int".to_string()]);
+
+    // And it lands just past the name, where the annotation would have gone.
+    assert_eq!(hints[0].position, Position { line: 0, character: 5 });
 }

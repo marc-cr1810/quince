@@ -12,7 +12,7 @@ use rustyline::hint::Hinter;
 use rustyline::validate::Validator;
 use crate::repl::snapshot::{Snapshot, before_dot, import_candidates};
 
-use quince::sema::symbols::Symbol;
+use quince::sema::symbols::{Kind, Symbol};
 use quince::syntax::token::KEYWORDS;
 #[cfg(test)]
 use quince::syntax::token::TokenKind;
@@ -33,6 +33,28 @@ impl QuinceHelper {
             .lock()
             .map(|snapshot| snapshot.members_after(before))
             .unwrap_or_default()
+    }
+
+    /// Every type that can be named in an annotation.
+    ///
+    /// The builtins and whatever classes the session has declared — read off
+    /// the live globals rather than inferred, which is the REPL's advantage:
+    /// a name either holds a class right now or it does not.
+    pub(crate) fn type_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = quince::runtime::class::BUILTINS
+            .iter()
+            .map(|builtin| builtin.name().to_string())
+            .collect();
+        names.push("any".to_string());
+        names.extend(
+            self.in_scope()
+                .into_iter()
+                .filter(|symbol| symbol.kind == Kind::Class)
+                .map(|symbol| symbol.name),
+        );
+        names.sort();
+        names.dedup();
+        names
     }
 
     /// Every name bound so far.
@@ -74,6 +96,22 @@ impl Completer for QuinceHelper {
         // depends on how far along it is.
         if let Some(site) = cursor::import_site(&line[..start.min(line.len())]) {
             for candidate in import_candidates(&site) {
+                if candidate.starts_with(word) {
+                    matches.push(Pair {
+                        display: candidate.clone(),
+                        replacement: candidate,
+                    });
+                }
+            }
+            return Ok((start, matches));
+        }
+
+        // In type position the only things that can follow are types, so the
+        // names in scope are exactly the wrong list. The same rule the editor
+        // uses, from the same function — a REPL that completed differently from
+        // the editor would be two languages.
+        if cursor::in_type_position(line, start.min(line.len())) {
+            for candidate in self.type_names() {
                 if candidate.starts_with(word) {
                     matches.push(Pair {
                         display: candidate.clone(),

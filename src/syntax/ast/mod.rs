@@ -191,6 +191,13 @@ pub enum StmtKind {
     /// them so a reassignment can be rejected with the original binding in hand.
     Let {
         name: String,
+        /// Where the name was written.
+        ///
+        /// Not derivable from the statement's span, which starts at whichever
+        /// word came first — `let`, `final`, `const`, or a visibility in front
+        /// of one — so anything wanting to point at the *name* has to be told.
+        /// An inlay hint goes immediately after it.
+        name_span: Span,
         value: Expr,
         bind: BindKind,
         /// What the name holds, if the declaration said.

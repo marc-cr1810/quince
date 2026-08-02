@@ -20,6 +20,7 @@
 //! Every one of them is a static check, and each belongs beside the two passes
 //! that already are one.
 
+pub mod check;
 pub mod infer;
 pub mod resolve;
 pub mod symbols;

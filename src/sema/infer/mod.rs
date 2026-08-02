@@ -204,6 +204,17 @@ impl Types {
                 .is_some_and(|symbol| symbol.kind == Kind::Class)
     }
 
+    /// Every class the program declared, for a list an editor offers.
+    ///
+    /// Includes the entries an `extend` block made, which is right: `extend
+    /// list` does not declare `list`, but a program that mentions it means the
+    /// name, and the builtins are offered from their own table anyway.
+    pub fn class_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.classes.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
     /// Whether the program declared a class by this name.
     pub fn declares(&self, class: &str) -> bool {
         self.classes.contains_key(class)
@@ -346,6 +357,15 @@ impl Types {
             current = self.parent_of(name);
         }
         false
+    }
+
+    /// Whether the program declared a class by this name.
+    ///
+    /// Told apart from "has no parent", which `parent_of` cannot distinguish it
+    /// from — and the difference decides whether a name the pass does not
+    /// recognise is a mistake or simply something it was not told about.
+    pub fn declares_class(&self, name: &str) -> bool {
+        self.classes.contains_key(name)
     }
 
     /// The class `class` extends, if the program said so.

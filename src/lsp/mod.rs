@@ -12,6 +12,7 @@
 
 pub mod completion;
 pub mod diagnostics;
+pub mod hints;
 pub mod hover;
 pub mod navigate;
 pub mod position;
@@ -38,6 +39,7 @@ use quince::syntax::ast::Stmt;
 use crate::cursor::{path_ending_at, trailing_literal_type};
 use crate::lsp::completion::get_completions;
 use crate::lsp::diagnostics::publish_diagnostics;
+use crate::lsp::hints::get_inlay_hints;
 use crate::lsp::hover::{get_hover, get_signature_help};
 use crate::lsp::navigate::{get_definition, get_document_symbols};
 use crate::lsp::semantic::get_semantic_tokens;
@@ -71,6 +73,18 @@ impl DocumentState {
             None => previous.and_then(|state| state.types),
         };
         DocumentState { text, ast, types }
+    }
+
+    pub(crate) fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub(crate) fn ast(&self) -> Option<&[Stmt]> {
+        self.ast.as_deref()
+    }
+
+    pub(crate) fn types(&self) -> Option<&Types> {
+        self.types.as_ref()
     }
 
     /// Everything reachable through a dot on whatever `before` evaluates to.
@@ -151,6 +165,7 @@ pub fn run_lsp_server() -> anyhow::Result<()> {
             work_done_progress_options: Default::default(),
         }),
         definition_provider: Some(OneOf::Left(true)),
+        inlay_hint_provider: Some(OneOf::Left(true)),
         document_symbol_provider: Some(OneOf::Left(true)),
         semantic_tokens_provider: Some(
             SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
@@ -221,6 +236,13 @@ pub(crate) fn handle_request(
             let pos = params.text_document_position.position;
             let items = get_completions(documents.get(uri), pos);
             let resp = Response::new_ok(id, CompletionResponse::Array(items));
+            connection.sender.send(Message::Response(resp))?;
+        }
+        lsp_types::request::InlayHintRequest::METHOD => {
+            let params: lsp_types::InlayHintParams = serde_json::from_value(req.params)?;
+            let uri = &params.text_document.uri;
+            let hints = get_inlay_hints(documents.get(uri), params.range);
+            let resp = Response::new_ok(id, hints);
             connection.sender.send(Message::Response(resp))?;
         }
         HoverRequest::METHOD => {
