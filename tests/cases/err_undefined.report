@@ -5,3 +5,4 @@ Error: quince::NameError
 1 │ print(ghost)
   ·       ─────
   ╰────
+  help: nothing is bound to that name here — a name declared inside a block is not visible outside it

@@ -81,6 +81,7 @@ pub static INT_INIT: Native = Native {
                 span,
             )
             .with_kind(ErrorKind::Value)
+        .with_help("the call is right and this particular value is not — check where it came from")
         }),
         // `1` and `0`, as every language with this conversion has it. This is not
         // a crack in the rule that a bool is not a number: `1 + true` stays an

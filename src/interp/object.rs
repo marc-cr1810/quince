@@ -332,11 +332,21 @@ impl Interp {
     pub(super) fn super_method(&mut self, id: ObjId, name: &str, span: Span) -> Result<Value> {
         match self.find_method(id, name) {
             Some(method) => Ok(method),
-            None => Err(QuinceError::new(
-                format!("{} has no method `{name}`", self.heap.class(id).name),
-                span,
-            )
-            .with_kind(ErrorKind::Attr)),
+            None => {
+                let parent = self.heap.class(id).name.clone();
+                let mut names = self.heap.class(id).method_names(&self.heap);
+                names.sort();
+                let err = QuinceError::new(format!("{parent} has no method `{name}`"), span)
+                    .with_kind(ErrorKind::Attr);
+                let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+                Err(match crate::error::did_you_mean(name, refs) {
+                    Some(suggestion) => err.with_help(format!("did you mean `{suggestion}`?")),
+                    None if names.is_empty() => err.with_help(format!(
+                        "`{parent}` declares no methods, so `super` reaches nothing here"
+                    )),
+                    None => err.with_help(format!("`{parent}` has: {}", names.join(", "))),
+                })
+            }
         }
     }
 
@@ -411,10 +421,22 @@ impl Interp {
             candidates.extend(self.heap.class(class).method_names(&self.heap));
         }
 
+        // A near-miss gets the name it probably meant. Everything else gets the
+        // list, which is short for a builtin and is the answer to the question
+        // the reader is about to ask anyway — and a bare "no such method" that
+        // does not say what there *is* leaves them reading the source instead.
         let refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
-        if let Some(suggestion) = crate::error::did_you_mean(name, refs) {
-            err = err.with_help(format!("did you mean `{suggestion}`?"));
-        }
+        err = match crate::error::did_you_mean(name, refs) {
+            Some(suggestion) => err.with_help(format!("did you mean `{suggestion}`?")),
+            None if candidates.is_empty() => err.with_help(format!(
+                "{} has no members to reach",
+                receiver.type_name(&self.heap)
+            )),
+            None => {
+                candidates.sort();
+                err.with_help(format!("it has: {}", candidates.join(", ")))
+            }
+        };
 
         err
     }

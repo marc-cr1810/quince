@@ -672,3 +672,78 @@ fn a_declared_parameter_reads_back_as_a_type() {
         }
     }
 }
+
+/// Every error the corpus provokes explains what to do about it.
+///
+/// A message says what is wrong and a `help:` line says what to write instead,
+/// and the second is the one a reader is actually looking for. This holds the
+/// line at the level the corpus reaches, which is every error the language
+/// raises that anybody thought worth a case.
+///
+/// The exceptions are listed rather than inferred, because "this one needs no
+/// help" is a judgement and judgements should be written down where the next
+/// person can disagree with one.
+#[test]
+fn every_error_says_what_to_do_about_it() {
+    // Errors whose message is already the whole answer, or whose text is not
+    // the language's to explain.
+    const NO_HELP_NEEDED: &[&str] = &[
+        // The message is a `throw`'s own, written by the program. The language
+        // has no idea what would fix it.
+        "err_throw_uncaught",
+        // These already name the fix inside the message itself, and a `help:`
+        // line would be the same sentence twice.
+        "err_dict_statement",
+        "err_split_empty",
+        "err_dict_unhashable",
+        // A grammar expectation. "expected `catch` after the `try` block" *is*
+        // the instruction — the parser knows exactly which token is missing and
+        // says so, and there is nothing a second line could add that the first
+        // has not.
+        "err_try_without_catch",
+    ];
+
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cases");
+    let mut failures = Vec::new();
+    let mut checked = 0;
+
+    let mut entries: Vec<_> = std::fs::read_dir(&dir)
+        .expect("tests/cases should exist")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "err"))
+        .collect();
+    entries.sort();
+
+    for path in entries {
+        let name = path.file_stem().unwrap().to_string_lossy().to_string();
+        if NO_HELP_NEEDED.contains(&name.as_str()) {
+            continue;
+        }
+        let base = path.with_extension("");
+        // A directory case runs its `main.qn`; a single-file case is itself.
+        let entry = match base.join("main.qn").is_file() {
+            true => base.join("main.qn"),
+            false => base.with_extension("qn"),
+        };
+        let Ok(text) = std::fs::read_to_string(&entry) else {
+            continue;
+        };
+        let input = std::fs::read_to_string(base.with_extension("in")).unwrap_or_default();
+        let Err(err) = run(&text, &entry, input) else {
+            continue;
+        };
+        checked += 1;
+        if err.help.is_none() {
+            failures.push(format!("{name}: {}", err.message));
+        }
+    }
+
+    assert!(checked > 40, "only {checked} errors were reached");
+    assert!(
+        failures.is_empty(),
+        "{} error(s) say what is wrong and not what to do:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}

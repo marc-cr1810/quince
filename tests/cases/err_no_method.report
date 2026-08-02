@@ -7,3 +7,4 @@ Error: quince::AttributeError
   · │   ╰── no field or method `nope`
   · ╰── list
   ╰────
+  help: it has: filter, find, map, push, reverse, sort, sum

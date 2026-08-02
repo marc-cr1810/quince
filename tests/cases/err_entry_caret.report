@@ -6,3 +6,4 @@ Error: quince::TypeError
   ·                     ─┬─                  ───
   ·                      ╰── declared `int` here
   ╰────
+  help: either give it an `int`, or widen the annotation to admit a string

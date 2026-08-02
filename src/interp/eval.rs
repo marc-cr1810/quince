@@ -325,6 +325,7 @@ impl Interp {
                         span,
                     )
                     .with_kind(ErrorKind::Name)
+        .with_help("a declaration takes effect from its own line, so move it above the use")
                 })
             }
             Slot::Global => self
@@ -335,6 +336,10 @@ impl Interp {
                 .ok_or_else(|| {
                     let mut err =
                         QuinceError::new(format!("undefined variable `{}`", var.name), span)
+                            .with_help(
+                                "nothing is bound to that name here — a name declared inside a \
+                                 block is not visible outside it",
+                            )
                             .with_kind(ErrorKind::Name);
 
                     let mut candidates: Vec<String> = self
@@ -379,6 +384,7 @@ impl Interp {
         if !bind.mutable() {
             return Err(QuinceError::new(format!("cannot reassign `{name}`"), span)
                 .with_kind(ErrorKind::Frozen)
+        .with_help("it is bound with `final` or `const`, either of which binds a name once — declare it with `let` to reassign it")
                 .with_help(match bind.freezes() {
                     true => format!("`{name}` is `const`, so the name is bound once and what it holds is frozen"),
                     false => format!("`{name}` is `final`, so the name is bound once"),
@@ -444,7 +450,11 @@ impl Interp {
                                     format!("cannot reassign `{name}`"),
                                     target.span,
                                 )
-                                .with_kind(ErrorKind::Frozen));
+                                .with_kind(ErrorKind::Frozen)
+                                .with_help(
+                                    "it is bound with `final` or `const`, either of which binds \
+                                     a name once — declare it with `let` to reassign it",
+                                ));
                             }
                         }
                         Ok(value)
@@ -555,7 +565,11 @@ impl Interp {
                         format!("cannot set a field on {}", other.type_name(&self.heap)),
                         target.span,
                     )
-                    .with_kind(ErrorKind::Type)),
+                    .with_kind(ErrorKind::Type)
+                    .with_help(
+                        "only an instance of a class has fields — a builtin carries its value \
+                         and nothing beside it",
+                    )),
                 }
             }
 

@@ -317,6 +317,10 @@ impl Resolver {
                     return Err(declaration(
                         "`self` is only valid inside a method",
                         expr.span,
+                    )
+                    .with_help(
+                        "a method is a `fn` or an `op` declared in a class body — a plain `fn`, \
+                         even one nested inside a method, has no receiver to name",
                     ));
                 }
                 var.slot = Some(self.slot_of(&var.name));
@@ -390,6 +394,10 @@ impl Resolver {
                     return Err(declaration(
                         "`super` is only valid inside a method of a class that extends another",
                         expr.span,
+                    )
+                    .with_help(
+                        "`super` names the parent class, so there has to be one — write \
+                         `class C extends Parent` to give it one",
                     ));
                 }
                 // `super.init` is construction, and `op init` is the method that
@@ -425,11 +433,22 @@ impl Resolver {
                     // `self` is immutable by the same mechanism, but for a
                     // different reason, and saying "reassign" would teach that
                     // it is a binding someone chose. It is the receiver.
-                    let message = match var.name == ast::SELF {
-                        true => "`self` is the receiver, not a variable to assign to".to_string(),
-                        false => format!("cannot reassign `{}`", var.name),
+                    let (message, help) = match var.name == ast::SELF {
+                        true => (
+                            "`self` is the receiver, not a variable to assign to".to_string(),
+                            "assign to one of its fields instead — `self.name = value`"
+                                .to_string(),
+                        ),
+                        false => (
+                            format!("cannot reassign `{}`", var.name),
+                            format!(
+                                "it is bound with `final` or `const`, either of which binds a \
+                                 name once — declare `{}` with `let` to reassign it",
+                                var.name
+                            ),
+                        ),
                     };
-                    return Err(declaration(message, target.span));
+                    return Err(declaration(message, target.span).with_help(help));
                 }
                 self.expr(target)
             }

@@ -300,7 +300,12 @@ impl Doc {
             Some((tag, span)) if tag.needs_a_signature() => Err(doc_error(
                 format!("`@{}` does not describe {what}", tag.name()),
                 span,
-            )),
+            )
+            .with_help(format!(
+                "`@{}` describes part of a signature, and {what} has none — a summary is all \
+                 that applies here",
+                tag.name()
+            ))),
             _ => Ok(()),
         }
     }

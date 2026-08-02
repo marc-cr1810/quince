@@ -5,3 +5,4 @@ Error: quince::SyntaxError
 2 │     print(1)
   ·     ─────
   ╰────
+  help: a class body holds declarations and nothing else — `let` for a field, `fn` for a method, `op` for one the language calls

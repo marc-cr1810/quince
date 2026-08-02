@@ -75,7 +75,11 @@ impl Interp {
                 ),
                 span,
             )
-            .with_kind(ErrorKind::Type);
+            .with_kind(ErrorKind::Type)
+            .with_help(
+                "everything a `catch` binds has a `message` and a `kind`, because everything it \
+                 binds extends `Error` — wrap the value in one",
+            );
         };
 
         let class = self.heap.instance(id).class;
@@ -87,7 +91,11 @@ impl Interp {
                 ),
                 span,
             )
-            .with_kind(ErrorKind::Type);
+            .with_kind(ErrorKind::Type)
+            .with_help(
+                "write `extends Error` on it, so a handler binding it finds the `message` and \
+                 `kind` every caught value has",
+            );
         }
 
         // Both read for the report an uncaught throw prints. The class is what it
@@ -175,11 +183,13 @@ impl Interp {
 /// what did this. The value it names may be several steps from the `const` that
 /// froze it — that is what "deeply" means.
 pub(crate) fn frozen(heap: &Heap, value: &Value, span: Span) -> Raised {
-    QuinceError::new(
-        format!("cannot modify `const` {}", value.type_name(heap)),
-        span,
-    )
-    .with_kind(ErrorKind::Frozen)
+    let what = value.type_name(heap);
+    QuinceError::new(format!("cannot modify `const` {what}"), span)
+        .with_kind(ErrorKind::Frozen)
+        .with_help(
+            "`const` freezes a value deeply, and through every other name that already \
+             reaches it — bind it with `final` to fix the name and leave the value writable",
+        )
 }
 
 pub(crate) fn type_error(

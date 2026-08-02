@@ -274,6 +274,10 @@ impl Resolver {
                 return Err(declaration(
                     format!("`{name}` is already declared in this scope"),
                     span,
+                )
+                .with_help(
+                    "the second would shadow the first silently — rename it, or assign to the \
+                     name that is already there",
                 ));
             }
             return Ok(());
@@ -282,6 +286,10 @@ impl Resolver {
             return Err(declaration(
                 format!("`{name}` is already declared in this scope"),
                 span,
+            )
+            .with_help(
+                "the second would shadow the first silently — rename it, or assign to the name \
+                 that is already there",
             ));
         }
         let index = scope.count;

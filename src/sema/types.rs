@@ -488,18 +488,31 @@ pub fn refusal(ty: &TypeExpr, value: &Value, heap: &Heap, what: &str) -> (String
 
     let actual = value.type_name(heap);
     let message = format!("{what} is `{written}`, but this is {}", an(actual));
-    // Advice only where there is some. Restating the message as a `help:` line
-    // is worse than no line at all — it doubles the reading and answers nothing.
-    // Narrowing is the one case with a real answer, and §4.1's asymmetry is
-    // exactly why: the conversion exists, the language just will not pick the
-    // rounding on the program's behalf.
+    // The specific advice where there is some, and the general shape of the fix
+    // otherwise. An annotation refused is always two things a reader might have
+    // meant — the value is wrong, or the annotation is — and naming both is
+    // what a `help:` line is for. Restating the message would not be.
     let help = match (&ty.name, actual) {
+        // §4.1's asymmetry: the conversion exists, the language just will not
+        // pick the rounding on the program's behalf.
         (TypeName::Named(name), "float") if name == "int" => {
-            Some("write `int(x)` to say which way it should round".to_string())
+            "write `int(x)` to say which way it should round".to_string()
         }
-        _ => None,
+        _ => format!(
+            "either give it {}, or widen the annotation to admit {}",
+            an_article(&written),
+            an(actual)
+        ),
     };
-    (message, help)
+    (message, Some(help))
+}
+
+/// The same, for a type quoted back rather than named.
+fn an_article(written: &str) -> String {
+    match written.starts_with(['a', 'e', 'i', 'o', 'u']) {
+        true => format!("an `{written}`"),
+        false => format!("a `{written}`"),
+    }
 }
 
 /// `a` or `an`, for a type name read aloud in a sentence.

@@ -508,6 +508,10 @@ impl Parser {
                     return Err(syntax(
                         format!("expected a field or a method, found {}", self.peek().kind),
                         self.peek().span,
+                    )
+                    .with_help(
+                        "a class body holds declarations and nothing else — `let` for a field, \
+                         `fn` for a method, `op` for one the language calls",
                     ));
                 }
             }

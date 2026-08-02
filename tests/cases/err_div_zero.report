@@ -5,3 +5,4 @@ Error: quince::ZeroDivisionError
 1 │ print(1 / 0)
   ·       ─────
   ╰────
+  help: guard the divisor, or use `??` on a lookup that may be absent

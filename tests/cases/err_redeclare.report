@@ -5,3 +5,4 @@ Error: quince::DeclarationError
 3 │     let x = 2
   ·     ─────────
   ╰────
+  help: the second would shadow the first silently — rename it, or assign to the name that is already there

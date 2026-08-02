@@ -248,7 +248,8 @@ pub(crate) fn slice_bounds(
                 format!("slice bounds must be ints, found {}", bound.type_name(heap)),
                 span,
             )
-            .with_kind(ErrorKind::Type));
+            .with_kind(ErrorKind::Type)
+        .with_help("convert it with `int(x)` — a position in a list is a whole number"));
         };
         Ok(if *raw < 0 { *raw + len } else { *raw })
     };

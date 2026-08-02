@@ -224,7 +224,8 @@ pub static JOIN: Native = Native {
                         ),
                         span,
                     )
-                    .with_kind(ErrorKind::Type));
+                    .with_kind(ErrorKind::Type)
+        .with_help("convert each item with `string(x)` first — `join` will not guess a rendering"));
                 }
             }
         }

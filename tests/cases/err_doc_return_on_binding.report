@@ -5,3 +5,4 @@ Error: quince::DeclarationError
 2 │ ## @return nothing
   · ──────────────────
   ╰────
+  help: `@return` describes part of a signature, and a binding has none — a summary is all that applies here

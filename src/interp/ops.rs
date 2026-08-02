@@ -125,6 +125,11 @@ impl Interp {
             span,
         )
         .with_kind(ErrorKind::Type)
+        .with_help(format!(
+            "the language calls `op {}` itself and reads {expected} back, so a class chooses \
+             what it answers, not what it answers *with*",
+            op.name()
+        ))
     }
 
     /// Whether a value counts as true, which a class may answer with `op bool`.
@@ -339,7 +344,9 @@ impl Interp {
         // about.
         match value.base(&self.heap) {
             Value::Int(n) => n.checked_neg().map(Value::Int).ok_or_else(|| {
-                QuinceError::new("integer overflow", span).with_kind(ErrorKind::Overflow)
+                QuinceError::new("integer overflow", span)
+        .with_kind(ErrorKind::Overflow)
+        .with_help("an int holds 64 bits — convert with `float(x)` for a wider range, at the cost of exactness")
             }),
             Value::Float(n) => Ok(Value::Float(-n)),
             _ => Err(QuinceError::new(
@@ -707,7 +714,8 @@ impl Interp {
                     format!("cannot use `in` on {}", haystack.type_name(&self.heap)),
                     span,
                 )
-                .with_kind(ErrorKind::Type));
+                .with_kind(ErrorKind::Type)
+        .with_help("`in` searches a string, a list, or a dict's keys — a class answers for itself with `op contains`"));
             }
         };
         Ok(Value::Bool(found))
@@ -739,7 +747,9 @@ pub(crate) fn floor_div(a: i64, b: i64) -> Option<i64> {
 /// Integer arithmetic. Reports overflow rather than wrapping.
 pub(crate) fn int_op(op: BinaryOp, a: i64, b: i64, span: Span) -> Result<Value> {
     use BinaryOp::*;
-    let overflow = || QuinceError::new("integer overflow", span).with_kind(ErrorKind::Overflow);
+    let overflow = || QuinceError::new("integer overflow", span)
+        .with_kind(ErrorKind::Overflow)
+        .with_help("an int holds 64 bits — convert with `float(x)` for a wider range, at the cost of exactness");
 
     let value =
         match op {
@@ -769,21 +779,30 @@ pub(crate) fn int_op(op: BinaryOp, a: i64, b: i64, span: Span) -> Result<Value> 
             Div => {
                 if b == 0 {
                     return Err(QuinceError::new("division by zero", span)
-                        .with_kind(ErrorKind::ZeroDivision));
+                        .with_kind(ErrorKind::ZeroDivision)
+                        .with_help(
+                            "guard the divisor, or use `??` on a lookup that may be absent",
+                        ));
                 }
                 Value::Float(a as f64 / b as f64)
             }
             FloorDiv => {
                 if b == 0 {
                     return Err(QuinceError::new("division by zero", span)
-                        .with_kind(ErrorKind::ZeroDivision));
+                        .with_kind(ErrorKind::ZeroDivision)
+                        .with_help(
+                            "guard the divisor, or use `??` on a lookup that may be absent",
+                        ));
                 }
                 Value::Int(floor_div(a, b).ok_or_else(overflow)?)
             }
             Rem => {
                 if b == 0 {
                     return Err(QuinceError::new("division by zero", span)
-                        .with_kind(ErrorKind::ZeroDivision));
+                        .with_kind(ErrorKind::ZeroDivision)
+                        .with_help(
+                            "guard the divisor, or use `??` on a lookup that may be absent",
+                        ));
                 }
                 Value::Int(a.checked_rem(b).ok_or_else(overflow)?)
             }
@@ -822,19 +841,25 @@ pub(crate) fn float_op(op: BinaryOp, a: f64, b: f64, span: Span) -> Result<Value
         // Kept an error rather than yielding infinity, to match integer division.
         Div if b == 0.0 => {
             return Err(
-                QuinceError::new("division by zero", span).with_kind(ErrorKind::ZeroDivision)
+                QuinceError::new("division by zero", span)
+                    .with_kind(ErrorKind::ZeroDivision)
+                    .with_help("guard the divisor, or use `??` on a lookup that may be absent")
             );
         }
         Div => Value::Float(a / b),
         FloorDiv if b == 0.0 => {
             return Err(
-                QuinceError::new("division by zero", span).with_kind(ErrorKind::ZeroDivision)
+                QuinceError::new("division by zero", span)
+                    .with_kind(ErrorKind::ZeroDivision)
+                    .with_help("guard the divisor, or use `??` on a lookup that may be absent")
             );
         }
         FloorDiv => Value::Float((a / b).floor()),
         Rem if b == 0.0 => {
             return Err(
-                QuinceError::new("division by zero", span).with_kind(ErrorKind::ZeroDivision)
+                QuinceError::new("division by zero", span)
+                    .with_kind(ErrorKind::ZeroDivision)
+                    .with_help("guard the divisor, or use `??` on a lookup that may be absent")
             );
         }
         Rem => Value::Float(a % b),

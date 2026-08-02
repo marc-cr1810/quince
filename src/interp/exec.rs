@@ -165,7 +165,8 @@ impl Interp {
                                     ),
                                     at,
                                 )
-                                .with_kind(ErrorKind::Type));
+                                .with_kind(ErrorKind::Type)
+        .with_help("`extends` names a class, and the name here holds something else"));
                             }
                         }
                     }
@@ -272,7 +273,8 @@ impl Interp {
                         ),
                         *target_span,
                     )
-                    .with_kind(ErrorKind::Type));
+                    .with_kind(ErrorKind::Type)
+        .with_help("`extend` adds methods to a type, so the name after it has to hold one"));
                 };
 
                 // Every name checked before any is added, so a block whose third

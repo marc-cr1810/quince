@@ -59,7 +59,12 @@ impl Interp {
                         format!("recursion limit of {MAX_DEPTH} calls exceeded"),
                         span,
                     )
-                    .with_kind(ErrorKind::Recursion));
+                    .with_kind(ErrorKind::Recursion)
+                    .with_help(
+                        "the recursion needs a base case that stops sooner, or rewriting as a \
+                         loop — the limit is a fixed count and not a memory the program ran out \
+                         of",
+                    ));
                 }
 
                 // The same refusal for the same reason, arrived at differently:

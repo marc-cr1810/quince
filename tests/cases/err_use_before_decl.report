@@ -5,3 +5,4 @@ Error: quince::NameError
 4 │     print(x)
   ·           ─
   ╰────
+  help: a declaration takes effect from its own line, so move it above the use

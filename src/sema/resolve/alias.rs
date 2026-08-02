@@ -200,7 +200,12 @@ pub(super) fn check_arguments(ty: &TypeExpr) -> Result<()> {
         return Err(refused(
             format!("`{head}` takes {written}, but {} {were} written", args.len()),
             span,
-        ));
+        )
+        .with_help(match head {
+            "list" => "a list has one element type — `list[int]`",
+            _ => "a dict takes a key type and optionally a value type — `dict[string, int]`, \
+                  or `dict[string]` to leave the values unconstrained",
+        }));
     }
 
     // The key is the first argument, for both `dict[K, V]` and the `dict[K]`
