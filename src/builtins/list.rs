@@ -298,10 +298,11 @@ pub static PUSH: Native = Native {
     doc: "Adds `item` to the end of the list.",
     func: |interp, args, span| match &args[0] {
         Value::List(id) => {
-            let pushed = interp
-                .heap
-                .list_mut(*id)
-                .map(|items| items.push(args[1].clone()));
+            // Against what the list was declared to hold, if it was declared to
+            // hold anything. §3.9's descriptor is what makes this a lookup
+            // rather than a walk.
+            let item = interp.admitted(*id, 0, args[1].clone(), "the item", span)?;
+            let pushed = interp.heap.list_mut(*id).map(|items| items.push(item));
             pushed.map_err(|_| frozen(&interp.heap, &args[0], span))?;
             Ok(Value::Nil)
         }

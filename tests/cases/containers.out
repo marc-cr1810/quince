@@ -1,0 +1,7 @@
+[1, 2, 3, 4]
+[1.0, 2.0, 3.0]
+{"alice": 95, "bob": 88}
+{"host": "localhost", "port": 8080, "debug": true, "missing": nil}
+[1, "two", nil]
+[[1], [2, 3]]
+10

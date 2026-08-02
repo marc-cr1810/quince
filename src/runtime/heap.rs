@@ -1,7 +1,10 @@
+use std::rc::Rc;
+
 use crate::runtime::class::{BUILTINS, Builtin, Class, Instance};
 use crate::runtime::dict::Dict;
 use crate::runtime::env::{Env, Globals};
 use crate::runtime::value::{BoundMethod, Function, Value};
+use crate::syntax::ast::TypeExpr;
 
 /// A handle into the [`Heap`].
 ///
@@ -53,6 +56,23 @@ pub struct Heap {
     /// It must be cleared when a slot is reused, or a fresh list inherits the
     /// frozenness of whatever died there — see `alloc`.
     frozen: Vec<bool>,
+    /// The type arguments an allocation was built to hold, where it was.
+    ///
+    /// v0.7 §3.9's reified header. Parallel to `objects` for the same reasons
+    /// `frozen` is: the two mutable container variants would each grow a field
+    /// otherwise, and the flag is indexed by exactly the number of the object it
+    /// describes. Cleared on reuse, or a fresh list inherits the element type of
+    /// whatever died in that slot.
+    ///
+    /// `None` is the overwhelming majority and means *unconstrained*, not
+    /// *empty*: a list built without an annotation holds whatever was put in it,
+    /// which is every list a v0.6 program ever made. Only a value that crossed
+    /// an annotated boundary carries one.
+    ///
+    /// Shared rather than owned, because the descriptor is the annotation the
+    /// declaration already holds and a list assigned from another should carry
+    /// the same one rather than a copy that can drift.
+    descriptors: Vec<Option<Rc<TypeExpr>>>,
     free: Vec<u32>,
     live: usize,
     threshold: usize,
@@ -75,6 +95,7 @@ impl Heap {
         let mut heap = Heap {
             objects: Vec::new(),
             frozen: Vec::new(),
+            descriptors: Vec::new(),
             free: Vec::new(),
             live: 0,
             threshold: MIN_THRESHOLD,
@@ -102,14 +123,16 @@ impl Heap {
         match self.free.pop() {
             Some(index) => {
                 self.objects[index as usize] = Some(object);
-                // A reused slot starts thawed. Frozenness belongs to the object
-                // that was there, not to the index.
+                // A reused slot starts thawed and undescribed. Both belong to
+                // the object that was there, not to the index.
                 self.frozen[index as usize] = false;
+                self.descriptors[index as usize] = None;
                 ObjId(index)
             }
             None => {
                 self.objects.push(Some(object));
                 self.frozen.push(false);
+                self.descriptors.push(None);
                 ObjId((self.objects.len() - 1) as u32)
             }
         }
@@ -118,6 +141,29 @@ impl Heap {
     /// Whether `id` has been frozen by `const`.
     pub fn is_frozen(&self, id: ObjId) -> bool {
         self.frozen[id.0 as usize]
+    }
+
+    /// Records what `id` was built to hold, so a later modification can be
+    /// checked against it.
+    ///
+    /// The first descriptor wins. A list crossing two annotated boundaries is
+    /// one list, and the second annotation has already been checked against its
+    /// contents by the time this runs — so re-stamping would swap a constraint
+    /// the program stated for another one it also stated, and leave which won
+    /// depending on assignment order.
+    pub fn describe(&mut self, id: ObjId, ty: Rc<TypeExpr>) {
+        if self.descriptors[id.0 as usize].is_none() {
+            self.descriptors[id.0 as usize] = Some(ty);
+        }
+    }
+
+    /// What `id` was built to hold, if anything said.
+    ///
+    /// An `Option` clone rather than a borrow, because every caller is about to
+    /// mutate the heap it came from — checking an element means asking a class
+    /// what it is, and that reaches the interpreter.
+    pub fn descriptor(&self, id: ObjId) -> Option<Rc<TypeExpr>> {
+        self.descriptors[id.0 as usize].clone()
     }
 
     /// Freezes everything reachable from `value` through its *data*.

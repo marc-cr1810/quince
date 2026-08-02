@@ -1,0 +1,2 @@
+let xs: list[int] = [1]
+xs.push("no")

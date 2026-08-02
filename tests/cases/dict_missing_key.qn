@@ -1,0 +1,21 @@
+# A missing key answers `nil` rather than raising — v0.7 §3.10.
+let d = {"a": 1}
+print(d["b"])
+print(d["a"])
+
+# What that gives up is `d[key]` alone telling "missing" from "present, holding
+# nil". The distinction survives, spelled in two expressions instead of one:
+# `in` tests the key set directly, whatever is stored under it.
+let holes = {"present": nil}
+print(holes["present"])
+print(holes["absent"])
+print("present" in holes)
+print("absent" in holes)
+
+# `remove` is unaffected and still refuses a key that is not there.
+try {
+    d.remove("nope")
+} catch e {
+    print(e.kind)
+    print(e.message)
+}

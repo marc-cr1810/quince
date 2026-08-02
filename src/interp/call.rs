@@ -11,7 +11,7 @@
 
 use std::rc::Rc;
 
-use crate::error::{ErrorKind, QuinceError, Result};
+use crate::error::{ErrorKind, QuinceError, Raised, Result};
 use crate::interp::error::{an, check_arity, does_not_hold, frozen};
 use crate::interp::{Attr, Flow, Interp, MAX_DEPTH, out_of_stack};
 use crate::runtime::class::{BUILTINS as BUILTIN_TYPES, Builtin, Instance};
@@ -337,8 +337,19 @@ impl Interp {
             return Err(self.no_such_type(name, ty.span));
         }
         if !holds(ty, &value, &self.heap) {
+            // A container that failed only on its contents gets a report about
+            // the element rather than about itself — "this is a list" when a
+            // list was asked for says nothing. Rewalked rather than threaded out
+            // of `holds`, because this runs once, on the way to an error.
+            if let Some(precise) = self.offending_element(ty, &value, span) {
+                return Err(precise);
+            }
             return Err(does_not_hold(&self.heap, ty, &value, what, span));
         }
+        // Elements widen too, or `let xs: list[float] = [1, 2]` would hold ints
+        // under an annotation reading `float` — the same contradiction §4.1
+        // rules out for a plain binding, one level down.
+        let value = self.widen_elements(ty, value, span)?;
         // The one widening §4.1 admits, made real. Narrowing is not symmetric
         // and is not here: `let n: int = 3.7` would have to choose a rounding,
         // and `int(x)` is how a program says which.
@@ -346,12 +357,136 @@ impl Interp {
             (TypeName::Named(name), Value::Int(n)) if name == "float" => Value::Float(*n as f64),
             _ => value,
         };
+        // The container remembers what it was checked as, so a later `push` or
+        // index-set can be refused without re-walking it. §3.9's reified header.
+        if !ty.args.is_empty()
+            && let Some(id) = value.base(&self.heap).handle()
+        {
+            self.heap.describe(id, Rc::new(ty.clone()));
+        }
         // `const T` freezes deeply, exactly as a `const` binding does — the same
         // word at a place a binding cannot reach.
         if ty.frozen {
             self.heap.freeze(&value);
         }
         Ok(value)
+    }
+
+    /// The report for the element that made a container fail, if one did.
+    ///
+    /// `None` when the container itself was the mistake — a dict where a list
+    /// was asked for — which is the case the caller already words well.
+    fn offending_element(&mut self, ty: &TypeExpr, value: &Value, span: Span) -> Option<Raised> {
+        let name = match &ty.name {
+            TypeName::Named(name) => name.as_str(),
+            TypeName::Any => return None,
+        };
+        match (name, value.base(&self.heap).clone()) {
+            ("list", Value::List(id)) => {
+                let arg = ty.args.first()?;
+                let items = self.heap.list(id).clone();
+                let (index, item) = items
+                    .iter()
+                    .enumerate()
+                    .find(|(_, item)| !holds(arg, item, &self.heap))?;
+                Some(does_not_hold(
+                    &self.heap,
+                    arg,
+                    item,
+                    &format!("item {index}"),
+                    span,
+                ))
+            }
+            ("dict", Value::Dict(id)) => {
+                let dict = self.heap.dict(id).clone();
+                if let Some(arg) = ty.args.first()
+                    && let Some(key) = dict.keys().find(|key| !holds(arg, key, &self.heap))
+                {
+                    return Some(does_not_hold(&self.heap, arg, &key, "the key", span));
+                }
+                let arg = ty.args.get(1)?;
+                let held = dict.values().find(|held| !holds(arg, held, &self.heap))?;
+                Some(does_not_hold(&self.heap, arg, held, "the value", span))
+            }
+            _ => None,
+        }
+    }
+
+    /// Rewrites a container's elements to the types its annotation states.
+    ///
+    /// Only the §4.1 widening has anything to do — every other element already
+    /// holds by the time this runs. In place, because the value the program
+    /// holds is the one that has to change: a copy would leave the original
+    /// reachable through every other name for it.
+    fn widen_elements(&mut self, ty: &TypeExpr, value: Value, span: Span) -> Result<Value> {
+        let name = match &ty.name {
+            TypeName::Named(name) => name.as_str(),
+            TypeName::Any => return Ok(value),
+        };
+        match (name, value.base(&self.heap).clone()) {
+            ("list", Value::List(id)) => {
+                let Some(arg) = ty.args.first().cloned() else {
+                    return Ok(value);
+                };
+                let items = self.heap.list(id).clone();
+                let mut widened = Vec::with_capacity(items.len());
+                for item in items {
+                    widened.push(self.coerced(&arg, item, "the item", span)?);
+                }
+                if let Ok(held) = self.heap.list_mut(id) {
+                    *held = widened;
+                }
+            }
+            ("dict", Value::Dict(id)) => {
+                let Some(arg) = ty.args.get(1).cloned() else {
+                    return Ok(value);
+                };
+                let dict = self.heap.dict(id).clone();
+                let mut widened = Vec::new();
+                for (key, held) in dict.iter() {
+                    widened.push((key.clone(), self.coerced(&arg, held.clone(), "the value", span)?));
+                }
+                if let Ok(held) = self.heap.dict_mut(id) {
+                    for (key, value) in widened {
+                        held.insert(key, value);
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(value)
+    }
+
+    /// Refuses a value about to be put into a described container.
+    ///
+    /// The other half of the reified header: [`Self::coerced`] checks a
+    /// container's contents once when it crosses an annotated boundary, and this
+    /// is what keeps them true afterwards. `slot` picks which argument applies —
+    /// a list's element, a dict's key, or a dict's value.
+    ///
+    /// Answers the value back, because the same §4.1 widening applies: pushing
+    /// an int onto a `list[float]` stores the float.
+    pub(crate) fn admitted(
+        &mut self,
+        container: ObjId,
+        slot: usize,
+        value: Value,
+        what: &str,
+        span: Span,
+    ) -> Result<Value> {
+        let Some(descriptor) = self.heap.descriptor(container) else {
+            return Ok(value);
+        };
+        let Some(ty) = descriptor.args.get(slot) else {
+            return Ok(value);
+        };
+        if !holds(ty, &value, &self.heap) {
+            return Err(does_not_hold(&self.heap, ty, &value, what, span));
+        }
+        Ok(match (&ty.name, &value) {
+            (TypeName::Named(name), Value::Int(n)) if name == "float" => Value::Float(*n as f64),
+            _ => value,
+        })
     }
 
     /// Whether `name` names a class that exists.

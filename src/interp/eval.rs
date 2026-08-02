@@ -395,23 +395,30 @@ impl Interp {
                     // it needs has ended by the time the error — which reads
                     // the heap to name the type — is built.
                     Value::Dict(id) => {
-                        let key = key_of(&self.heap, &index, target.span)?;
+                        // Against the descriptor before the key is built, so a
+                        // refused pair leaves the dict as it was found.
+                        let checked_key =
+                            self.admitted(id, 0, index.clone(), "the key", target.span)?;
+                        let held = self.admitted(id, 1, value.clone(), "the value", target.span)?;
+                        let key = key_of(&self.heap, &checked_key, target.span)?;
                         let written = self
                             .heap
                             .dict_mut(id)
-                            .map(|entries| entries.insert(key, value.clone()));
+                            .map(|entries| entries.insert(key, held.clone()));
                         written.map_err(|_| frozen(&self.heap, &collection, target.span))?;
+                        Ok(held)
                     }
                     _ => {
                         let (id, offset) = self.list_index(&collection, &index, target.span)?;
+                        let held = self.admitted(id, 0, value.clone(), "the item", target.span)?;
                         let written = self
                             .heap
                             .list_mut(id)
-                            .map(|items| items[offset] = value.clone());
+                            .map(|items| items[offset] = held.clone());
                         written.map_err(|_| frozen(&self.heap, &collection, target.span))?;
+                        Ok(held)
                     }
                 }
-                Ok(value)
             }
 
             // Assigning to a field creates it if it is not there, which is the

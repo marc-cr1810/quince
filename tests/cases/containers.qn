@@ -1,0 +1,36 @@
+let xs: list[int] = [1, 2, 3]
+xs.push(4)
+print(xs)
+
+# Elements widen, so a `list[float]` really holds floats.
+let fs: list[float] = [1, 2]
+fs.push(3)
+print(fs)
+
+let scores: dict[string, int] = {"alice": 95}
+scores["bob"] = 88
+print(scores)
+
+# The single-argument shorthand types the keys and leaves the values entirely
+# unconstrained — `_?` and not `_`, so a `nil` value is admitted.
+let config: dict[string] = {"host": "localhost", "port": 8080}
+config["debug"] = true
+config["missing"] = nil
+print(config)
+
+# `any` and `_` are two spellings of one type.
+let mixed: list[_?] = [1, "two", nil]
+print(mixed)
+
+let nested: list[list[int]] = [[1], [2, 3]]
+print(nested)
+
+# Invariance: a `list[int]` is built as one rather than converted from one.
+fn total(ns: list[int]): int {
+    let sum: int = 0
+    for n in ns {
+        sum = sum + n
+    }
+    return sum
+}
+print(total(xs))

@@ -633,9 +633,25 @@ Three things worth recording:
 into the library is unchecked. That is a smaller scope of the same mechanism rather than a
 half-built one: `print(x)` is exactly as checked as it was in v0.6.
 
-**Tranche 4 — containers.** `list[T]`, `dict[K, V]`, `dict[K]`, the modification checks,
-and `d[key]` answering `V?`. Depends on 2 and 3, and is the tranche that breaks a running
-program, so it wants the corpus run tranche 3 sets up.
+**Tranche 4 — containers.** ✅ **Landed.** `list[T]`, `dict[K, V]`, `dict[K]`, the
+modification checks, and `d[key]` answering `V?`.
+
+The reified header arrived here, as tranche 2 said it would: a descriptor per allocation,
+parallel to `frozen` for the same reasons that is. It is what makes a later `push` or
+index-set a lookup rather than a rewalk — the contents are checked once, when the value
+crosses an annotated boundary, and the stamp keeps them true afterwards. The first
+descriptor wins: a list crossing two annotated boundaries is one list, and re-stamping
+would leave which annotation governs depending on assignment order.
+
+**Elements widen, and that is not optional.** `let xs: list[float] = [1, 2]` rewrites the
+list in place, because holding ints under an annotation reading `float` is the same
+contradiction §4.1 rules out for a plain binding, one level down. It is in place rather
+than a copy because the value the program holds is the one that has to change.
+
+The breaking change cost exactly one corpus case, as expected. `err_dict_key` is now
+`dict_missing_key`, and covers the whole story rather than the old refusal: `nil` for a
+missing key, `in` still distinguishing missing from present-holding-`nil`, and `remove`
+still raising — which is what keeps `KeyError` a live kind rather than a dead one.
 
 **Tranche 5 — null safety and `is`.** `?.`, `??`, the `is` operator, and block-scoped smart
 casts. Cheap once tranche 3 has landed, and made unavoidable by tranche 4.

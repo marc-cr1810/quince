@@ -1,8 +1,0 @@
-Error: quince::KeyError
-
- × key "b" is not in the dict
-  ╭─[err_dict_key.qn:2:7]
-2 │ print(d["b"])
-  ·       ──────
-  ╰────
-  help: did you mean `a`?

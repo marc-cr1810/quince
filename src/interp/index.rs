@@ -37,33 +37,18 @@ impl Interp {
         }
 
         match target.base(&self.heap) {
+            // A missing key answers `nil`, not an error — v0.7 §3.10, and the
+            // one thing in the milestone that breaks a running program.
+            //
+            // The trade: a language with `T?` in it should have one story about
+            // absence rather than two, and `??` makes the total form ergonomic
+            // for the first time. What it gives up is `d[key]` alone
+            // distinguishing "missing" from "present, holding `nil`" — which is
+            // not lost, only spelled in two expressions: `key in d` tests the key
+            // set directly, whatever is stored under it.
             Value::Dict(id) => {
                 let key = key_of(&self.heap, index, span)?;
-                self.heap.dict(*id).get(&key).cloned().ok_or_else(|| {
-                    let key_repr = index.repr_base(&self.heap);
-                    let mut err = QuinceError::new(
-                        format!("key {key_repr} is not in the dict"),
-                        span,
-                    )
-                    .with_kind(ErrorKind::Key);
-
-                    if let Value::Str(query_str) = index.base(&self.heap) {
-                        let keys_strs: Vec<String> = self
-                            .heap
-                            .dict(*id)
-                            .keys()
-                            .filter_map(|k| match k {
-                                Value::Str(s) => Some(s.to_string()),
-                                _ => None,
-                            })
-                            .collect();
-                        let refs: Vec<&str> = keys_strs.iter().map(|s| s.as_str()).collect();
-                        if let Some(suggestion) = crate::error::did_you_mean(query_str, refs) {
-                            err = err.with_help(format!("did you mean `{suggestion}`?"));
-                        }
-                    }
-                    err
-                })
+                Ok(self.heap.dict(*id).get(&key).cloned().unwrap_or(Value::Nil))
             }
             // Indexed by character, not by byte, because `len` already counts
             // characters — a subscript that disagreed with the length would be

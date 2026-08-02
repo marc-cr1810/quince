@@ -10,9 +10,70 @@ use crate::syntax::ast::{
     self, BindKind, FieldDecl, FnDecl, ImportName, ImportNames, Op, Openness, Param, Stmt, StmtKind,
     TypeExpr, TypeName, Var,
 };
+use crate::runtime::dict::KEY_TYPES;
 use crate::syntax::doc::Doc;
 use crate::syntax::parser::{Modifiers, Parser, declaration, syntax};
-use crate::syntax::token::{Token, TokenKind};
+use crate::syntax::token::{Span, Token, TokenKind};
+
+/// Refuses a container type whose arguments do not fit it.
+///
+/// Two rules, both decidable from the annotation alone. The arity — `list` takes
+/// one argument, `dict` one or two — and §4.2's key constraint, which is
+/// [`KEY_TYPES`] written as a check.
+///
+/// Only the two containers the language has. A class the program declared takes
+/// no arguments until v0.9 gives it some, and saying so here would be a rule
+/// that has to be removed rather than extended, so an unknown head is left
+/// alone: the name is checked when the annotation is applied.
+fn check_arguments(head: &str, args: &[TypeExpr], span: Span) -> Result<()> {
+    let arity = match head {
+        "list" => 1..=1,
+        "dict" => 1..=2,
+        // Not a container, so it takes no arguments — and a program that wrote
+        // some has said something the language cannot read.
+        _ if !args.is_empty() => {
+            return Err(declaration(
+                format!("`{head}` takes no type arguments"),
+                span,
+            )
+            .with_help("only `list` and `dict` are parameterised in this version"));
+        }
+        _ => return Ok(()),
+    };
+
+    if !args.is_empty() && !arity.contains(&args.len()) {
+        let written = if *arity.start() == *arity.end() {
+            format!("{} argument", arity.start())
+        } else {
+            format!("{} or {} arguments", arity.start(), arity.end())
+        };
+        let were = if args.len() == 1 { "was" } else { "were" };
+        return Err(declaration(
+            format!("`{head}` takes {written}, but {} {were} written", args.len()),
+            span,
+        ));
+    }
+
+    // The key is the first argument, for both `dict[K, V]` and the `dict[K]`
+    // shorthand. `any` is admitted: it says the keys are heterogeneous, which
+    // every one of the hashable types already is against the others.
+    if head == "dict"
+        && let Some(key) = args.first()
+        && let TypeName::Named(name) = &key.name
+        && !KEY_TYPES.contains(&name.as_str())
+    {
+        return Err(declaration(
+            format!("`{name}` cannot be a dict key"),
+            key.span,
+        )
+        .with_help(format!(
+            "a dict is keyed by one of {} — a class is not a key, and one declaring `op eq` \
+             gives up being one",
+            KEY_TYPES.join(", ")
+        )));
+    }
+    Ok(())
+}
 
 impl Parser {
     pub(super) fn fn_stmt(&mut self) -> Result<Stmt> {
@@ -280,6 +341,14 @@ impl Parser {
                 }
             }
             self.expect(TokenKind::RBracket, "after the type arguments")?;
+        }
+
+        // The arity and the key constraint, both decidable from the words
+        // alone. §4.2's set is closed, so `dict[Point, int]` is refused at the
+        // declaration with the reason named rather than accepted and failing on
+        // whatever the first insertion happens to be.
+        if let TypeName::Named(head) = &name {
+            check_arguments(head, &args, start.to(self.peek().span))?;
         }
 
         let nullable = self.eat(&TokenKind::Question);

@@ -414,14 +414,39 @@ pub fn holds(ty: &TypeExpr, value: &Value, heap: &Heap) -> bool {
     };
 
     let actual = value.type_name(heap);
-    if actual == name {
-        return true;
-    }
     // An int is a float when a float was asked for, and never the other way.
     if name == "float" && actual == "int" {
         return true;
     }
-    descends_from(heap, value, name)
+    if actual != name && !descends_from(heap, value, name) {
+        return false;
+    }
+
+    // The elements, once the container itself holds. Walked rather than trusted:
+    // a `list[int]` built from a literal is checked here, and thereafter the
+    // descriptor stamped on the allocation is what keeps it one — see
+    // `Heap::describe`.
+    match (name, value.base(heap)) {
+        ("list", Value::List(id)) if !ty.args.is_empty() => heap
+            .list(*id)
+            .iter()
+            .all(|item| holds(&ty.args[0], item, heap)),
+        ("dict", Value::Dict(id)) => {
+            let dict = heap.dict(*id);
+            let keys_hold = ty.args.first().is_none_or(|key| {
+                dict.keys().all(|k| holds(key, &k, heap))
+            });
+            // The `dict[K]` shorthand leaves values entirely unconstrained —
+            // `_?` and not `_`. A shorthand meaning "I only care about the keys"
+            // that then refused a `nil` value would be a trap, so the elided
+            // parameter is the top type and not the non-nil one. §3.10.
+            keys_hold
+                && ty.args.get(1).is_none_or(|v| {
+                    dict.values().all(|held| holds(v, held, heap))
+                })
+        }
+        _ => true,
+    }
 }
 
 /// Whether `value`'s class is `name` or descends from it.

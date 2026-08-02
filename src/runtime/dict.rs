@@ -34,6 +34,20 @@ pub enum Key {
     Str(Rc<str>),
 }
 
+/// The types a dict may be keyed by, written down.
+///
+/// [`Key`]'s own set of variants, as names an annotation can use. `dict[K, V]`
+/// reads this to refuse `dict[Point, int]` at the declaration, with the reason
+/// named, rather than accepting it and failing on first insertion.
+///
+/// A class is absent and stays absent. A class instance is not a key today, and
+/// one declaring `op eq` gives up being one — equal keys that hash apart put two
+/// of the same key in one dict, which is the decision `Op::Eq`'s documentation
+/// records. Admitting a custom `op hash` is a real feature and a larger one:
+/// a new op in `OPS`, a `Key` variant that can call back into the interpreter,
+/// and that decision reversed. v0.7 §4.2 defers it and says so.
+pub const KEY_TYPES: &[&str] = &["nil", "bool", "int", "float", "string"];
+
 /// Why a value cannot be a key. Rendered by the caller, which has the span —
 /// and, for `Unhashable`, the heap needed to name the offending type.
 pub enum NotAKey {
