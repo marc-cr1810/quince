@@ -700,8 +700,24 @@ written in two places is `false`. `is` compares a descriptor written at the decl
 against a type written elsewhere, so it needs `same_as` — structural, and ignoring `frozen`,
 because `const list[int]` and `list[int]` are one type and `const` is about a boundary.
 
-**Tranche 6 — aliases, bitwise slots, and `op` return checking.** The three small ones,
-batched because each is a day and none blocks anything.
+**Tranche 6 — aliases, bitwise slots, and `op` return checking.** ✅ **Landed.** The three
+small ones, batched because each is a day and none blocks anything. Two of them turned out
+to be less small than that, and for the same reason each time: a check in the wrong place.
+
+- **Aliases moved §4.2's key check out of the parser.** `dict[UserID, int]` is a good
+  annotation whose key type cannot be read until `UserID` is expanded, so the key
+  constraint and the container arities now run after substitution. The parser was refusing
+  `UserID` because it is not spelled `string`.
+- **`op` return checking needed the table §3.7 asked for and did not have.** The contract
+  lived as a hand-written `expected: &str` at each of nine run-time sites, so there was
+  nothing for a declaration check to read. It is now `Op::answers`, exhaustive.
+- **Bitwise binds tighter than comparison**, which is where Quince parts company with C.
+  `a & b == c` groups as `(a & b) == c` — C reads it the other way, and it is the one
+  precedence every C style guide tells you to parenthesise around. Among themselves they
+  keep C's order (`|`, then `^`, then `&`), and a shift is arithmetic: looser than `+`.
+
+`&` and `|` used to be refused by the lexer with "did you mean `&&`?", which was the right
+answer while they meant nothing and is wrong now.
 
 **Tranche 7 — editor tooling.** Inlay hints, type completion, smart-cast-aware and
 visibility-aware completion, once there are types to show.

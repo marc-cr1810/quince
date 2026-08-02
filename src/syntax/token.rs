@@ -107,6 +107,16 @@ pub enum TokenKind {
     AndAnd,
     OrOr,
 
+    /// The bitwise operators. `&` and `|` are the single-character forms of
+    /// `&&` and `||`, which is why the lexer used to refuse them outright with
+    /// "did you mean `&&`?" — that suggestion is now wrong and is gone.
+    Amp,
+    Pipe,
+    Caret,
+    Tilde,
+    Shl,
+    Shr,
+
     LParen,
     RParen,
     LBrace,
@@ -253,6 +263,12 @@ impl TokenKind {
             | TokenKind::Gt
             | TokenKind::Ge
             | TokenKind::Not
+            | TokenKind::Amp
+            | TokenKind::Pipe
+            | TokenKind::Caret
+            | TokenKind::Tilde
+            | TokenKind::Shl
+            | TokenKind::Shr
             | TokenKind::AndAnd
             | TokenKind::OrOr
             | TokenKind::LParen
@@ -330,6 +346,12 @@ impl fmt::Display for TokenKind {
             TokenKind::Ge => write!(f, ">="),
 
             TokenKind::Not => write!(f, "!"),
+            TokenKind::Amp => write!(f, "&"),
+            TokenKind::Pipe => write!(f, "|"),
+            TokenKind::Caret => write!(f, "^"),
+            TokenKind::Tilde => write!(f, "~"),
+            TokenKind::Shl => write!(f, "<<"),
+            TokenKind::Shr => write!(f, ">>"),
             TokenKind::AndAnd => write!(f, "&&"),
             TokenKind::OrOr => write!(f, "||"),
 

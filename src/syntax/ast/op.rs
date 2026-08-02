@@ -7,12 +7,19 @@
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnaryOp {
+    /// `~a`, which reaches `op bit_not`.
+    BitNot,
     Neg,
     Not,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BinaryOp {
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
     Add,
     Sub,
     Mul,
@@ -119,6 +126,21 @@ pub enum Op {
     /// `for item in x`. Returns a list — see Iteration in DESIGN.md for why it
     /// is eager.
     Iter,
+    /// `a & b`, `a | b`, `a ^ b`, `~a`, `a << b`, `a >> b`.
+    ///
+    /// Appended rather than filed beside the arithmetic, because the
+    /// discriminant indexes `Class::slots` and reordering would silently move
+    /// every op's slot. The order in this enum is load-bearing; the order it
+    /// reads in is not.
+    ///
+    /// These answer with whatever the class means by the operation, exactly as
+    /// `add` does — a set answering a set from `|` is the motivating case.
+    BitAnd,
+    BitOr,
+    BitXor,
+    BitNot,
+    BitShl,
+    BitShr,
 }
 
 /// Every [`Op`], for validating a declaration, for listing them in the error
@@ -149,6 +171,12 @@ pub static OPS: &[Op] = &[
     Op::Set,
     Op::Contains,
     Op::Iter,
+    Op::BitAnd,
+    Op::BitOr,
+    Op::BitXor,
+    Op::BitNot,
+    Op::BitShl,
+    Op::BitShr,
 ];
 
 /// What happens when a binary operator's *right* operand is the one whose class
@@ -209,6 +237,12 @@ impl Op {
             Op::Set => "set",
             Op::Contains => "contains",
             Op::Iter => "iter",
+            Op::BitAnd => "bit_and",
+            Op::BitOr => "bit_or",
+            Op::BitXor => "bit_xor",
+            Op::BitNot => "bit_not",
+            Op::BitShl => "bit_shl",
+            Op::BitShr => "bit_shr",
         }
     }
 
@@ -255,7 +289,13 @@ impl Op {
             | Op::Get
             | Op::Set
             | Op::Contains
-            | Op::Iter => Reflect::Never,
+            | Op::Iter
+            | Op::BitAnd
+            | Op::BitOr
+            | Op::BitXor
+            | Op::BitNot
+            | Op::BitShl
+            | Op::BitShr => Reflect::Never,
         }
     }
 
@@ -305,7 +345,13 @@ impl Op {
             | Op::Rem
             | Op::Neg
             | Op::Get
-            | Op::Set => None,
+            | Op::Set
+            | Op::BitAnd
+            | Op::BitOr
+            | Op::BitXor
+            | Op::BitNot
+            | Op::BitShl
+            | Op::BitShr => None,
         }
     }
 
@@ -323,7 +369,10 @@ impl Op {
             | Op::Dict
             | Op::Neg
             | Op::Len
-            | Op::Iter => Some(0),
+            | Op::Iter
+            // `~a` is unary, so it asks about the receiver alone — the same
+            // shape as `op neg`.
+            | Op::BitNot => Some(0),
 
             // The other operand, the key, or the needle.
             Op::Eq
@@ -337,7 +386,12 @@ impl Op {
             | Op::FloorDiv
             | Op::Rem
             | Op::Get
-            | Op::Contains => Some(1),
+            | Op::Contains
+            | Op::BitAnd
+            | Op::BitOr
+            | Op::BitXor
+            | Op::BitShl
+            | Op::BitShr => Some(1),
 
             // `x[i] = v` is the only one with two.
             Op::Set => Some(2),
@@ -440,6 +494,9 @@ mod tests {
                 // A constructor's parameters are the class's own.
                 Op::Init => None,
                 Op::Set => Some(2),
+                // `~a` asks about the receiver alone, as `-a` does.
+                Op::BitNot => Some(0),
+                Op::BitAnd | Op::BitOr | Op::BitXor | Op::BitShl | Op::BitShr => Some(1),
                 Op::Eq
                 | Op::Cmp
                 | Op::Lt

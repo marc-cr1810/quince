@@ -182,6 +182,8 @@ pub(crate) fn type_error(
         Mul => "multiply",
         Div | FloorDiv => "divide",
         Rem => "take the remainder of",
+        BitAnd | BitOr | BitXor => "combine the bits of",
+        Shl | Shr => "shift",
         Lt | Le | Gt | Ge => "compare",
         Eq | Ne | In => unreachable!("handled before the numeric dispatch"),
     };

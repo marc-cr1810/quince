@@ -1,0 +1,55 @@
+# The integer operators.
+print(12 & 10)
+print(12 | 10)
+print(12 ^ 10)
+print(~5)
+print(1 << 4)
+print(256 >> 4)
+
+# Tighter than every comparison, which is where Quince parts company with C:
+# `a & b == c` groups as `(a & b) == c`, which is what it looks like.
+print(12 & 10 == 8)
+# A shift is arithmetic and binds looser than `+`.
+print(1 << 1 + 2)
+# Among themselves they keep C's order — `|` loosest, then `^`, then `&`.
+print(1 | 2 ^ 3 & 3)
+
+# The whole point of the slots: a class that can answer `+` and not `|` is
+# arbitrary, so it can answer both.
+class Flags {
+    let bits: int = 0
+
+    op init(b) {
+        self.bits = b
+    }
+
+    op bit_and(other) {
+        return Flags(self.bits & other.bits)
+    }
+
+    op bit_or(other) {
+        return Flags(self.bits | other.bits)
+    }
+
+    op bit_xor(other) {
+        return Flags(self.bits ^ other.bits)
+    }
+
+    op bit_not() {
+        return Flags(~self.bits)
+    }
+
+    op bit_shl(by) {
+        return Flags(self.bits << by)
+    }
+
+    op string(): string {
+        return "Flags(" + string(self.bits) + ")"
+    }
+}
+
+print(Flags(12) & Flags(10))
+print(Flags(12) | Flags(10))
+print(Flags(12) ^ Flags(10))
+print(~Flags(0))
+print(Flags(1) << 4)

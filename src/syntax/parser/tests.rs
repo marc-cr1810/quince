@@ -39,6 +39,7 @@ use crate::syntax::lexer::Lexer;
                 let op = match op {
                     UnaryOp::Neg => "-",
                     UnaryOp::Not => "!",
+                    UnaryOp::BitNot => "~",
                 };
                 format!("({op} {})", sexpr(rhs))
             }
@@ -57,6 +58,11 @@ use crate::syntax::lexer::Lexer;
                     BinaryOp::Gt => ">",
                     BinaryOp::Ge => ">=",
                     BinaryOp::In => "in",
+                    BinaryOp::BitAnd => "&",
+                    BinaryOp::BitOr => "|",
+                    BinaryOp::BitXor => "^",
+                    BinaryOp::Shl => "<<",
+                    BinaryOp::Shr => ">>",
                 };
                 format!("({op} {} {})", sexpr(lhs), sexpr(rhs))
             }

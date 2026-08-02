@@ -11,7 +11,7 @@ use crate::syntax::token::TokenKind;
 
 /// Binding power of unary operators, above every infix operator so `-a * b`
 /// groups as `(-a) * b`.
-const UNARY_BP: u8 = 13;
+const UNARY_BP: u8 = 21;
 
 /// Binding power of `??`.
 ///
@@ -20,7 +20,7 @@ const UNARY_BP: u8 = 13;
 /// `(d[k] ?? 0) == 5`, because the coalesce produces the value being compared;
 /// and `d[k] ?? 0 + 1` is `d[k] ?? (0 + 1)`, because the right side is a default
 /// *value* rather than an operand of the `+`.
-const COALESCE_BP: u8 = 8;
+const COALESCE_BP: u8 = 9;
 
 /// Binding power of `is`, which is a comparison and sits with the others.
 const IS_BP: u8 = 7;
@@ -36,6 +36,12 @@ fn infix_op(kind: &TokenKind) -> Option<(InfixOp, u8, u8)> {
     let (op, lbp) = match kind {
         TokenKind::OrOr => (InfixOp::Logical(LogicalOp::Or), 1),
         TokenKind::AndAnd => (InfixOp::Logical(LogicalOp::And), 3),
+        // The three bitwise operators sit between the logical operators and the
+        // comparisons, in C's order — `|` loosest, then `^`, then `&`. Quince
+        // does not inherit C's mistake of putting them *looser* than `==`,
+        // which is the one every C style guide tells you to parenthesise
+        // around: here `a & b == c` groups as `(a & b) == c`, which is what it
+        // looks like.
         TokenKind::Eq => (InfixOp::Binary(BinaryOp::Eq), 5),
         TokenKind::Ne => (InfixOp::Binary(BinaryOp::Ne), 5),
         TokenKind::In => (InfixOp::Binary(BinaryOp::In), 7),
@@ -43,12 +49,25 @@ fn infix_op(kind: &TokenKind) -> Option<(InfixOp, u8, u8)> {
         TokenKind::Le => (InfixOp::Binary(BinaryOp::Le), 7),
         TokenKind::Gt => (InfixOp::Binary(BinaryOp::Gt), 7),
         TokenKind::Ge => (InfixOp::Binary(BinaryOp::Ge), 7),
-        TokenKind::Plus => (InfixOp::Binary(BinaryOp::Add), 9),
-        TokenKind::Minus => (InfixOp::Binary(BinaryOp::Sub), 9),
-        TokenKind::Star => (InfixOp::Binary(BinaryOp::Mul), 11),
-        TokenKind::Slash => (InfixOp::Binary(BinaryOp::Div), 11),
-        TokenKind::SlashSlash => (InfixOp::Binary(BinaryOp::FloorDiv), 11),
-        TokenKind::Percent => (InfixOp::Binary(BinaryOp::Rem), 11),
+        // Tighter than every comparison, which is where Quince parts company
+        // with C. C puts these *looser* than `==`, so `a & b == c` means
+        // `a & (b == c)` — the one precedence every C style guide tells you to
+        // parenthesise around. Here it groups as `(a & b) == c`, which is what
+        // it looks like. Among themselves they keep C's order: `|` loosest,
+        // then `^`, then `&`.
+        TokenKind::Pipe => (InfixOp::Binary(BinaryOp::BitOr), 11),
+        TokenKind::Caret => (InfixOp::Binary(BinaryOp::BitXor), 12),
+        TokenKind::Amp => (InfixOp::Binary(BinaryOp::BitAnd), 13),
+        // A shift is arithmetic, so it binds looser than `+` — `a << 1 + 2` is
+        // `a << (1 + 2)`, as in C.
+        TokenKind::Shl => (InfixOp::Binary(BinaryOp::Shl), 15),
+        TokenKind::Shr => (InfixOp::Binary(BinaryOp::Shr), 15),
+        TokenKind::Plus => (InfixOp::Binary(BinaryOp::Add), 17),
+        TokenKind::Minus => (InfixOp::Binary(BinaryOp::Sub), 17),
+        TokenKind::Star => (InfixOp::Binary(BinaryOp::Mul), 19),
+        TokenKind::Slash => (InfixOp::Binary(BinaryOp::Div), 19),
+        TokenKind::SlashSlash => (InfixOp::Binary(BinaryOp::FloorDiv), 19),
+        TokenKind::Percent => (InfixOp::Binary(BinaryOp::Rem), 19),
         _ => return None,
     };
     Some((op, lbp, lbp + 1))
@@ -160,6 +179,7 @@ impl Parser {
         let op = match self.peek().kind {
             TokenKind::Minus => UnaryOp::Neg,
             TokenKind::Not => UnaryOp::Not,
+            TokenKind::Tilde => UnaryOp::BitNot,
             _ => return self.postfix(),
         };
         let start = self.advance().span;

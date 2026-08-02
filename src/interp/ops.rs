@@ -308,11 +308,29 @@ impl Interp {
             let truthy = self.is_truthy(&value)?;
             return Ok(Value::Bool(!truthy));
         }
-        // `op neg` first, so a class that says what `-x` means to it is asked
-        // before the number it might be carrying. Whatever it answers is the
-        // answer: unlike `op bool`, there is no type `-x` has to be.
-        if let Some(method) = self.slot(&value, Op::Neg) {
+        // The class first, so one that says what the operator means to it is
+        // asked before the number it might be carrying. Whatever it answers is
+        // the answer: unlike `op bool`, there is no type `-x` or `~x` has to be.
+        let slot = match op {
+            UnaryOp::Neg => Op::Neg,
+            UnaryOp::BitNot => Op::BitNot,
+            UnaryOp::Not => unreachable!("truthiness is answered above"),
+        };
+        if let Some(method) = self.slot(&value, slot) {
             return self.call_op(method, &value, Vec::new());
+        }
+
+        // `~` acts on the bits, which only an int has.
+        if let UnaryOp::BitNot = op {
+            return match value.base(&self.heap) {
+                Value::Int(n) => Ok(Value::Int(!n)),
+                other => Err(QuinceError::new(
+                    format!("`~` does not apply to {}", other.type_name(&self.heap)),
+                    span,
+                )
+                .with_kind(ErrorKind::Type)
+                .with_help("only an int has bits — convert with `int(x)` first")),
+            };
         }
 
         // Otherwise negation acts on the number, so a class extending `int` is
@@ -557,6 +575,11 @@ impl Interp {
             BinaryOp::Div => Op::Div,
             BinaryOp::FloorDiv => Op::FloorDiv,
             BinaryOp::Rem => Op::Rem,
+            BinaryOp::BitAnd => Op::BitAnd,
+            BinaryOp::BitOr => Op::BitOr,
+            BinaryOp::BitXor => Op::BitXor,
+            BinaryOp::Shl => Op::BitShl,
+            BinaryOp::Shr => Op::BitShr,
             // The comparisons and `in`, which are answered above.
             _ => return Ok(None),
         };
@@ -720,6 +743,24 @@ pub(crate) fn int_op(op: BinaryOp, a: i64, b: i64, span: Span) -> Result<Value> 
 
     let value =
         match op {
+            BitAnd => Value::Int(a & b),
+            BitOr => Value::Int(a | b),
+            BitXor => Value::Int(a ^ b),
+            // A shift by a negative or oversized count has no answer worth
+            // guessing at, so it is refused rather than wrapped to something
+            // that looks deliberate. `checked_sh*` is what draws the line.
+            Shl => Value::Int(
+                u32::try_from(b)
+                    .ok()
+                    .and_then(|by| a.checked_shl(by))
+                    .ok_or_else(|| shift_count(b, span))?,
+            ),
+            Shr => Value::Int(
+                u32::try_from(b)
+                    .ok()
+                    .and_then(|by| a.checked_shr(by))
+                    .ok_or_else(|| shift_count(b, span))?,
+            ),
             Add => Value::Int(a.checked_add(b).ok_or_else(overflow)?),
             Sub => Value::Int(a.checked_sub(b).ok_or_else(overflow)?),
             Mul => Value::Int(a.checked_mul(b).ok_or_else(overflow)?),
@@ -755,9 +796,26 @@ pub(crate) fn int_op(op: BinaryOp, a: i64, b: i64, span: Span) -> Result<Value> 
     Ok(value)
 }
 
+/// A shift count a machine word cannot answer for.
+fn shift_count(by: i64, span: Span) -> crate::error::Raised {
+    QuinceError::new(format!("cannot shift by {by}"), span)
+        .with_kind(ErrorKind::Value)
+        .with_help("a shift count is between 0 and 63 — an int has 64 bits")
+}
+
 pub(crate) fn float_op(op: BinaryOp, a: f64, b: f64, span: Span) -> Result<Value> {
     use BinaryOp::*;
     let value = match op {
+        // A float has no bits to combine that mean anything. Refused here so the
+        // report names the operator rather than leaving the caller to guess.
+        BitAnd | BitOr | BitXor | Shl | Shr => {
+            return Err(QuinceError::new(
+                "a float has no bits to operate on",
+                span,
+            )
+            .with_kind(ErrorKind::Type)
+            .with_help("convert it with `int(x)` first"));
+        }
         Add => Value::Float(a + b),
         Sub => Value::Float(a - b),
         Mul => Value::Float(a * b),

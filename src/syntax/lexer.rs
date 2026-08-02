@@ -98,19 +98,23 @@ impl<'a> Lexer<'a> {
                 '!' if self.eat('=') => TokenKind::Ne,
                 '!' => TokenKind::Not,
                 '<' if self.eat('=') => TokenKind::Le,
+                // Before the bare `<`, so `a << b` is a shift and not two
+                // comparisons — maximal munch, as everywhere else here.
+                '<' if self.eat('<') => TokenKind::Shl,
                 '<' => TokenKind::Lt,
                 '>' if self.eat('=') => TokenKind::Ge,
+                '>' if self.eat('>') => TokenKind::Shr,
                 '>' => TokenKind::Gt,
 
                 '&' if self.eat('&') => TokenKind::AndAnd,
                 '|' if self.eat('|') => TokenKind::OrOr,
-                '&' | '|' => {
-                    return Err(syntax(
-                        format!("unexpected '{c}' (did you mean '{c}{c}'?)"),
-                        Span::new(start, self.pos),
-                    ));
-                }
-
+                // Single-character forms are the bitwise operators as of v0.7.
+                // They used to be refused with "did you mean `&&`?", which was
+                // right while they meant nothing and is wrong now.
+                '&' => TokenKind::Amp,
+                '|' => TokenKind::Pipe,
+                '^' => TokenKind::Caret,
+                '~' => TokenKind::Tilde,
                 '"' | '\'' => self.string(start, c)?,
                 c if c.is_ascii_digit() => self.number(start)?,
                 c if is_ident_start(c) => self.ident(start),
@@ -521,9 +525,48 @@ mod tests {
     }
 
     #[test]
-    fn single_ampersand_suggests_the_pair() {
-        let err = error("a & b");
-        assert!(err.message.contains("&&"), "{}", err.message);
+    fn a_single_ampersand_is_the_bitwise_operator() {
+        // It used to be refused with "did you mean `&&`?", which was the right
+        // answer while it meant nothing. v0.7 gives it a meaning, so the
+        // suggestion would now be wrong — and the pair still wins on munch.
+        assert_eq!(
+            kinds("a & b && c"),
+            vec![
+                TokenKind::Ident("a".into()),
+                TokenKind::Amp,
+                TokenKind::Ident("b".into()),
+                TokenKind::AndAnd,
+                TokenKind::Ident("c".into()),
+            ]
+        );
+        assert_eq!(
+            kinds("a | b || c"),
+            vec![
+                TokenKind::Ident("a".into()),
+                TokenKind::Pipe,
+                TokenKind::Ident("b".into()),
+                TokenKind::OrOr,
+                TokenKind::Ident("c".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_shift_wins_over_two_comparisons() {
+        // Maximal munch, and the case that needs saying: `<` and `<=` were
+        // already both there, so `<<` had to be checked before the bare one.
+        assert_eq!(
+            kinds("a << b >> c <= d"),
+            vec![
+                TokenKind::Ident("a".into()),
+                TokenKind::Shl,
+                TokenKind::Ident("b".into()),
+                TokenKind::Shr,
+                TokenKind::Ident("c".into()),
+                TokenKind::Le,
+                TokenKind::Ident("d".into()),
+            ]
+        );
     }
 
     #[test]

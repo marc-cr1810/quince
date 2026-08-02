@@ -640,6 +640,12 @@ impl Infer {
                     // `!x` asks for truthiness, and truthiness is a bool
                     // whatever the class of `x` had to say about it.
                     UnaryOp::Not => Type::class("bool"),
+                    // `~x` reaches `op bit_not`, which may answer with anything
+                    // — so only the int, where the language decides, is known.
+                    UnaryOp::BitNot => match rhs.class_name() {
+                        Some("int") => Type::class("int"),
+                        _ => Type::Unknown,
+                    },
                     // `-x` reaches `op neg` first, and whatever that answers is
                     // the answer — so only the numbers, where the language
                     // decides, are decidable here.
