@@ -679,3 +679,61 @@ fn a_mutation_of_a_typed_container_is_reported() {
         assert_eq!(warnings(src), Vec::<String>::new(), "for {src:?}");
     }
 }
+
+
+#[test]
+fn a_name_bound_once_is_reported_when_it_is_written_to() {
+    // The resolver refuses this for a local and cannot see a global — each REPL
+    // entry is its own compilation, so `final k = 1` and `k = 2` typed a line
+    // apart are two programs. Inside one file they are one, which is the case
+    // an editor has in hand.
+    assert_eq!(
+        warnings("final k = 1\nk = 2\n"),
+        vec!["cannot reassign `k`"]
+    );
+    assert_eq!(
+        warnings("const k = 1\nk = 2\n"),
+        vec!["cannot reassign `k`"]
+    );
+    // A parameter is a binding the caller fills in, and takes the same words.
+    assert_eq!(
+        warnings("fn f(const n) {\n    n = 2\n}\n"),
+        vec!["cannot reassign `n`"]
+    );
+    assert_eq!(
+        warnings("fn f(final n: int) {\n    n = 2\n}\n"),
+        vec!["cannot reassign `n`"]
+    );
+}
+
+#[test]
+fn mutating_what_const_froze_is_reported() {
+    assert_eq!(
+        warnings("const xs = [1]\nxs.push(2)\n"),
+        vec!["cannot modify `xs`"]
+    );
+    assert_eq!(
+        warnings("fn f(const xs: list[int]) {\n    xs.push(1)\n}\n"),
+        vec!["cannot modify `xs`"]
+    );
+    // `final` is the other axis: the name is fixed and the object is not, so a
+    // `final` list still grows.
+    assert_eq!(warnings("final xs = [1]\nxs.push(2)\n"), Vec::<String>::new());
+}
+
+#[test]
+fn shadowing_is_respected_by_the_binding_checks() {
+    // A `let` inside a block must not inherit the `final` outside it. One false
+    // squiggle costs more than ten missing ones, so this is the case that has
+    // to work before the checks above are worth having at all.
+    let quiet = [
+        "final k = 1\nfn f() {\n    let k = 2\n    k = 3\n}\n",
+        "fn f() {\n    let k = 1\n    k = 2\n}\nfinal k = 9\n",
+        "const xs = [1]\nfn f() {\n    let xs = [2]\n    xs.push(3)\n}\n",
+        // An unbound name says nothing — it is somebody else's mistake.
+        "fn f(n) {\n    n = 2\n}\n",
+    ];
+    for src in quiet {
+        assert_eq!(warnings(src), Vec::<String>::new(), "for {src:?}");
+    }
+}
