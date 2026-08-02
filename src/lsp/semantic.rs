@@ -169,7 +169,7 @@ pub(crate) fn collect_expr_semantic_tokens(
                 collect_expr_semantic_tokens(source, arg, raw_tokens);
             }
         }
-        ExprKind::Field { target, name } => {
+        ExprKind::Field { target, name, .. } => {
             collect_expr_semantic_tokens(source, target, raw_tokens);
             // Member property / method (5)
             push_raw_token(source, expr.span, name, 5, 0, raw_tokens);

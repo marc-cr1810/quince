@@ -15,10 +15,10 @@ use crate::builtins::stdlib;
 use crate::sema::infer::{Binding, ClassInfo, FILE, lookup, module_native};
 use crate::sema::symbols::{Kind, Symbol, described_by, module_symbols, symbol_for};
 use crate::sema::types::{
-    Type, binary, builtin_ancestor, builtin_constructor, module_member, returned_by, stated,
+    ClassType, Type, binary, builtin_ancestor, builtin_constructor, module_member, returned_by, stated,
 };
 use crate::syntax::ast::{
-    Block, Expr, ExprKind, FnDecl, ImportNames, SELF, Stmt, StmtKind, UnaryOp,
+    Block, Expr, ExprKind, FnDecl, ImportNames, LogicalOp, SELF, Stmt, StmtKind, UnaryOp,
 };
 use crate::syntax::token::Span;
 
@@ -234,7 +234,7 @@ impl Infer {
 
     fn assignments_in(&mut self, expr: &Expr, found: &mut HashMap<String, Type>) {
         if let ExprKind::Assign { target, value } = &expr.kind
-            && let ExprKind::Field { target: receiver, name } = &target.kind
+            && let ExprKind::Field { target: receiver, name, .. } = &target.kind
             && matches!(&receiver.kind, ExprKind::Var(var) if var.name == SELF)
         {
             let ty = self.expr(value);
@@ -329,7 +329,22 @@ impl Infer {
             }
             StmtKind::If { cond, then, otherwise } => {
                 self.expr(cond);
-                self.block(then);
+                // The smart cast. `if val is string { … }` re-binds `val` for
+                // the block, narrowed — and narrowing *is* a re-binding, because
+                // the lookup already prefers the innermost scope covering an
+                // offset. Nothing new had to be invented to scope it.
+                //
+                // Only the `then` branch. The `else` branch knows the test
+                // failed, which narrows nothing this pass can express: `not a
+                // string` is a type the language cannot write down.
+                self.scopes.push(then.span);
+                if let Some((name, ty)) = self.narrowed(cond) {
+                    let kind = lookup(&self.bindings, &name, then.span.start)
+                        .map_or(Kind::Variable, |index| self.bindings[index].symbol.kind);
+                    self.bind(&name, kind, ty, then.span.start);
+                }
+                self.stmts(&then.stmts);
+                self.scopes.pop();
                 if let Some(other) = otherwise {
                     self.stmt(other);
                 }
@@ -516,6 +531,30 @@ impl Infer {
     }
 
     /// Records `name` in the innermost scope, visible from `from` onward.
+    /// What a condition proves about a name, if it proves anything.
+    ///
+    /// `val is string` narrows `val`, and so does the left of an `&&` — `if x is
+    /// string && len(x) > 0` is the form that makes the guard worth writing, and
+    /// it would be a strange rule that narrowed the first and not the second.
+    ///
+    /// Only a bare name is narrowed. `user.name is string` proves something too,
+    /// but a field is not a binding this pass can shadow — and a narrowing that
+    /// survived an intervening assignment to `user` would be worse than none.
+    fn narrowed(&mut self, cond: &Expr) -> Option<(String, Type)> {
+        match &cond.kind {
+            ExprKind::Is { value, ty } => match &value.kind {
+                ExprKind::Var(var) => Some((var.name.clone(), stated(ty))),
+                _ => None,
+            },
+            ExprKind::Logical {
+                op: LogicalOp::And,
+                lhs,
+                ..
+            } => self.narrowed(lhs),
+            _ => None,
+        }
+    }
+
     fn bind(&mut self, name: &str, kind: Kind, ty: Type, from: u32) {
         self.bind_symbol(Symbol::new(name, kind, ty), from);
     }
@@ -552,6 +591,26 @@ impl Infer {
             ExprKind::Str(_) => Type::class("string"),
             ExprKind::Bool(_) => Type::class("bool"),
             ExprKind::Nil => Type::class("nil"),
+
+            // `is` answers a bool whatever it was asked about.
+            ExprKind::Is { .. } => Type::class("bool"),
+            // A chain containing a `?.` produces what it produces, or `nil` —
+            // so the honest answer is the chain's type made nullable.
+            ExprKind::Chain(inner) => self.expr(inner).nullable(),
+            // The left side without its `nil`, joined with the right. Both
+            // arms can be reached, so agreeing is what makes an answer.
+            ExprKind::Coalesce { lhs, rhs } => {
+                let fallback = self.expr(rhs);
+                match self.expr(lhs) {
+                    Type::Class(class) => Type::Class(ClassType {
+                        nullable: false,
+                        ..class
+                    })
+                    .join(fallback),
+                    // `Unknown` on the left says nothing about what survives it.
+                    _ => Type::Unknown,
+                }
+            }
 
             ExprKind::List(items) => {
                 for item in items {
@@ -636,7 +695,7 @@ impl Infer {
                 }
             }
 
-            ExprKind::Field { target, name } => {
+            ExprKind::Field { target, name, .. } => {
                 let target = self.expr(target);
                 self.read(&target, name)
             }
@@ -765,7 +824,7 @@ impl Infer {
                 }
             }
 
-            ExprKind::Field { target, name } => {
+            ExprKind::Field { target, name, .. } => {
                 let target = self.expr(target);
                 // The callee is the method itself, and the call is what it
                 // produces. Both get recorded, at their own spans.
@@ -817,6 +876,9 @@ fn children(expr: &Expr) -> Vec<&Expr> {
         | ExprKind::Nil
         | ExprKind::Var(_)
         | ExprKind::Super { .. } => Vec::new(),
+        ExprKind::Chain(inner) => vec![inner],
+        ExprKind::Is { value, .. } => vec![value],
+        ExprKind::Coalesce { lhs, rhs } => vec![lhs, rhs],
         ExprKind::List(items) => items.iter().collect(),
         ExprKind::Dict(pairs) => pairs.iter().flat_map(|(k, v)| [k, v]).collect(),
         ExprKind::Unary { rhs, .. } => vec![rhs],

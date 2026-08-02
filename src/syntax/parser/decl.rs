@@ -368,16 +368,17 @@ impl Parser {
             check_arguments(head, &args, start.to(self.peek().span))?;
         }
 
-        let nullable = self.eat(&TokenKind::Question);
-        // `int??` is not a second kind of absent. Refused here, where both `?`s
-        // are in hand, rather than left to mean the same as one.
-        if nullable && self.check(&TokenKind::Question) {
+        // `int??` is not a second kind of absent. It lexes as one `??`, so both
+        // characters are in hand before a `?` is even eaten — and a `??` in type
+        // position is otherwise the coalescing operator somewhere it cannot be.
+        if self.check(&TokenKind::QuestionQuestion) {
             return Err(declaration(
                 "a type is nullable or it is not — `??` says nothing `?` did not",
                 start.to(self.peek().span),
             )
             .with_help("write one `?`"));
         }
+        let nullable = self.eat(&TokenKind::Question);
 
         let end = self.tokens[self.pos.saturating_sub(1)].span;
         Ok(TypeExpr {

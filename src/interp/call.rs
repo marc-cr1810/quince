@@ -20,7 +20,7 @@ use crate::runtime::env::Env;
 use crate::runtime::heap::{ObjId, Object};
 use crate::runtime::value::Value;
 use crate::sema::types::holds;
-use crate::syntax::ast::{Expr, Op, TypeExpr, TypeName};
+use crate::syntax::ast::{Expr, ExprKind, Op, TypeExpr, TypeName};
 use crate::syntax::token::Span;
 
 impl Interp {
@@ -501,6 +501,70 @@ impl Interp {
         })
     }
 
+    /// Whether `value` has the type `ty`, as `is` asks it.
+    ///
+    /// Deliberately **not** [`holds`], and the difference is the point of §3.9:
+    ///
+    /// - **Exact, not variant.** `l is list[any?]` is `false` for a `list[int]`.
+    ///   A test meaning "some list" is spelled `l is list`, and containers match
+    ///   invariantly everywhere else in the milestone (§4.1) — a question that
+    ///   answered differently from an annotation would be two type systems.
+    /// - **Read off the descriptor, not the elements.** `l is list[string]`
+    ///   compares what the allocation was built to hold. It does not walk, which
+    ///   is what keeps the check O(1) in the size of the container — and it is
+    ///   why an undescribed list is not a `list[int]`: nothing ever said it was,
+    ///   and scanning to guess would be the O(N) this exists to avoid.
+    /// - **No widening.** `1 is float` is `false`. Widening is a conversion an
+    ///   annotation performs at a boundary; a question about a value in hand
+    ///   should answer about the value in hand.
+    ///
+    /// `nil` still needs a `?`, exactly as an annotation does — `nil is int` is
+    /// `false` and `nil is int?` is `true`.
+    pub(super) fn has_type(&mut self, ty: &TypeExpr, value: &Value) -> bool {
+        if matches!(value, Value::Nil) {
+            return ty.admits_nil();
+        }
+        let name = match &ty.name {
+            TypeName::Any => return true,
+            TypeName::Named(name) => name.as_str(),
+        };
+
+        let actual = value.type_name(&self.heap);
+        if actual != name && !self.descends_from_named(value, name) {
+            return false;
+        }
+        if ty.args.is_empty() {
+            return true;
+        }
+        // The reified header, compared as a type rather than as a value —
+        // `same_as` and not `==`, because the descriptor was written at the
+        // declaration and this question is asked somewhere else, so the two
+        // carry different spans while naming one type.
+        match value.base(&self.heap).handle() {
+            Some(id) => self.heap.descriptor(id).is_some_and(|held| {
+                held.args.len() == ty.args.len()
+                    && held
+                        .args
+                        .iter()
+                        .zip(&ty.args)
+                        .all(|(ours, theirs)| ours.same_as(theirs))
+            }),
+            None => false,
+        }
+    }
+
+    /// Whether `value`'s class is `name` or descends from it.
+    fn descends_from_named(&self, value: &Value, name: &str) -> bool {
+        let mut current = Some(value.class(&self.heap));
+        while let Some(id) = current {
+            if self.heap.class(id).name == name {
+                return true;
+            }
+            current = self.heap.class(id).parent;
+        }
+        false
+    }
+
     /// Whether `name` names a class that exists.
     ///
     /// The builtins, and whatever the program bound at the top level. A class
@@ -649,16 +713,33 @@ impl Interp {
     /// recurses once per node in the tree. Measured against this program's
     /// recursion limit it made no difference — debug frames are dominated by
     /// things other than one arm — but it keeps `eval` readable.
+    /// `x.m(…)`, fused rather than built as a bound method and then called.
+    ///
+    /// Takes the callee whole rather than its pieces: the receiver, the name,
+    /// and whether the dot was optional all come off the same node, and passing
+    /// them apart was five arguments describing one thing.
     pub(super) fn eval_method_call(
         &mut self,
-        target: &Expr,
-        name: &str,
+        callee: &Expr,
         args: &[Expr],
         env: ObjId,
-        callee_span: Span,
         span: Span,
     ) -> Result<Value> {
+        let ExprKind::Field {
+            target,
+            name,
+            optional,
+        } = &callee.kind
+        else {
+            unreachable!("only a field access is fused into a method call");
+        };
+        let callee_span = callee.span;
         let receiver = self.eval(target, env)?;
+        // Before the arguments, which is the point: `a?.b(expensive())` must not
+        // evaluate `expensive()` when `a` is `nil`.
+        if self.skips(*optional, &receiver) {
+            return Ok(Value::Nil);
+        }
         let name_span = Span::new(
             (target.span.end as usize + 1).min(callee_span.end as usize),
             callee_span.end as usize,

@@ -1,0 +1,71 @@
+# `??` answers the right side only when the left is `nil`, which is what makes
+# the nullable dict lookup ergonomic rather than hostile.
+let scores = {"alice": 95}
+print(scores["alice"] ?? 0)
+print(scores["bob"] ?? 0)
+
+# Right-associative, so a chain of fallbacks reads left to right and the first
+# one that answers wins.
+print(scores["x"] ?? scores["y"] ?? -1)
+
+# Tighter than a comparison and looser than arithmetic.
+print(scores["bob"] ?? 0 + 5)
+print((scores["bob"] ?? 0) == 0)
+
+# The right side is not evaluated when the left answered.
+fn boom(): int {
+    throw Error("this should not run")
+}
+print(scores["alice"] ?? boom())
+
+class Address {
+    let city: string = "Wellington"
+    op init() { }
+}
+class User {
+    let address: Address? = nil
+    op init(a) { self.address = a }
+}
+
+let known = User(Address())
+let anonymous = User(nil)
+print(known?.address?.city)
+print(anonymous?.address?.city)
+print(anonymous?.address?.city ?? "unknown")
+
+# A `nil` receiver skips the whole rest of the chain, not merely its own link:
+# the `.city` never runs, so it never raises on a `nil`.
+let missing: User? = nil
+print(missing?.address.city)
+print(missing?.address.city ?? "nobody")
+
+# `is` asks what a value is.
+print(1 is int)
+print("s" is string)
+print(nil is int)
+print(nil is int?)
+print(known is User)
+
+# Exact, not variant: a `list[int]` is a `list` and is not a `list[string]`.
+let ints: list[int] = [1, 2]
+print(ints is list)
+print(ints is list[int])
+print(ints is list[string])
+
+# No widening. An annotation converts at a boundary; a question about a value in
+# hand answers about the value in hand.
+print(1 is float)
+
+# Read off the reified header rather than by scanning, so a list nothing ever
+# declared an element type for is not a `list[int]`.
+print([1, 2] is list[int])
+
+# Narrowing, which the guard is for.
+fn describe(v: string?): string {
+    if v is string {
+        return "a string of " + string(len(v))
+    }
+    return "absent"
+}
+print(describe("hello"))
+print(describe(nil))

@@ -292,6 +292,16 @@ impl Resolver {
             | ExprKind::Bool(_)
             | ExprKind::Nil => Ok(()),
 
+            // A wrapper around a chain and a question about a type: both hold
+            // one expression and neither binds a name, so resolving is resolving
+            // what is inside them.
+            ExprKind::Chain(inner) => self.expr(inner),
+            ExprKind::Is { value, .. } => self.expr(value),
+            ExprKind::Coalesce { lhs, rhs } => {
+                self.expr(lhs)?;
+                self.expr(rhs)
+            }
+
             ExprKind::Var(var) => {
                 // `self` is a parameter of the enclosing method, so failing to
                 // find it locally means there is no enclosing method. Left to

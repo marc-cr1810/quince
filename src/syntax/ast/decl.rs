@@ -196,6 +196,28 @@ impl TypeExpr {
         self.nullable
     }
 
+    /// Whether this and `other` are the same type.
+    ///
+    /// Not `==`, which this deliberately does not use: [`TypeExpr`] carries a
+    /// [`Span`], so two identical annotations written in two places are unequal
+    /// as values while naming one type. Anything comparing *types* wants this —
+    /// `is` reading a reified descriptor most of all, since the descriptor was
+    /// written at the declaration and the question is asked somewhere else.
+    ///
+    /// `frozen` is not part of it. `const list[int]` and `list[int]` are one
+    /// type; `const` says what happens at a boundary the value crosses, not
+    /// what the value is.
+    pub fn same_as(&self, other: &TypeExpr) -> bool {
+        self.name == other.name
+            && self.nullable == other.nullable
+            && self.args.len() == other.args.len()
+            && self
+                .args
+                .iter()
+                .zip(&other.args)
+                .all(|(ours, theirs)| ours.same_as(theirs))
+    }
+
     /// How the annotation reads back, for a report that quotes it.
     ///
     /// Rebuilt from the parse rather than sliced out of the source, so a

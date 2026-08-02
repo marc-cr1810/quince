@@ -77,6 +77,12 @@ impl<'a> Lexer<'a> {
                 ',' => TokenKind::Comma,
                 '.' => TokenKind::Dot,
                 ':' => TokenKind::Colon,
+                // Maximal munch, and the order matters: `int??` has to lex as a
+                // type and a `??` rather than as two nullability marks, so the
+                // parser can refuse it as one mistake with both characters in
+                // hand.
+                '?' if self.eat('?') => TokenKind::QuestionQuestion,
+                '?' if self.eat('.') => TokenKind::QuestionDot,
                 '?' => TokenKind::Question,
                 ';' => TokenKind::Semi,
 

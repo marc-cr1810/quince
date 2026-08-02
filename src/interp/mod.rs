@@ -264,6 +264,19 @@ pub struct Interp {
     /// Pushed only for a [`Value::Function`] call. A native never reaches a
     /// member through the dot, so there is nothing for it to be inside of.
     reaching: Vec<Option<ObjId>>,
+    /// Whether an optional link in the postfix chain being evaluated found
+    /// `nil`, and so whether the rest of that chain is to be skipped.
+    ///
+    /// `a?.b.c` short-circuits as a whole rather than link by link, which is the
+    /// only reading under which it means what it looks like — the alternative
+    /// raises on reaching `.c` of a `nil`. Every postfix node checks this before
+    /// doing its own work, and `ExprKind::Chain` clears it, which is what bounds
+    /// "the rest of the chain" to the chain that contained the `?.`.
+    ///
+    /// A flag rather than a sentinel `Value`, because a sentinel would be a
+    /// variant every match in the evaluator has to answer for in order to
+    /// describe a state no program can observe.
+    short_circuit: bool,
     depth: usize,
     pub(crate) out: Box<dyn Write>,
     /// Where `io.line` reads from.
@@ -398,6 +411,7 @@ impl Interp {
             scopes: Vec::new(),
             temps: Vec::new(),
             reaching: Vec::new(),
+            short_circuit: false,
             depth: 0,
             out,
             input,

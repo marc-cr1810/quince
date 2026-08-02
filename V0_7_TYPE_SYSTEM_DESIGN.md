@@ -653,8 +653,39 @@ The breaking change cost exactly one corpus case, as expected. `err_dict_key` is
 missing key, `in` still distinguishing missing from present-holding-`nil`, and `remove`
 still raising — which is what keeps `KeyError` a live kind rather than a dead one.
 
-**Tranche 5 — null safety and `is`.** `?.`, `??`, the `is` operator, and block-scoped smart
-casts. Cheap once tranche 3 has landed, and made unavoidable by tranche 4.
+**Tranche 5 — null safety and `is`.** ✅ **Landed.** `?.`, `??`, the `is` operator, and
+block-scoped smart casts — made unavoidable by tranche 4, which shipped `d[key] -> V?` with
+no way out of it.
+
+- **`??` binds at 8**: tighter than a comparison, looser than arithmetic. That pair makes
+  both ordinary readings come out right — `d[k] ?? 0 == 5` is `(d[k] ?? 0) == 5` because
+  the coalesce produces the value being compared, and `d[k] ?? 0 + 1` is `d[k] ?? (0 + 1)`
+  because the right side is a default *value*. Right-associative, so a chain of fallbacks
+  reads left to right. It is its own node rather than a `BinaryOp` because it
+  short-circuits: `d[k] ?? expensive()` must not run `expensive()` when the key was there.
+- **`?.` short-circuits the whole chain**, not its own link. `a?.b.c` answers `nil` when
+  `a` is `nil` without ever reaching `.c` — the only reading under which it means what it
+  looks like. A `Chain` node the parser adds around any postfix chain containing a `?.` is
+  what bounds "the rest of the chain"; without it there is no node that knows `a?.b.c` is
+  one expression. `?.` still guards only its own receiver, so `u?.addr.city` fails when
+  `addr` is `nil`, as it should.
+- **`is` is not the annotation check.** It is exact rather than variant (§3.9), reads the
+  reified header rather than scanning, and does not widen — `1 is float` is `false`, where
+  `let x: float = 1` succeeds, because widening is a conversion a boundary performs and a
+  question about a value in hand should answer about the value in hand. An undescribed
+  list is not a `list[int]`: nothing ever said it was, and scanning to guess is the O(N)
+  the reified header exists to avoid.
+- **Smart casting is a re-binding.** `if v is string { … }` binds `v` again, narrowed,
+  scoped to the block — the inference pass's lookup already prefers the innermost scope
+  covering an offset, so nothing had to be invented to scope it. The left of an `&&`
+  narrows too, since `if x is string && len(x) > 0` is the form that makes a guard worth
+  writing. Only the `then` branch: the `else` knows the test failed, which narrows to "not
+  a string", and that is not a type the language can write down.
+
+One thing this found: [`TypeExpr`] carries a `Span`, so `==` on two identical annotations
+written in two places is `false`. `is` compares a descriptor written at the declaration
+against a type written elsewhere, so it needs `same_as` — structural, and ignoring `frozen`,
+because `const list[int]` and `list[int]` are one type and `const` is about a boundary.
 
 **Tranche 6 — aliases, bitwise slots, and `op` return checking.** The three small ones,
 batched because each is a day and none blocks anything.

@@ -13,6 +13,18 @@ use crate::syntax::token::TokenKind;
 /// groups as `(-a) * b`.
 const UNARY_BP: u8 = 13;
 
+/// Binding power of `??`.
+///
+/// Tighter than a comparison and looser than arithmetic, which is the pair of
+/// choices that makes both ordinary readings come out right: `d[k] ?? 0 == 5` is
+/// `(d[k] ?? 0) == 5`, because the coalesce produces the value being compared;
+/// and `d[k] ?? 0 + 1` is `d[k] ?? (0 + 1)`, because the right side is a default
+/// *value* rather than an operand of the `+`.
+const COALESCE_BP: u8 = 8;
+
+/// Binding power of `is`, which is a comparison and sits with the others.
+const IS_BP: u8 = 7;
+
 enum InfixOp {
     Binary(BinaryOp),
     Logical(LogicalOp),
@@ -76,7 +88,50 @@ impl Parser {
     pub(super) fn binary(&mut self, min_bp: u8) -> Result<Expr> {
         let mut lhs = self.unary()?;
 
-        while let Some((op, lbp, rbp)) = infix_op(&self.peek().kind) {
+        loop {
+            // The two that do not fit [`infix_op`]: `??` short-circuits, so it
+            // builds its own node rather than a `Binary`, and `is` takes a type
+            // on the right rather than an expression.
+            if self.check(&TokenKind::QuestionQuestion) {
+                if COALESCE_BP < min_bp {
+                    break;
+                }
+                self.advance();
+                // Right-associative — recursing at its own power rather than one
+                // above it — so `a ?? b ?? c` is `a ?? (b ?? c)`. A chain of
+                // fallbacks is read left to right and the first one that answers
+                // wins, which is what that grouping gives.
+                let rhs = self.binary(COALESCE_BP)?;
+                let span = lhs.span.to(rhs.span);
+                lhs = Expr {
+                    kind: ExprKind::Coalesce {
+                        lhs: Box::new(lhs),
+                        rhs: Box::new(rhs),
+                    },
+                    span,
+                };
+                continue;
+            }
+            if self.check(&TokenKind::Is) {
+                if IS_BP < min_bp {
+                    break;
+                }
+                self.advance();
+                let ty = self.type_expr()?;
+                let span = lhs.span.to(ty.span);
+                lhs = Expr {
+                    kind: ExprKind::Is {
+                        value: Box::new(lhs),
+                        ty,
+                    },
+                    span,
+                };
+                continue;
+            }
+
+            let Some((op, lbp, rbp)) = infix_op(&self.peek().kind) else {
+                break;
+            };
             if lbp < min_bp {
                 break;
             }
@@ -121,6 +176,9 @@ impl Parser {
 
     pub(super) fn postfix(&mut self) -> Result<Expr> {
         let mut expr = self.primary()?;
+        // Whether this chain contains a `?.`, and so whether it needs the
+        // wrapper that bounds where short-circuiting stops.
+        let mut optional_seen = false;
 
         loop {
             // A `(` or `[` on a fresh line starts a new statement rather than
@@ -128,14 +186,18 @@ impl Parser {
             // broken across lines.
             let newline = self.peek().newline_before;
             expr = match self.peek().kind {
-                TokenKind::Dot => {
+                TokenKind::Dot | TokenKind::QuestionDot => {
+                    let optional = self.check(&TokenKind::QuestionDot);
+                    optional_seen |= optional;
+                    let after = if optional { "after `?.`" } else { "after `.`" };
                     self.advance();
-                    let (name, name_span) = self.expect_ident("after `.`")?;
+                    let (name, name_span) = self.expect_ident(after)?;
                     Expr {
                         span: expr.span.to(name_span),
                         kind: ExprKind::Field {
                             target: Box::new(expr),
                             name,
+                            optional,
                         },
                     }
                 }
@@ -192,7 +254,18 @@ impl Parser {
                         }
                     }
                 }
-                _ => return Ok(expr),
+                // The chain is over. A `?.` anywhere in it means the whole
+                // thing short-circuits together, and this is the node that says
+                // where "the whole thing" ends.
+                _ => {
+                    return Ok(match optional_seen {
+                        true => Expr {
+                            span: expr.span,
+                            kind: ExprKind::Chain(Box::new(expr)),
+                        },
+                        false => expr,
+                    });
+                }
             };
         }
     }

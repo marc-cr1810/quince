@@ -107,6 +107,39 @@ pub enum ExprKind {
     Field {
         target: Box<Expr>,
         name: String,
+        /// Written `?.` rather than `.`, which answers `nil` for the whole
+        /// remaining chain when the receiver is `nil`.
+        ///
+        /// The *whole* chain and not this link alone, which is the only reading
+        /// that makes `a?.b.c` mean what it looks like — `a` being `nil` should
+        /// not then raise on reaching `.c` of a `nil`. [`ExprKind::Chain`] is
+        /// what bounds "the rest".
+        optional: bool,
+    },
+    /// A postfix chain containing at least one `?.`.
+    ///
+    /// A wrapper the parser adds around the completed chain, and the thing that
+    /// says where short-circuiting stops. Without it there is no node that knows
+    /// `a?.b.c` is one expression rather than a `.c` applied to whatever
+    /// `a?.b` produced — and the difference is exactly whether the `.c` runs.
+    ///
+    /// Absent from every chain that has no `?.` in it, so nothing a program
+    /// wrote before v0.7 gains a node.
+    Chain(Box<Expr>),
+    /// `lhs ?? rhs` — the right side, but only when the left is `nil`.
+    ///
+    /// Not a [`BinaryOp`], because it short-circuits: the right side is an
+    /// alternative rather than an operand, and evaluating it when the left
+    /// answered would run whatever the program wrote there. The same reason
+    /// [`ExprKind::Logical`] is separate from [`ExprKind::Binary`].
+    Coalesce {
+        lhs: Box<Expr>,
+        rhs: Box<Expr>,
+    },
+    /// `value is T` — whether `value` has that type, as a bool.
+    Is {
+        value: Box<Expr>,
+        ty: TypeExpr,
     },
     /// `super.name`, which is a lookup that starts at the parent class but
     /// binds to the current receiver.

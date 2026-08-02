@@ -474,3 +474,48 @@ fn a_declared_field_is_a_member_carrying_the_word_it_was_written_with() {
     // carries no word — and the default is the one that refuses nobody.
     assert_eq!(reach("invented"), Visibility::Public);
 }
+
+#[test]
+fn an_is_guard_narrows_the_name_for_its_block() {
+    let src = "fn probe(v: string?) {\n\
+                   if v is string {\n\
+                       let inside = v\n\
+                   }\n\
+                   let outside = v\n\
+               }\n";
+    let types = types(src);
+    let at = |needle: &str| src.find(needle).expect("the marker is in the source") as u32;
+
+    // Inside the guard `v` is a `string`; outside it is still `string?`, which
+    // is what makes the narrowing worth having rather than a global claim.
+    assert_eq!(types.of_name("v", at("let inside")), Type::class("string"));
+    assert_eq!(
+        types.of_name("v", at("let outside")),
+        Type::class("string").nullable()
+    );
+}
+
+#[test]
+fn a_guard_narrows_through_the_left_of_an_and() {
+    // `if x is string && len(x) > 0` is the form that makes a guard worth
+    // writing, so narrowing that and not a bare `is` would be a strange rule.
+    let src = "fn probe(v: string?) {\n\
+                   if v is string && len(v) > 0 {\n\
+                       let inside = v\n\
+                   }\n\
+               }\n";
+    let at = src.find("let inside").expect("the marker is there") as u32;
+    assert_eq!(types(src).of_name("v", at), Type::class("string"));
+}
+
+#[test]
+fn a_coalesce_answers_the_type_that_survives_it() {
+    // The left without its `nil`, joined with the right — so the whole
+    // expression is the non-nullable type when both sides agree.
+    let src = "fn probe(v: string?) {\n\
+                   let name = v ?? \"anon\"\n\
+                   let after = 1\n\
+               }\n";
+    let at = src.find("let after").expect("the marker is there") as u32;
+    assert_eq!(types(src).of_name("name", at), Type::class("string"));
+}

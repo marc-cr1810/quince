@@ -59,6 +59,9 @@ pub enum TokenKind {
     /// it lexes as an identifier and is recognised only in type position, so a
     /// program may still call a variable `_`.
     Any,
+    /// Asks what a value's type is, and narrows the name for the block when the
+    /// answer is yes. See [`crate::syntax::ast::ExprKind::Is`].
+    Is,
     /// Keywords rather than identifiers so that using one where it has no
     /// meaning is caught by the resolver, with a message that says why.
     SelfKw,
@@ -116,6 +119,11 @@ pub enum TokenKind {
     /// separate tokens and want maximal munch here before either can mean
     /// anything.
     Question,
+    /// `??`, which answers its right side when its left is `nil`.
+    QuestionQuestion,
+    /// `?.`, which answers `nil` for the rest of the chain rather than reaching
+    /// a member of one.
+    QuestionDot,
     Semi,
 
     Eof,
@@ -135,8 +143,8 @@ pub enum TokenKind {
 /// `import` two tokens later — and is an ordinary identifier everywhere else.
 pub const KEYWORDS: &[&str] = &[
     "fn", "op", "class", "extends", "extend", "self", "super", "let", "final", "complete",
-    "sealed", "const", "public", "private", "protected", "any", "import", "if", "else", "while",
-    "for", "in", "return", "try", "catch", "throw", "true", "false", "nil",
+    "sealed", "const", "public", "private", "protected", "any", "is", "import", "if", "else",
+    "while", "for", "in", "return", "try", "catch", "throw", "true", "false", "nil",
 ];
 
 impl TokenKind {
@@ -159,6 +167,7 @@ impl TokenKind {
             "private" => TokenKind::Private,
             "protected" => TokenKind::Protected,
             "any" => TokenKind::Any,
+            "is" => TokenKind::Is,
             "import" => TokenKind::Import,
             "if" => TokenKind::If,
             "else" => TokenKind::Else,
@@ -206,6 +215,7 @@ impl TokenKind {
             TokenKind::Private => "Reachable only from inside methods of the class that declared it. On a top-level declaration, it is not exported to an importing module.",
             TokenKind::Protected => "Reachable from inside methods of the declaring class and of the classes that extend it, and nowhere else.",
             TokenKind::Any => "Any value at all except `nil`, as a type annotation. `any?` admits `nil` too, and `_` is the same type spelled for a type-argument position.",
+            TokenKind::Is => "Asks whether a value has a type — `x is string`. Inside the block it guards, the name is narrowed to that type.",
             TokenKind::Import => "Loads a module — one the language ships, or a file beside this one. `import math` binds the module; `from math import floor` binds the names.",
             TokenKind::If => "Runs a block when a condition is truthy. A class decides its own truthiness with `op bool`.",
             TokenKind::Else => "The block to run when the `if` before it did not.",
@@ -248,6 +258,8 @@ impl TokenKind {
             | TokenKind::RBracket
             | TokenKind::Comma
             | TokenKind::Question
+            | TokenKind::QuestionQuestion
+            | TokenKind::QuestionDot
             | TokenKind::Dot
             | TokenKind::Colon
             | TokenKind::Semi
@@ -281,6 +293,7 @@ impl fmt::Display for TokenKind {
             TokenKind::Private => write!(f, "private"),
             TokenKind::Protected => write!(f, "protected"),
             TokenKind::Any => write!(f, "any"),
+            TokenKind::Is => write!(f, "is"),
             TokenKind::Import => write!(f, "import"),
             TokenKind::If => write!(f, "if"),
             TokenKind::Else => write!(f, "else"),
@@ -324,6 +337,8 @@ impl fmt::Display for TokenKind {
             TokenKind::Dot => write!(f, "."),
             TokenKind::Colon => write!(f, ":"),
             TokenKind::Question => write!(f, "?"),
+            TokenKind::QuestionQuestion => write!(f, "??"),
+            TokenKind::QuestionDot => write!(f, "?."),
             TokenKind::Semi => write!(f, ";"),
 
             TokenKind::Eof => write!(f, "end of input"),

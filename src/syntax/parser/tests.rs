@@ -77,7 +77,17 @@ use crate::syntax::lexer::Lexer;
                 let bound = |b: &Option<Box<Expr>>| b.as_deref().map_or(String::new(), sexpr);
                 format!("(slice {} {} {})", sexpr(target), bound(start), bound(end))
             }
-            ExprKind::Field { target, name } => format!("(. {} {name})", sexpr(target)),
+            ExprKind::Field {
+                target,
+                name,
+                optional,
+            } => {
+                let dot = if *optional { "?." } else { "." };
+                format!("({dot} {} {name})", sexpr(target))
+            }
+            ExprKind::Chain(inner) => format!("(chain {})", sexpr(inner)),
+            ExprKind::Coalesce { lhs, rhs } => format!("(?? {} {})", sexpr(lhs), sexpr(rhs)),
+            ExprKind::Is { value, ty } => format!("(is {} {})", sexpr(value), ty.written()),
             ExprKind::Assign { target, value } => {
                 format!("(= {} {})", sexpr(target), sexpr(value))
             }

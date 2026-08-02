@@ -88,8 +88,47 @@ impl Interp {
         Ok((first, second?))
     }
 
+    /// Whether the rest of this postfix chain is to be skipped.
+    ///
+    /// True when a link before this one short-circuited, and true when this link
+    /// is the `?.` that finds `nil` — in which case it also records that, so
+    /// every node after it skips too. Reading and setting in one place is what
+    /// keeps the two halves of the rule from drifting.
+    pub(super) fn skips(&mut self, optional: bool, receiver: &Value) -> bool {
+        if self.short_circuit {
+            return true;
+        }
+        if optional && matches!(receiver, Value::Nil) {
+            self.short_circuit = true;
+            return true;
+        }
+        false
+    }
+
     pub(super) fn eval(&mut self, expr: &Expr, env: ObjId) -> Result<Value> {
         match &expr.kind {
+            // The end of a chain containing a `?.`. Whatever it produced is the
+            // answer, and the flag stops here — an outer chain is a separate
+            // expression and short-circuits on its own account.
+            ExprKind::Chain(inner) => {
+                let value = self.eval(inner, env);
+                self.short_circuit = false;
+                value
+            }
+
+            // The right side is evaluated only when the left is `nil`, which is
+            // why this is not a `BinaryOp`: `d[k] ?? expensive()` must not run
+            // `expensive()` when the key was there.
+            ExprKind::Coalesce { lhs, rhs } => match self.eval(lhs, env)? {
+                Value::Nil => self.eval(rhs, env),
+                answered => Ok(answered),
+            },
+
+            ExprKind::Is { value, ty } => {
+                let value = self.eval(value, env)?;
+                Ok(Value::Bool(self.has_type(ty, &value)))
+            }
+
             ExprKind::Int(n) => Ok(Value::Int(*n)),
             ExprKind::Float(n) => Ok(Value::Float(*n)),
             ExprKind::Str(s) => Ok(Value::Str(Rc::from(s.as_str()))),
@@ -145,8 +184,8 @@ impl Interp {
                 // bound method and then calling it. `xs.push(1)` is by far the
                 // common form, and going through `ExprKind::Field` would
                 // allocate an object per call only to drop it immediately.
-                if let ExprKind::Field { target, name } = &callee.kind {
-                    return self.eval_method_call(target, name, args, env, callee.span, expr.span);
+                if matches!(&callee.kind, ExprKind::Field { .. }) {
+                    return self.eval_method_call(callee, args, env, expr.span);
                 }
                 // `super.init(name)` is the overwhelmingly common form, and it
                 // is fused for the same reason: no bound method to allocate.
@@ -223,8 +262,17 @@ impl Interp {
             // Only reached when a method is not being called immediately — the
             // fused path above handles `x.m(…)`. Binding it makes a method an
             // ordinary value rather than syntax that works in one position.
-            ExprKind::Field { target, name } => {
+            ExprKind::Field {
+                target,
+                name,
+                optional,
+            } => {
                 let receiver = self.eval(target, env)?;
+                // Either this link found `nil` behind a `?.`, or a link before
+                // it did. Both answer `nil` and neither reaches the member.
+                if self.skips(*optional, &receiver) {
+                    return Ok(Value::Nil);
+                }
                 let name_span = Span::new(
                     (target.span.end as usize + 1).min(expr.span.end as usize),
                     expr.span.end as usize,
@@ -477,6 +525,7 @@ impl Interp {
             // only way an instance ever gets one — there is no declaration
             // form, so `init` assigning to `self.x` is what defines `x`.
             ExprKind::Field {
+                optional: _,
                 target: object,
                 name,
             } => {
