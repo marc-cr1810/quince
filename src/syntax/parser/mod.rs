@@ -116,6 +116,7 @@ impl Parser {
                 self.peek().span,
             )
             .with_help("use `fn` for a function that is called by name")),
+            TokenKind::Alias => self.alias_stmt(),
             TokenKind::Class => self.class_stmt(),
             TokenKind::Extend => self.extend_stmt(),
             TokenKind::Import => self.import_stmt(),
@@ -168,6 +169,7 @@ impl Parser {
         );
         match after {
             TokenKind::Fn => self.fn_stmt(),
+            TokenKind::Alias => self.alias_stmt(),
             TokenKind::Class | TokenKind::Complete | TokenKind::Sealed => self.class_stmt(),
             TokenKind::Final if then_class => self.class_stmt(),
             TokenKind::Let | TokenKind::Final | TokenKind::Const => self.let_stmt(),

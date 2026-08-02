@@ -1,0 +1,4 @@
+alias A = B
+alias B = A
+
+let x: A = 1

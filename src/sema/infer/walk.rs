@@ -294,6 +294,10 @@ impl Infer {
                 self.methods(name, methods);
             }
             StmtKind::Extend { target, methods, .. } => self.methods(&target.name, methods),
+            // Substituted away before this pass runs, so there is no name here
+            // to record and nothing that could still refer to one.
+            StmtKind::Alias { .. } => {}
+
             StmtKind::Import { module, names, .. } => {
                 let known = stdlib::module_named(module).is_some();
                 match names {

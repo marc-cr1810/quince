@@ -1,0 +1,8 @@
+Error: quince::DeclarationError
+
+ × `op string` answers with `string`, but this declares `int`
+  ╭─[err_op_return_type.qn:2:18]
+2 │     op string(): int {
+  ·                  ───
+  ╰────
+  help: the language calls `op string` itself and requires `string` back — write `string`, or write no return type at all

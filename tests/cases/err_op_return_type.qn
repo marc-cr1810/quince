@@ -1,0 +1,5 @@
+class C {
+    op string(): int {
+        return 1
+    }
+}

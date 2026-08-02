@@ -272,6 +272,43 @@ impl Op {
     /// `init` is the one exception, and has to be: a constructor's parameters are
     /// the class's own business, and `Point(1, 2)` already reports a mismatch
     /// against the source that spelled the call.
+    /// The type this op must answer with, if the language fixes one.
+    ///
+    /// The contract v0.7 §3.7 tabulates, in one place so that the declaration
+    /// check and the run-time check cannot disagree. `None` is a real answer and
+    /// most of the arithmetic: a class may mean whatever it likes by `+`, which
+    /// is exactly why the inference pass calls `m + m` on a class `Unknown`
+    /// rather than assuming a type. An annotation on one of those is checked
+    /// against what the body returns and against nothing else.
+    ///
+    /// Exhaustive, so an op cannot be added without answering whether it has a
+    /// contract — which is the question that would otherwise be forgotten until
+    /// something returned the wrong thing at run time.
+    pub fn answers(self) -> Option<&'static str> {
+        match self {
+            Op::Str => Some("string"),
+            Op::Bool | Op::Eq | Op::Lt | Op::Gt | Op::Contains => Some("bool"),
+            Op::Int | Op::Len | Op::Cmp => Some("int"),
+            Op::Float => Some("float"),
+            Op::List | Op::Iter => Some("list"),
+            Op::Dict => Some("dict"),
+
+            // Whatever the class means by that operation. A set answering a set
+            // from `|`, a matrix answering a matrix from `*`, and a constructor
+            // answering nothing at all.
+            Op::Init
+            | Op::Add
+            | Op::Sub
+            | Op::Mul
+            | Op::Div
+            | Op::FloorDiv
+            | Op::Rem
+            | Op::Neg
+            | Op::Get
+            | Op::Set => None,
+        }
+    }
+
     pub fn arity(self) -> Option<usize> {
         match self {
             Op::Init => None,

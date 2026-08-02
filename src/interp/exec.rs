@@ -243,6 +243,10 @@ impl Interp {
                 Ok(Flow::Normal)
             }
 
+            // An alias names a type and holds no value, so there is nothing here
+            // to run. The resolver has already substituted every use of it.
+            StmtKind::Alias { .. } => Ok(Flow::Normal),
+
             StmtKind::Extend {
                 target,
                 target_span,

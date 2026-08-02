@@ -243,6 +243,21 @@ pub enum StmtKind {
         /// a class takes no arguments; its `op init` does, and documents them.
         doc: Option<Doc>,
     },
+    /// `alias ScoreTable = dict[string, int]`.
+    ///
+    /// A resolution-time substitution that introduces no type: the alias and
+    /// what it abbreviates are one type, `is` cannot tell them apart, and a
+    /// report prints whichever the program wrote. It has no run-time existence
+    /// at all, which is why the evaluator does nothing with it.
+    Alias {
+        name: String,
+        /// Where the name was written, for a report about the declaration.
+        name_span: Span,
+        ty: TypeExpr,
+        /// Whether an importing module sees it.
+        visibility: Visibility,
+        doc: Option<Doc>,
+    },
     /// Methods added to a type that already exists.
     ///
     /// The type is named by an ordinary [`Var`], not a static label, so

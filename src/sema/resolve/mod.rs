@@ -37,7 +37,11 @@ pub(super) fn declaration(message: impl Into<String>, span: Span) -> Raised {
 }
 
 /// Resolves a whole program in place.
+mod alias;
+
 pub fn resolve(program: &mut [Stmt]) -> Result<()> {
+    // Before anything reads a type, so no later pass ever sees an alias.
+    alias::expand(program)?;
     let mut resolver = Resolver::default();
     // The top level has no scope, so `scoped` never runs over it — which is why
     // nothing used to register the classes declared there or look at the names

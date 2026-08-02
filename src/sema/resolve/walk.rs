@@ -43,6 +43,11 @@ impl Resolver {
             // it, so an import inside a function or a loop would be a load whose
             // effect depends on whether the code ran. Refused here, where the
             // scope stack knows the answer.
+            // An alias declares a name for a type and binds no value, so there
+            // is no slot and nothing to resolve. `alias::expand` has already
+            // removed every use of it by the time this runs.
+            StmtKind::Alias { .. } => Ok(()),
+
             StmtKind::Import { module, .. } => {
                 if !self.scopes.is_empty() {
                     return Err(declaration(

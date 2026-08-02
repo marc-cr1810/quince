@@ -1,0 +1,29 @@
+alias UserID = string
+alias ScoreTable = dict[UserID, int]
+alias Maybe = int?
+
+let scores: ScoreTable = {"USR1": 100, "USR2": 85}
+print(scores)
+
+fn lookup(id: UserID, table: ScoreTable): int {
+    return table[id] ?? 0
+}
+print(lookup("USR1", scores))
+print(lookup("nope", scores))
+
+# An alias introduces no type: it and what it abbreviates are one thing, so
+# `is` cannot tell them apart.
+let id: UserID = "abc"
+print(id is string)
+print(id is UserID)
+print(scores is dict[string, int])
+
+# An alias may name another declared below it, as a function may call one.
+alias Pair = list[Point]
+alias Point = int
+let pair: Pair = [1, 2]
+print(pair)
+
+# Nullability composes rather than being replaced.
+let m: Maybe = nil
+print(m)

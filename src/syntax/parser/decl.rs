@@ -10,70 +10,9 @@ use crate::syntax::ast::{
     self, BindKind, FieldDecl, FnDecl, ImportName, ImportNames, Op, Openness, Param, Stmt, StmtKind,
     TypeExpr, TypeName, Var,
 };
-use crate::runtime::dict::KEY_TYPES;
 use crate::syntax::doc::Doc;
 use crate::syntax::parser::{Modifiers, Parser, declaration, syntax};
-use crate::syntax::token::{Span, Token, TokenKind};
-
-/// Refuses a container type whose arguments do not fit it.
-///
-/// Two rules, both decidable from the annotation alone. The arity — `list` takes
-/// one argument, `dict` one or two — and §4.2's key constraint, which is
-/// [`KEY_TYPES`] written as a check.
-///
-/// Only the two containers the language has. A class the program declared takes
-/// no arguments until v0.9 gives it some, and saying so here would be a rule
-/// that has to be removed rather than extended, so an unknown head is left
-/// alone: the name is checked when the annotation is applied.
-fn check_arguments(head: &str, args: &[TypeExpr], span: Span) -> Result<()> {
-    let arity = match head {
-        "list" => 1..=1,
-        "dict" => 1..=2,
-        // Not a container, so it takes no arguments — and a program that wrote
-        // some has said something the language cannot read.
-        _ if !args.is_empty() => {
-            return Err(declaration(
-                format!("`{head}` takes no type arguments"),
-                span,
-            )
-            .with_help("only `list` and `dict` are parameterised in this version"));
-        }
-        _ => return Ok(()),
-    };
-
-    if !args.is_empty() && !arity.contains(&args.len()) {
-        let written = if *arity.start() == *arity.end() {
-            format!("{} argument", arity.start())
-        } else {
-            format!("{} or {} arguments", arity.start(), arity.end())
-        };
-        let were = if args.len() == 1 { "was" } else { "were" };
-        return Err(declaration(
-            format!("`{head}` takes {written}, but {} {were} written", args.len()),
-            span,
-        ));
-    }
-
-    // The key is the first argument, for both `dict[K, V]` and the `dict[K]`
-    // shorthand. `any` is admitted: it says the keys are heterogeneous, which
-    // every one of the hashable types already is against the others.
-    if head == "dict"
-        && let Some(key) = args.first()
-        && let TypeName::Named(name) = &key.name
-        && !KEY_TYPES.contains(&name.as_str())
-    {
-        return Err(declaration(
-            format!("`{name}` cannot be a dict key"),
-            key.span,
-        )
-        .with_help(format!(
-            "a dict is keyed by one of {} — a class is not a key, and one declaring `op eq` \
-             gives up being one",
-            KEY_TYPES.join(", ")
-        )));
-    }
-    Ok(())
-}
+use crate::syntax::token::{Token, TokenKind};
 
 impl Parser {
     pub(super) fn fn_stmt(&mut self) -> Result<Stmt> {
@@ -228,6 +167,40 @@ impl Parser {
 
         let returns = self.annotation()?;
 
+        // An `op` with a fixed contract may not declare a return that disagrees
+        // with it. This is a check on the *annotation*, not new enforcement:
+        // the language already refuses a wrong value at run time, at nine sites
+        // reading the same table this does. What it buys is catching the
+        // declaration before the op is ever called.
+        if let Some(op) = op
+            && let Some(contract) = op.answers()
+            && let Some(declared) = &returns
+        {
+            let disagrees = match &declared.name {
+                // `any` is wider than the contract, so it is a claim that the op
+                // may answer with something it may not.
+                TypeName::Any => true,
+                TypeName::Named(name) => name != contract,
+            };
+            // `op string(): string?` is refused too: the contract is a string,
+            // and a `nil` is not one.
+            if disagrees || declared.nullable {
+                return Err(declaration(
+                    format!(
+                        "`op {}` answers with `{contract}`, but this declares `{}`",
+                        op.name(),
+                        declared.written()
+                    ),
+                    declared.span,
+                )
+                .with_help(format!(
+                    "the language calls `op {}` itself and requires `{contract}` back — write \
+                     `{contract}`, or write no return type at all",
+                    op.name()
+                )));
+            }
+        }
+
         let body = self.block()?;
         Ok(FnDecl {
             name,
@@ -360,14 +333,6 @@ impl Parser {
             self.expect(TokenKind::RBracket, "after the type arguments")?;
         }
 
-        // The arity and the key constraint, both decidable from the words
-        // alone. §4.2's set is closed, so `dict[Point, int]` is refused at the
-        // declaration with the reason named rather than accepted and failing on
-        // whatever the first insertion happens to be.
-        if let TypeName::Named(head) = &name {
-            check_arguments(head, &args, start.to(self.peek().span))?;
-        }
-
         // `int??` is not a second kind of absent. It lexes as one `??`, so both
         // characters are in hand before a `?` is even eaten — and a `??` in type
         // position is otherwise the coalescing operator somewhere it cannot be.
@@ -438,6 +403,33 @@ impl Parser {
             "the second would replace the first without a word — rename it, or delete the \
              one you meant to be rid of",
         ))
+    }
+
+    /// `alias ScoreTable = dict[string, int]`.
+    ///
+    /// Parsed like a binding and resolved like nothing: an alias declares a
+    /// *name for a type*, so there is no value, no slot, and nothing for the
+    /// evaluator to run. The resolver substitutes it and the statement is gone.
+    pub(super) fn alias_stmt(&mut self) -> Result<Stmt> {
+        let start = self.peek().span;
+        let modifiers = self.modifiers("an alias")?;
+        self.advance();
+        let (name, name_span) = self.expect_ident("after `alias`")?;
+        self.expect(TokenKind::Assign, "in an alias")?;
+        let ty = self.type_expr()?;
+        let span = start.to(ty.span);
+        self.end_of_statement()?;
+
+        Ok(Stmt {
+            kind: StmtKind::Alias {
+                name,
+                name_span,
+                ty,
+                visibility: modifiers.visibility,
+                doc: modifiers.doc,
+            },
+            span,
+        })
     }
 
     /// `class Point { … }`, with an optional modifier in front of it.
