@@ -16,7 +16,7 @@ use crate::runtime::dict::{Dict, Key};
 use crate::runtime::env::{self, AssignError};
 use crate::runtime::heap::{ObjId, Object};
 use crate::runtime::value::{BoundMethod, Value};
-use crate::syntax::ast::{Expr, ExprKind, LogicalOp, Op, Slot, Var};
+use crate::syntax::ast::{BindKind, Expr, ExprKind, LogicalOp, Op, Slot, TypeExpr, Var};
 use crate::syntax::token::Span;
 
 impl Interp {
@@ -307,19 +307,71 @@ impl Interp {
         }
     }
 
+    /// The value a name may be rebound to, given what it was declared to hold.
+    ///
+    /// An annotation constrains the *name*, not the one value bound to it first
+    /// — so every write after the declaration is checked against the same
+    /// annotation the declaration was, by the same function, and widens the same
+    /// way. `let x: float = 0` followed by `x = 5` stores `5.0`, and a container
+    /// rebound to a new one is rewalked and re-described.
+    ///
+    /// A name bound `final` or `const` refuses outright, whatever it was
+    /// annotated as. Those two words are about the binding and the annotation is
+    /// about the value, so they are asked in that order — a `final xs:
+    /// list[int]` is a name that cannot be rebound *and* a list that must hold
+    /// ints, and neither claim stands in for the other.
+    fn rebound(
+        &mut self,
+        ty: Option<&TypeExpr>,
+        bind: BindKind,
+        value: Value,
+        name: &str,
+        span: Span,
+    ) -> Result<Value> {
+        if !bind.mutable() {
+            return Err(QuinceError::new(format!("cannot reassign `{name}`"), span)
+                .with_kind(ErrorKind::Frozen)
+                .with_help(match bind.freezes() {
+                    true => format!("`{name}` is `const`, so the name is bound once and what it holds is frozen"),
+                    false => format!("`{name}` is `final`, so the name is bound once"),
+                }));
+        }
+        match ty {
+            Some(ty) => self.coerced(ty, value, &format!("`{name}`"), span),
+            None => Ok(value),
+        }
+    }
+
     pub(super) fn assign(&mut self, target: &Expr, value: Value, env: ObjId) -> Result<Value> {
         match &target.kind {
             ExprKind::Var(var) => {
                 match resolved(&var.slot) {
-                    // The resolver already rejected assignment to a `const`
-                    // local, so reaching a slot means it is writable.
+                    // The resolver rejected assignment to a `const` *local*
+                    // declared with one, but not to a `const` parameter — that
+                    // word is read at the call, not at the declaration it
+                    // resolves. The annotation on the slot is what answers here.
                     Slot::Local { hops, index } => {
                         let scope = env::ancestor(&self.heap, env, hops);
+                        let declared = self.heap.env(scope).ty(index);
+                        let bind = self.heap.env(scope).bind_kind(index);
+                        let value =
+                            self.rebound(declared.as_deref(), bind, value, &var.name, target.span)?;
                         self.heap.env_mut(scope).set(index, value.clone());
+                        Ok(value)
                     }
                     Slot::Global => {
                         let name = &var.name;
                         let module = env::module_of(&self.heap, env);
+                        // A global's `final`/`const` is refused by `assign`
+                        // below, which is where the flag lives — so only the
+                        // annotation is asked here.
+                        let declared = self.heap.globals(module).ty(name);
+                        let value = match declared {
+                            Some(ty) => {
+                                self.coerced(&ty, value, &format!("`{name}`"), target.span)?
+                            }
+                            None => value,
+                        };
                         match self.heap.globals_mut(module).assign(name, value.clone()) {
                             Ok(()) => {}
                             Err(AssignError::Undefined) => {
@@ -347,9 +399,9 @@ impl Interp {
                                 .with_kind(ErrorKind::Frozen));
                             }
                         }
+                        Ok(value)
                     }
                 }
-                Ok(value)
             }
 
             ExprKind::Index {

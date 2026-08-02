@@ -1,0 +1,8 @@
+Error: quince::FrozenError
+
+ × cannot reassign `x`
+  ╭─[err_reassign_const_param.qn:2:5]
+2 │     x = 2
+  ·     ─
+  ╰────
+  help: `x` is `const`, so the name is bound once and what it holds is frozen

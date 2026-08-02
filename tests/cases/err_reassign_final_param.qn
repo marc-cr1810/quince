@@ -1,0 +1,6 @@
+fn f(final x: int) {
+    x = 2
+    return x
+}
+
+print(f(1))

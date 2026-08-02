@@ -1,0 +1,6 @@
+fn f(const x) {
+    x = 2
+    return x
+}
+
+print(f(1))

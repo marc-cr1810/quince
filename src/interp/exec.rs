@@ -17,7 +17,7 @@ use crate::runtime::class::Class;
 use crate::runtime::env::{self, Env};
 use crate::runtime::heap::{ObjId, Object};
 use crate::runtime::value::{Function, Value};
-use crate::syntax::ast::{Block, Expr, ImportNames, Op, Slot, Stmt, StmtKind};
+use crate::syntax::ast::{BindKind, Block, Expr, ImportNames, Op, Slot, Stmt, StmtKind, TypeExpr};
 
 impl Interp {
     pub(super) fn exec(&mut self, stmt: &Stmt, env: ObjId) -> Result<Flow> {
@@ -52,7 +52,23 @@ impl Interp {
                 if bind.freezes() {
                     self.heap.freeze(&value);
                 }
-                self.bind(slot, name, value, bind.mutable(), env);
+                // The annotation goes with the name, not with this one value:
+                // every later write is checked against the same one, by the
+                // same function, and widens the same way.
+                //
+                // Only the annotation. A `final` or `const` *binding* is already
+                // refused a rebinding without one — by the resolver for a local,
+                // by the `mutable` flag for a global — so there is nothing here
+                // for the unannotated case to add. A `const` parameter is the
+                // one that needs standing in for, and does it at the call.
+                self.bind_typed(
+                    slot,
+                    name,
+                    value,
+                    bind.mutable(),
+                    ty.clone().map(Rc::new),
+                    env,
+                );
                 Ok(Flow::Normal)
             }
 
@@ -512,11 +528,36 @@ impl Interp {
 
     /// Stores a freshly declared value in the slot the resolver picked for it.
     pub(super) fn bind(&mut self, slot: &Option<Slot>, name: &str, value: Value, mutable: bool, env: ObjId) {
+        self.bind_typed(slot, name, value, mutable, None, env)
+    }
+
+    /// The same, recording what the declaration said the name holds.
+    ///
+    /// The annotation outlives the declaration because it is about the name and
+    /// not about the first value bound to it: without this, `let x: int = 0`
+    /// followed by `x = "s"` has nothing to check the second line against.
+    pub(super) fn bind_typed(
+        &mut self,
+        slot: &Option<Slot>,
+        name: &str,
+        value: Value,
+        mutable: bool,
+        ty: Option<Rc<TypeExpr>>,
+        env: ObjId,
+    ) {
         match resolved(slot) {
-            Slot::Local { index, .. } => self.heap.env_mut(env).set(index, value),
+            Slot::Local { index, .. } => {
+                let bind = match mutable {
+                    true => BindKind::Let,
+                    false => BindKind::Final,
+                };
+                self.heap.env_mut(env).declare(index, value, ty, bind)
+            }
             Slot::Global => {
                 let module = env::module_of(&self.heap, env);
-                self.heap.globals_mut(module).declare(name, value, mutable)
+                self.heap
+                    .globals_mut(module)
+                    .declare_typed(name, value, mutable, ty)
             }
         }
     }

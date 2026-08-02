@@ -70,15 +70,27 @@ impl Interp {
                     func.decl.body.slot_count,
                 )));
                 for (index, mut arg) in args.into_iter().enumerate() {
+                    let param = &func.decl.params[index];
                     // Against the parameter's annotation, at the boundary the
                     // value actually crosses. The span is the call's, because
                     // that is where the wrong value was written — the
                     // declaration is right and is somewhere else.
-                    if let Some(ty) = func.decl.params.get(index).and_then(|p| p.ty.clone()) {
-                        let named = format!("`{}`", func.decl.params[index].name);
-                        arg = self.coerced(&ty, arg, &named, span)?;
+                    let ty = param.ty.clone();
+                    if let Some(ty) = &ty {
+                        let named = format!("`{}`", param.name);
+                        arg = self.coerced(ty, arg, &named, span)?;
                     }
-                    self.heap.env_mut(scope).set(index as u16, arg);
+                    // `const p` freezes what the caller passed, which is the
+                    // guarantee §3.3 wants from a `const` parameter: the callee
+                    // cannot mutate caller data through it. `final p` binds the
+                    // name once and leaves the object alone — the other axis,
+                    // and the same pair `let`/`final`/`const` mean anywhere.
+                    if param.bind.freezes() {
+                        self.heap.freeze(&arg);
+                    }
+                    self.heap
+                        .env_mut(scope)
+                        .declare(index as u16, arg, ty.map(Rc::new), param.bind);
                 }
 
                 self.depth += 1;

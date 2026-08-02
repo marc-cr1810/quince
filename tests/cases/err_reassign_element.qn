@@ -1,0 +1,6 @@
+fn f(xs: list[int]) {
+    xs = ["test"]
+    return xs
+}
+
+print(f([1]))

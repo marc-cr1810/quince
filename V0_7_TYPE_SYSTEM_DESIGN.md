@@ -732,6 +732,22 @@ Recorded because they were open in an earlier draft and someone will want to rev
   `other.balance` on any `Account`, not only on `self` — which is what makes `op eq` and
   a `richer_than` writable at all. What decides is where the code was written.
 - **No static `acc.balance` check.** §5.
+- **An annotation constrains the name, not the first value bound to it.** The declaration
+  stores it on the slot, and every write afterwards is checked by the same function that
+  checked the declaration — so `let x: int = 0` followed by `x = "s"` is refused, and
+  `let f: float = 0` followed by `f = 5` stores `5.0`. Without this an annotation would be
+  a claim about one statement rather than about a name, which is not what anybody writing
+  one means.
+- **A parameter takes the binding words.** `fn f(const xs: list[int])` and
+  `fn f(final n: int)` parse, because a parameter *is* a binding that the caller fills in
+  and spelling it differently from `const x = 10` was an inconsistency with no argument
+  behind it. §3.3's `const T` value qualifier still exists and still means what it meant;
+  the two compose, and `final xs: list[int]` makes both claims about different things —
+  the name is bound once, and the list must hold ints.
+- **`final` is not `frozen`.** The slot records the binding word beside the annotation
+  rather than folding one into the other's `frozen` flag: `final` fixes the name and
+  `const T` freezes the value, and overloading one field would make `final` freeze a list
+  it was never meant to touch.
 - **A type's name is shared, not interned.** Interning to a numeric handle was the plan
   going into tranche 2 and is not what landed. The argument for it was §3.9's O(1)
   comparison — but that requirement belongs to the *reified descriptor* on an allocation,

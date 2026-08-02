@@ -1,0 +1,45 @@
+# An annotation constrains the name, not the one value bound to it first, so
+# every write after the declaration is checked against the same annotation.
+let x: int = 0
+x = 5
+print(x)
+
+# Widening applies on reassignment too, or `type(f)` would stop agreeing with
+# the annotation beside it.
+let f: float = 0.0
+f = 5
+print(f)
+print(type(f))
+
+# A container rebound to a new one is rewalked and re-described, so the elements
+# of the replacement are checked and widened like the original's.
+let xs: list[float] = [1.0]
+xs = [2, 3]
+print(xs)
+xs.push(4)
+print(xs)
+
+# A bare container annotation constrains the shape and not the contents.
+let loose: list = [1, "two", nil]
+loose = ["anything", 2]
+print(loose)
+
+# A parameter is a binding the caller fills in, so it takes the binding words.
+fn rebindable(n: int): int {
+    n = n + 1
+    return n
+}
+print(rebindable(1))
+
+fn frozen_arg(const xs: list[int]): int {
+    return len(xs)
+}
+print(frozen_arg([1, 2]))
+
+# `any` excludes `nil`; `any?` and the `dict[K]` shorthand admit it.
+let holes: dict[string, any?] = {}
+holes["a"] = nil
+print(holes)
+let shorthand: dict[string] = {}
+shorthand["b"] = nil
+print(shorthand)

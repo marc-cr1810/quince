@@ -1,13 +1,54 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use crate::runtime::heap::{Heap, ObjId, Object};
 use crate::runtime::value::Value;
+use crate::syntax::ast::{BindKind, TypeExpr};
 
 #[derive(Clone, Debug)]
 pub struct Binding {
     pub value: Value,
     pub mutable: bool,
+    /// What the declaration said the name holds, if it said.
+    ///
+    /// Kept past the declaration because an annotation is about the *name* and
+    /// not about the one value that happened to be bound first: `let x: int = 0`
+    /// followed by `x = "s"` is the same mistake as writing the string in the
+    /// first place, and without this the second line has nothing to check
+    /// against. See [`SlotData::ty`] for the local form.
+    pub ty: Option<Rc<TypeExpr>>,
+}
+
+/// What a local slot holds, and what it was declared to hold.
+///
+/// A struct rather than a bare `Value` for the reason [`Binding::ty`] gives.
+/// Locals need no `mutable` flag: the resolver refuses a write to a `final` or
+/// `const` local statically, which is why that check does not appear here and
+/// does appear on [`Binding`].
+#[derive(Clone, Debug)]
+pub struct SlotData {
+    pub value: Value,
+    /// The annotation the declaration carried. `None` is the unannotated
+    /// binding, which is every binding a v0.6 program wrote.
+    ///
+    /// Shared, because the same annotation is read on every write to the name
+    /// and cloning a nested `list[dict[string, int]]` per assignment would be
+    /// paying for the check twice over.
+    pub ty: Option<Rc<TypeExpr>>,
+    /// The word the slot was bound with.
+    ///
+    /// Separate from [`SlotData::ty`] and not folded into its `frozen` flag,
+    /// because they are two different claims: `final` fixes the *name* and
+    /// `const T` freezes the *value*, and `final xs: list[int]` makes both at
+    /// once about different things. Overloading one field for both would make
+    /// `final` freeze a list it was never meant to touch.
+    ///
+    /// A local declared `final` is already refused a rebinding by the resolver.
+    /// This is here for the one binding the resolver cannot see a keyword on: a
+    /// parameter, whose `const` or `final` is written at the declaration and
+    /// read at the call.
+    pub bind: BindKind,
 }
 
 /// A local scope: a flat run of slots, addressed by index.
@@ -24,7 +65,7 @@ pub struct Env {
     /// declarations to the top of their scope so a nested function can see a
     /// sibling declared below it, which means a slot can legitimately be
     /// reached before it holds anything.
-    slots: Vec<Option<Value>>,
+    slots: Vec<Option<SlotData>>,
     parent: Option<ObjId>,
 }
 
@@ -40,19 +81,60 @@ impl Env {
         self.parent
     }
 
+    /// Binds a slot, keeping whatever annotation it already carried.
+    ///
+    /// The annotation belongs to the declaration and the declaration runs once;
+    /// every write after it is an assignment, and an assignment must not be able
+    /// to drop the constraint it was just checked against.
     pub fn set(&mut self, index: u16, value: Value) {
-        self.slots[index as usize] = Some(value);
+        let (ty, bind) = match &self.slots[index as usize] {
+            Some(slot) => (slot.ty.clone(), slot.bind),
+            None => (None, BindKind::Let),
+        };
+        self.slots[index as usize] = Some(SlotData { value, ty, bind });
+    }
+
+    /// Binds a slot and records what its declaration said about it.
+    pub fn declare(
+        &mut self,
+        index: u16,
+        value: Value,
+        ty: Option<Rc<TypeExpr>>,
+        bind: BindKind,
+    ) {
+        self.slots[index as usize] = Some(SlotData { value, ty, bind });
+    }
+
+    /// The word slot `index` was bound with.
+    pub fn bind_kind(&self, index: u16) -> BindKind {
+        self.slots[index as usize]
+            .as_ref()
+            .map_or(BindKind::Let, |slot| slot.bind)
     }
 
     pub fn get(&self, index: u16) -> Option<&Value> {
-        self.slots[index as usize].as_ref()
+        self.slots[index as usize]
+            .as_ref()
+            .map(|slot| &slot.value)
+    }
+
+    /// What slot `index` was declared to hold, if its declaration said.
+    pub fn ty(&self, index: u16) -> Option<Rc<TypeExpr>> {
+        self.slots[index as usize]
+            .as_ref()
+            .and_then(|slot| slot.ty.clone())
     }
 
     /// Pushes every handle this scope keeps alive, for the collector's mark
     /// phase. The parent link counts: an inner scope keeps its enclosing ones
     /// reachable.
     pub fn trace(&self, worklist: &mut Vec<ObjId>) {
-        worklist.extend(self.slots.iter().flatten().filter_map(Value::handle));
+        worklist.extend(
+            self.slots
+                .iter()
+                .flatten()
+                .filter_map(|slot| slot.value.handle()),
+        );
         worklist.extend(self.parent);
     }
 }
@@ -110,7 +192,30 @@ impl Globals {
     /// Redeclaring a global replaces it, so a REPL session can redefine a
     /// function without restarting.
     pub fn declare(&mut self, name: impl Into<String>, value: Value, mutable: bool) {
-        self.vars.insert(name.into(), Binding { value, mutable });
+        self.declare_typed(name, value, mutable, None);
+    }
+
+    /// Declares a global, recording what it was annotated as.
+    pub fn declare_typed(
+        &mut self,
+        name: impl Into<String>,
+        value: Value,
+        mutable: bool,
+        ty: Option<Rc<TypeExpr>>,
+    ) {
+        self.vars.insert(
+            name.into(),
+            Binding {
+                value,
+                mutable,
+                ty,
+            },
+        );
+    }
+
+    /// What `name` was declared to hold, if its declaration said.
+    pub fn ty(&self, name: &str) -> Option<Rc<TypeExpr>> {
+        self.vars.get(name).and_then(|binding| binding.ty.clone())
     }
 
     pub fn get(&self, name: &str) -> Option<&Value> {

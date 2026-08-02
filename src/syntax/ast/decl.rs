@@ -18,6 +18,15 @@ pub struct Param {
     /// What the caller may pass, if the declaration said. `None` is the
     /// unannotated parameter, which is whatever it is handed.
     pub ty: Option<TypeExpr>,
+    /// The word the parameter was declared with, meaning here exactly what it
+    /// means on a binding: `let` reassignable, `final` bound once, `const`
+    /// bound once and the value frozen.
+    ///
+    /// A parameter is a binding the caller fills in, so it takes the binding
+    /// forms — `fn f(const xs: list[int])` is how §3.3's `const` parameter is
+    /// written now that the two spellings agree. [`BindKind::Let`] is the
+    /// default and is what every parameter written before v0.7 is.
+    pub bind: BindKind,
     /// Whether this is the `self` the parser inserted, rather than a parameter
     /// someone wrote.
     ///

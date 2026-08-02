@@ -155,16 +155,33 @@ impl Parser {
                 // The receiver's type is the class, and the class is not in hand
                 // here — nor would writing it help, since nobody passes `self`.
                 ty: None,
+                // Rebindable, as it always was. Refusing `self = x` is the
+                // resolver's, and it refuses it by name rather than by kind.
+                bind: BindKind::Let,
                 receiver: true,
             });
         }
         while !self.check(&TokenKind::RParen) {
+            // The binding word first, as it is on a `let` — a parameter is a
+            // binding the caller fills in, so the two forms are spelled alike.
+            let bind = match self.peek().kind {
+                TokenKind::Final => {
+                    self.advance();
+                    BindKind::Final
+                }
+                TokenKind::Const => {
+                    self.advance();
+                    BindKind::Const
+                }
+                _ => BindKind::Let,
+            };
             let (name, span) = self.expect_ident("in the parameter list")?;
             let ty = self.annotation()?;
             params.push(Param {
                 name,
                 span,
                 ty,
+                bind,
                 receiver: false,
             });
             if !self.eat(&TokenKind::Comma) {
