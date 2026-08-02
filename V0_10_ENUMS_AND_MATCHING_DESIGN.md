@@ -93,8 +93,8 @@ v0.7 gives the language `T?` and `nil`. This milestone gives it `Option[T]` with
 relationship is the worst available outcome: every API author picks one by coin flip and
 every caller learns both.
 
-v0.7 §10 lays out the three coherent answers. **This document assumes answer 1** — `T?` is
-sugar for `Option[T]` — and everything below is written on it:
+v0.7 §10 laid out the three coherent answers and **has since settled on answer 1** — `T?`
+is sugar for `Option[T]`. This document was written on that assumption and keeps it:
 
 - `int?` and `Option[int]` are one type with two spellings. `nil` is how `Option.None` prints
   and how it is written in a value position.
@@ -107,8 +107,10 @@ sugar for `Option[T]` — and everything below is written on it:
   a stored `nil`. Whether `d[key]` should therefore answer `Option[V]` in its written
   signature is the one loose thread, and §10 keeps it.
 
-If the answer turns out to be 2 or 3 instead, §4, §6.5, and §7.2 are the sections that
-change, and they change substantially. That is why this is §3 and not an appendix.
+Had the answer gone to 2 or 3 instead, §4, §6.5, and §7.2 are the sections that would have
+changed, and they would have changed substantially. That is why this is §3 and not an
+appendix, and it is why v0.7 settled the question before its tranche 3 rather than after
+its tranche 4.
 
 ---
 

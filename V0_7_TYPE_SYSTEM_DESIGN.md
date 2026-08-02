@@ -434,9 +434,10 @@ Rules:
   one thing in this milestone that breaks a running program. The trade is that `??` and the
   nullable types this milestone is *about* make the total form ergonomic for the first
   time, and a language with `T?` in it that still raises on a lookup is asking the reader
-  to hold two absence stories at once. The cost is that `dict[string, int?]` can no longer
-  tell "missing" from "present, holding `nil`" — which is exactly the argument v0.10 makes
-  for `Option[V]`, and is why §10 keeps it open. `d.remove(key)` and `key in d` are
+  to hold two absence stories at once. The cost is that `d[key]` alone can no longer tell
+  "missing" from "present, holding `nil`" in a `dict[string, int?]` — but the distinction
+  is not lost, only spelled in two expressions instead of one: `key in d` tests the key
+  set directly, whatever the value stored under it. `d.remove(key)` and `key in d` are
   unaffected.
 - **Reified header check (O(1)):** both containers carry element, key, and value
   descriptors, so `d is dict[string, int]` is O(1). §3.9.
@@ -657,27 +658,34 @@ Recorded because they were open in an earlier draft and someone will want to rev
   stopped being coherent; v0.8 and v0.9 are where the other two thirds went, and §8 says
   which. The test applied was whether a feature is *about* types or merely *reads* them.
 - **`ref` deferred.** §8.
+- **`T?` is sugar for `Option[T]`.** §10, which used to be this document's one open
+  decision and is now the record of how it was settled.
 
 ---
 
-## 10. Open decision: `T?` and `Option[T]`
+## 10. Settled: `T?` is sugar for `Option[T]`
 
 v0.10 introduces `Option[T]` with `Some`/`None`, and this milestone has `T?` with `nil`.
-Two mechanisms for absence in one language is one too many.
+Two mechanisms for absence in one language is one too many, and this document carried the
+question open for a while. It is answered: **`T?` is the surface syntax, `Option[T]` is
+the mechanism.** One mechanism, two spellings, `nil` being how `Option.None` prints. `?.`
+and `??` become sugar over `match` when v0.10 lands. v0.10's null pointer optimization
+already makes the two bit-identical for reference types, so this costs nothing at run time,
+and it is the answer v0.10 was already written on — nothing there needs revisiting.
 
-The three coherent answers:
+The two rejected answers, recorded because the reasons are the useful part:
 
-1. **`T?` is sugar for `Option[T]`.** One mechanism, two spellings, `nil` being how
-   `Option.None` prints. `?.` and `??` become sugar over `match`. v0.10's null pointer
-   optimization already makes them bit-identical for reference types, so this costs nothing
-   at run time. **This is the answer v0.10 is written on**, and the one to reverse if any.
-2. **They are separate**, `T?` for the cheap local case and `Option[T]` for the case that
-   travels — which requires explaining a distinction the compiler does not enforce.
-3. **`Option[T]` replaces `T?`.** Cleanest, and it makes `d[key]` answer `Option[V]` —
-   the version that can distinguish "missing" from "present, holding `nil`", the one thing
-   §3.10 gives up. It also means `T?` should not ship here at all, which reopens most of
-   this document.
+- **Keeping them separate** — `T?` for the cheap local case, `Option[T]` for the case that
+  travels — requires teaching a distinction the compiler does not enforce. A rule that
+  lives only in the reader's head is a rule the language will not keep.
+- **`Option[T]` replacing `T?` outright** is the cleanest end state and was the only answer
+  that changed *this* milestone. It was refused because it pulls all of nullability into
+  v0.10, leaving v0.7 with annotations and no way to spell absence — which reopens §3.5's
+  blank finals, §3.8 entirely, §3.10's indexing, and most of §4.1's table. That is not a
+  decision inside this milestone; it is a different milestone.
 
-Answer 3 is the only one that changes *this* milestone, and it has to be ruled out before
-tranche 4 lands, because `d[key]`'s return type is where the choice first becomes visible
-in a running program.
+Its one real advantage — `d[key]` answering `Option[V]`, which distinguishes "missing"
+from "present, holding `nil`" — turned out to be smaller than it looked. `key in d` tests
+the key set directly and is unaffected by §3.10, so the distinction survives as two
+expressions rather than one. Giving up a shorthand is a much cheaper trade than giving up
+`T?` for a milestone, which is what decided it.
