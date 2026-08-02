@@ -1,15 +1,21 @@
 //! Live diagnostics, published on every edit.
 //!
-//! Two sources, and the split is the milestone's own. Anything `compile`
-//! refuses is a *refusal* — an alias that cycles, a dict keyed by a class, an
-//! annotated binding with no value — and appears here because the program will
-//! not run. Anything [`check`] finds is a *warning*: v0.7 §5 enforces an
-//! annotation at run time, so `let x: int = "s"` is a program that compiles and
-//! then fails, and the editor saying so first is a courtesy rather than a rule.
+//! Two sources, and both are errors. Anything `compile` refuses stops the
+//! program from running at all — an alias that cycles, a dict keyed by a class,
+//! an annotated binding with no value. Anything `sema::check` finds runs right
+//! up until the offending line and then fails there, with the same sentence the
+//! editor showed.
 //!
-//! That is why the second kind is approximate and the first is not. A refusal
-//! firing only where inference happened to succeed would be a rule nobody could
-//! state; a squiggle doing the same is an editor doing less on a hard case.
+//! Neither is a warning, and the second was one for a while. The check is
+//! one-sided by construction: it reports only where the pass knows both types
+//! and they definitely disagree. That makes a report a certainty rather than a
+//! suspicion, and drawing a certainty in the colour reserved for suspicions
+//! teaches a reader to skim past it.
+//!
+//! What separates them is not confidence but *reach*: the first kind means
+//! nothing runs, the second means everything up to that line does. The protocol
+//! has no severity for that distinction, and inventing one by demoting the
+//! second to a warning was the wrong way to express it.
 
 
 use lsp_server::{Connection, Message, Notification};
@@ -30,18 +36,15 @@ pub(crate) fn publish_diagnostics(connection: &Connection, uri: Url, source: &st
         // parser stops at the first thing it cannot read and everything after
         // it would be a guess.
         Err(err) => diagnostics.push(quince_error_to_diagnostic(source, &err)),
-        // A program that compiles. What the pass can see about its types is
-        // reported as a warning, since the language checks it when it runs.
+        // A program that compiles, and what the pass can see will go wrong when
+        // it runs. `quince_error_to_diagnostic` already marks these as errors,
+        // which is what they are.
         Ok(program) => {
             let types = quince::sema::infer::infer(&program);
             diagnostics.extend(
                 quince::sema::check::check(&program, &types)
                     .iter()
-                    .map(|err| {
-                        let mut diagnostic = quince_error_to_diagnostic(source, err);
-                        diagnostic.severity = Some(DiagnosticSeverity::WARNING);
-                        diagnostic
-                    }),
+                    .map(|err| quince_error_to_diagnostic(source, err)),
             );
         }
     }

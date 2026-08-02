@@ -458,3 +458,23 @@ fn a_hint_is_offered_only_where_the_program_said_nothing() {
     // And it lands just past the name, where the annotation would have gone.
     assert_eq!(hints[0].position, Position { line: 0, character: 5 });
 }
+
+#[test]
+fn a_certain_mistake_is_drawn_as_an_error() {
+    // The check reports only where the pass knows both types and they
+    // definitely disagree, so a report is a certainty — the line will fail when
+    // it runs. Drawing that in the colour reserved for suspicions would teach a
+    // reader to skim past the ones that are certain.
+    let src = "let x: int = \"s\"\n";
+    let state = DocumentState::new(src.to_string(), None);
+    let program = quince::compile(state.text()).expect("it compiles — that is the point");
+    let types = quince::sema::infer::infer(&program);
+    let found = quince::sema::check::check(&program, &types);
+    assert_eq!(found.len(), 1, "{found:?}");
+
+    let diagnostic = crate::lsp::diagnostics::quince_error_to_diagnostic(src, &found[0]);
+    assert_eq!(
+        diagnostic.severity,
+        Some(lsp_types::DiagnosticSeverity::ERROR)
+    );
+}

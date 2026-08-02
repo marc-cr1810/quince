@@ -1,19 +1,27 @@
-//! Type mistakes the pass can see without running the program.
+//! Mistakes the pass can see without running the program.
 //!
-//! Advisory, and only that. §5 puts the enforcement of an annotation at run
-//! time, and this does not move it: the language still refuses `let x: int =
-//! "s"` when the binding executes, with the same message from the same
-//! function. What this adds is the editor saying so first.
+//! §5 puts the enforcement of an annotation at run time and this does not move
+//! it: the language still refuses `let x: int = "s"` when the binding executes,
+//! with the same message from the same function. What this adds is the editor
+//! saying so first.
 //!
-//! Being approximate is what makes that acceptable here and unacceptable in the
-//! resolver. A *refusal* that fires only where inference happened to succeed
-//! would be a rule nobody could state; a *squiggle* that appears only where the
-//! answer is certain is ordinary editor behaviour, and one that stayed silent
-//! would simply be an editor doing less.
+//! **What it reports are errors, not warnings.** Every rule below is one-sided
+//! — nothing is reported unless the pass knows both types and they definitely
+//! disagree, and `Unknown` on either side reports nothing. So a report here is
+//! not a suspicion: the line will fail when it runs, with the same sentence.
+//! Drawing it in the colour reserved for "this might be a problem" would
+//! undersell it, and teach a reader to skim past the ones that are certain.
 //!
-//! So every rule below is one-sided. Nothing is reported unless the pass knows
-//! both types and they definitely disagree — `Unknown` on either side reports
-//! nothing, and so does anything this cannot decide.
+//! What *is* approximate is the coverage, not the verdict — which cases this
+//! can see, not whether a case it saw is real. That distinction is why the same
+//! reasoning does not license a check in the resolver: a *refusal* firing only
+//! where inference happened to succeed would be a rule nobody could state,
+//! while an editor that marks what it is sure of and stays quiet about the rest
+//! is just an editor doing what it can.
+//!
+//! The one thing this cannot know is whether the line runs at all. `let x: int
+//! = "s"` inside a branch nothing reaches never fails — and is still wrong, in
+//! the way every static type error in every language is wrong.
 //!
 //! # What the later milestones need from this
 //!
