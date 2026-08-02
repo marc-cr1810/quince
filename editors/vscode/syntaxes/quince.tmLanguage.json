@@ -5,6 +5,7 @@
   "patterns": [
     { "include": "#comments" },
     { "include": "#keywords" },
+    { "include": "#types" },
     { "include": "#constants" },
     { "include": "#strings" },
     { "include": "#numbers" },
@@ -46,11 +47,19 @@
         },
         {
           "name": "keyword.declaration.quince",
-          "match": "\\b(fn|op|class|extends|extend|let|final|complete|sealed|const|public|private|protected|any|is|alias)\\b"
+          "match": "\\b(fn|op|class|extends|extend|let|final|complete|sealed|const|public|private|protected|is|alias)\\b"
         },
         {
           "name": "variable.language.quince",
           "match": "\\b(self|super)\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "support.type.quince",
+          "match": "\\b(string|int|float|bool|dict|list|any)\\b\\?*"
         }
       ]
     },

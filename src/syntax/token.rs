@@ -160,6 +160,11 @@ pub const KEYWORDS: &[&str] = &[
     "else", "while", "for", "in", "return", "try", "catch", "throw", "true", "false", "nil",
 ];
 
+/// Built-in types that the editor grammar highlights as support types.
+pub const BUILTIN_TYPES: &[&str] = &[
+    "string", "int", "float", "bool", "dict", "list",
+];
+
 impl TokenKind {
     /// Maps an identifier to its keyword, if it is one.
     pub fn keyword(word: &str) -> Option<TokenKind> {
@@ -543,8 +548,8 @@ mod tests {
     fn the_editor_grammar_highlights_nothing_else() {
         for word in highlighted_words(GRAMMAR) {
             assert!(
-                KEYWORDS.contains(&word.as_str()),
-                "the VS Code grammar highlights `{word}`, which is not a reserved word"
+                KEYWORDS.contains(&word.as_str()) || BUILTIN_TYPES.contains(&word.as_str()),
+                "the VS Code grammar highlights `{word}`, which is neither a reserved word nor a builtin type"
             );
         }
     }
