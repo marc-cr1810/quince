@@ -25,14 +25,19 @@ use crate::syntax::token::Span;
 /// not for types would be arbitrary.
 pub(super) fn expand(program: &mut [Stmt]) -> Result<()> {
     let mut declared = HashMap::new();
-    collect(program, &mut declared)?;
+    // In declaration order, kept beside the map. Which alias a cycle is
+    // reported at has to be the same on every run, and a `HashMap`'s iteration
+    // order is not — `alias A = B` / `alias B = A` blamed whichever the hash
+    // happened to yield first.
+    let mut order = Vec::new();
+    collect(program, &mut declared, &mut order)?;
 
     // Each alias is expanded to a form containing no aliases *before* anything
     // is substituted with it, so a use site is rewritten once rather than
     // repeatedly until it settles. This is also where a cycle is found: the
     // resolution of `A` reaches `A`.
     let mut resolved: HashMap<String, TypeExpr> = HashMap::new();
-    for name in declared.keys() {
+    for name in &order {
         let expanded = resolve_one(name, &declared, &mut Vec::new())?;
         resolved.insert(name.clone(), expanded);
     }
@@ -44,7 +49,11 @@ pub(super) fn expand(program: &mut [Stmt]) -> Result<()> {
 }
 
 /// Gathers every `alias` declaration, refusing a second one for a name.
-fn collect(stmts: &mut [Stmt], into: &mut HashMap<String, TypeExpr>) -> Result<()> {
+fn collect(
+    stmts: &mut [Stmt],
+    into: &mut HashMap<String, TypeExpr>,
+    order: &mut Vec<String>,
+) -> Result<()> {
     for stmt in stmts {
         // Top level only. An alias inside a function would be a type visible for
         // the length of a block, and nothing else in the language scopes a
@@ -61,6 +70,7 @@ fn collect(stmts: &mut [Stmt], into: &mut HashMap<String, TypeExpr>) -> Result<(
                 return Err(redeclared(name, *name_span));
             }
             into.insert(name.clone(), ty.clone());
+            order.push(name.clone());
         }
     }
     Ok(())

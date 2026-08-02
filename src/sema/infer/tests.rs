@@ -563,9 +563,6 @@ fn what_the_pass_cannot_decide_it_does_not_report() {
         "fn f(n) {\n    let x: int = n\n}\n",
         // A subclass holds as its parent.
         "class A {\n    op init() { }\n}\nclass B extends A {\n    op init() { }\n}\nlet x: A = B()\n",
-        // Element types the pass does not infer: a list literal is a `list`,
-        // and guessing about its contents is what would cry wolf.
-        "let xs: list[int] = [\"a\"]\n",
         // Not a type at all, so not this check's business — the annotation is
         // reported when it is applied.
         "let x: Nonexistent = 1\n",
@@ -573,6 +570,47 @@ fn what_the_pass_cannot_decide_it_does_not_report() {
     for src in quiet {
         assert_eq!(warnings(src), Vec::<String>::new(), "for {src:?}");
     }
+}
+
+#[test]
+fn a_literals_elements_are_checked_against_the_annotation() {
+    // The elements are right there in the source, so "the pass could be wrong"
+    // is no defence — it can see exactly what is in the list.
+    assert_eq!(
+        warnings("let xs: list[int] = [\"a\"]\n"),
+        vec!["`xs` is `list[int]`, but this is `list[string]`"]
+    );
+    assert_eq!(
+        warnings("let d: dict[string, int] = {\"a\": \"b\"}\n"),
+        vec!["`d` is `dict[string, int]`, but this is `dict[string, string]`"]
+    );
+
+    let quiet = [
+        // Agreeing.
+        "let xs: list[int] = [1, 2]\n",
+        // Widening, one level down.
+        "let xs: list[float] = [1, 2]\n",
+        // Elements that disagree answer with the bare `list`, so there is
+        // nothing to compare and nothing to say.
+        "let xs: list[int] = [1, \"a\"]\n",
+        // An empty literal says nothing about its elements.
+        "let xs: list[int] = []\n",
+        // The annotation says nothing about them either.
+        "let xs: list = [\"a\"]\n",
+        // A nullable element admits its `nil`.
+        "let xs: list[int?] = [nil]\n",
+        // Nesting compares all the way down, and agrees all the way down.
+        "let xs: list[list[int]] = [[1], [2]]\n",
+    ];
+    for src in quiet {
+        assert_eq!(warnings(src), Vec::<String>::new(), "for {src:?}");
+    }
+
+    // And it does disagree all the way down when it should.
+    assert_eq!(
+        warnings("let xs: list[list[int]] = [[\"a\"]]\n").len(),
+        1
+    );
 }
 
 #[test]

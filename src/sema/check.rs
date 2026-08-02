@@ -136,11 +136,31 @@ fn disagrees(
         };
     }
     if wanted == actual {
-        // The names agree. Whether the *arguments* do is a question the pass
-        // cannot answer today: a list literal is inferred as `list` with no
-        // element type, so `list[int] = ["a"]` looks like agreement from here.
-        // Run time catches it, and guessing would be the cry of wolf.
-        return None;
+        // The names agree, so the arguments are the question. A literal's
+        // elements are visible, so the pass infers them — `["a"]` is a
+        // `list[string]` — and `let xs: list[int] = ["a"]` is a mistake anyone
+        // reading the line can see. Only where *both* sides carry arguments,
+        // since a literal that says nothing about its elements answers with the
+        // bare `list` and there is nothing to compare.
+        let (want, have) = (annotated.args(), held.args());
+        if want.is_empty() || have.is_empty() || want.len() != have.len() {
+            return None;
+        }
+        let disagreeing = want
+            .iter()
+            .zip(have)
+            .find(|(want, have)| !fits(types, want, have));
+        return disagreeing.map(|(want, have)| {
+            refusal(
+                format!(
+                    "{what} is `{}`, but this is `{}`",
+                    ty.written(),
+                    held
+                ),
+                format!("`{have}` does not hold as `{want}`"),
+                span,
+            )
+        });
     }
     // §4.1's widening: a float admits an int.
     if wanted == "float" && actual == "int" {
@@ -194,6 +214,35 @@ fn descends_from(types: &Types, class: &str, ancestor: &str) -> bool {
         current = types.parent_of(name);
     }
     false
+}
+
+/// Whether a value of `have` may sit where `want` was asked for.
+///
+/// The §4.1 table again, one level down, and one-sided in the same way: an
+/// answer it cannot be sure of is `true`. Written apart from [`disagrees`]
+/// because that one produces a *report* about a named thing, and an argument
+/// has no name to produce one about — it is a `list[…]`'s element, and what
+/// the reader is shown is both whole types.
+fn fits(types: &Types, want: &Type, have: &Type) -> bool {
+    let (Some(wanted), Some(actual)) = (want.class_name(), have.class_name()) else {
+        // `Unknown` on either side, which settles nothing.
+        return true;
+    };
+    if actual == "nil" {
+        return want.admits_nil();
+    }
+    if !is_a_type(types, wanted) {
+        return true;
+    }
+    if wanted == actual {
+        let (want, have) = (want.args(), have.args());
+        return want.is_empty()
+            || have.is_empty()
+            || want.len() != have.len()
+            || want.iter().zip(have).all(|(want, have)| fits(types, want, have));
+    }
+    // §4.1's widening, and a subclass holding as its parent.
+    wanted == "float" && actual == "int" || descends_from(types, actual, wanted)
 }
 
 /// Whether the pass has heard of a type by this name.

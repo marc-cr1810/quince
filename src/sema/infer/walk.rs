@@ -628,18 +628,27 @@ impl Infer {
                 }
             }
 
-            ExprKind::List(items) => {
-                for item in items {
-                    self.expr(item);
-                }
-                Type::class("list")
-            }
+            // A literal's elements are right there, so the element type is
+            // decidable and worth deciding: without it `let xs: list[int] =
+            // ["a"]` looks like agreement to anything comparing types, and the
+            // mistake is visible in the source.
+            //
+            // Elements that disagree answer with the bare `list`, not
+            // `list[_]`. "A list of something I cannot name" is the true
+            // statement; an `Unknown` argument would compare unequal to every
+            // annotation and turn an absence of knowledge into a contradiction.
+            // An empty literal says nothing for the same reason.
+            ExprKind::List(items) => match joined(items.iter().map(|item| self.expr(item))) {
+                Some(element) => Type::generic("list", vec![element]),
+                None => Type::class("list"),
+            },
             ExprKind::Dict(pairs) => {
-                for (key, value) in pairs {
-                    self.expr(key);
-                    self.expr(value);
+                let keys = joined(pairs.iter().map(|(key, _)| self.expr(key)));
+                let values = joined(pairs.iter().map(|(_, value)| self.expr(value)));
+                match (keys, values) {
+                    (Some(key), Some(value)) => Type::generic("dict", vec![key, value]),
+                    _ => Type::class("dict"),
                 }
-                Type::class("dict")
             }
 
             ExprKind::Var(var) => lookup(&self.bindings, &var.name, expr.span.start)
@@ -886,6 +895,18 @@ impl Infer {
 
 /// Every expression written inside this one.
 ///
+/// The one type every element agrees on, or `None` if they do not — which
+/// includes there being no elements to ask.
+///
+/// Collected eagerly rather than short-circuiting, because each element still
+/// has to be walked for its own type to be recorded even once the answer is
+/// settled.
+fn joined(types: impl Iterator<Item = Type>) -> Option<Type> {
+    types
+        .reduce(|found, next| found.join(next))
+        .filter(Type::is_known)
+}
+
 /// One level, so a caller that wants the whole tree recurses. A `Vec` of borrows
 /// rather than an iterator because the shapes differ enough that an iterator
 /// would be a hand-written enum of six cases.
