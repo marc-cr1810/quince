@@ -112,11 +112,12 @@ pub(crate) fn collect_stmt_semantic_tokens(
     for stmt in stmts {
         match &stmt.kind {
             StmtKind::Fn { decl, .. } => {
+                let fn_sig_span = Span { start: stmt.span.start, end: decl.body.span.start };
                 // Function declaration (1), declaration modifier (1)
-                push_raw_token(source, stmt.span, &decl.name, 1, 1, raw_tokens);
+                push_raw_token(source, fn_sig_span, &decl.name, 1, 1, raw_tokens);
                 for param in &decl.params {
                     // Parameter (4), declaration modifier (1)
-                    push_raw_token(source, stmt.span, &param.name, 4, 1, raw_tokens);
+                    push_raw_token(source, fn_sig_span, &param.name, 4, 1, raw_tokens);
                     if let Some(param_ty) = &param.ty {
                         collect_type_expr_semantic_tokens(source, param_ty, raw_tokens);
                     }
@@ -141,11 +142,11 @@ pub(crate) fn collect_stmt_semantic_tokens(
                     collect_expr_semantic_tokens(source, &field.value, raw_tokens);
                 }
                 for m in methods {
-                    let m_span = Span { start: m.body.span.start.saturating_sub(40), end: m.body.span.end };
+                    let m_sig_span = Span { start: m.body.span.start.saturating_sub(100), end: m.body.span.start };
                     // Method declaration (2), declaration modifier (1)
-                    push_raw_token(source, m_span, &m.name, 2, 1, raw_tokens);
+                    push_raw_token(source, m_sig_span, &m.name, 2, 1, raw_tokens);
                     for param in &m.params {
-                        push_raw_token(source, m_span, &param.name, 4, 1, raw_tokens);
+                        push_raw_token(source, m_sig_span, &param.name, 4, 1, raw_tokens);
                         if let Some(param_ty) = &param.ty {
                             collect_type_expr_semantic_tokens(source, param_ty, raw_tokens);
                         }
@@ -171,10 +172,10 @@ pub(crate) fn collect_stmt_semantic_tokens(
             StmtKind::Extend { target, methods, .. } => {
                 push_raw_token(source, stmt.span, &target.name, 0, 0, raw_tokens);
                 for m in methods {
-                    let m_span = Span { start: m.body.span.start.saturating_sub(40), end: m.body.span.end };
-                    push_raw_token(source, m_span, &m.name, 2, 1, raw_tokens);
+                    let m_sig_span = Span { start: m.body.span.start.saturating_sub(100), end: m.body.span.start };
+                    push_raw_token(source, m_sig_span, &m.name, 2, 1, raw_tokens);
                     for param in &m.params {
-                        push_raw_token(source, m_span, &param.name, 4, 1, raw_tokens);
+                        push_raw_token(source, m_sig_span, &param.name, 4, 1, raw_tokens);
                         if let Some(param_ty) = &param.ty {
                             collect_type_expr_semantic_tokens(source, param_ty, raw_tokens);
                         }
@@ -207,6 +208,12 @@ pub(crate) fn collect_stmt_semantic_tokens(
                 collect_stmt_semantic_tokens(source, &body.stmts, raw_tokens);
                 collect_stmt_semantic_tokens(source, &handler.stmts, raw_tokens);
             }
+            StmtKind::Return(value) => {
+                if let Some(v) = value {
+                    collect_expr_semantic_tokens(source, v, raw_tokens);
+                }
+            }
+            StmtKind::Throw(value) => collect_expr_semantic_tokens(source, value, raw_tokens),
             StmtKind::Block(block) => collect_stmt_semantic_tokens(source, &block.stmts, raw_tokens),
             _ => {}
         }
@@ -274,7 +281,6 @@ mod tests {
         let state = DocumentState::new(code.to_string(), None);
         let tokens = get_semantic_tokens(Some(&state));
         // Verify type tokens are emitted (type token is index 6)
-        assert!(!tokens.data.is_empty());
         let type_tokens_count = tokens
             .data
             .iter()
@@ -282,5 +288,19 @@ mod tests {
             .count();
         // dict, string, any -> 3 type tokens
         assert_eq!(type_tokens_count, 3);
+    }
+
+    #[test]
+    fn return_expressions_produce_semantic_tokens() {
+        let code = "class Point { op string() { return self.x } }";
+        let state = DocumentState::new(code.to_string(), None);
+        let tokens = get_semantic_tokens(Some(&state));
+        // Verify self inside return statement gets KEYWORD token (7)
+        let keyword_tokens_count = tokens
+            .data
+            .iter()
+            .filter(|t| t.token_type == 7)
+            .count();
+        assert_eq!(keyword_tokens_count, 1);
     }
 }

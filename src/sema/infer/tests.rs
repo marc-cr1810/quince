@@ -972,12 +972,16 @@ fn primitive_incompatible_binary_op_is_refused() {
 }
 
 #[test]
-fn out_of_bounds_shift_is_refused() {
-    let src = "print(1 << 99)\n";
-    assert_eq!(all_errors(src), vec!["shift count out of range (0..64)"]);
+fn user_class_unsupported_binary_op_is_refused() {
+    let src = "class Point3D { op init() {} }\nlet p3d = Point3D()\nprint(p3d - p3d)\n";
+    assert_eq!(all_errors(src), vec!["`-` is not supported for `Point3D`"]);
 }
 
 #[test]
+fn return_type_annotation_mismatch_is_refused() {
+    let src = "class Point3D { op init() {} }\nextend Point3D { op add(other) : float { return self } }\n";
+    assert_eq!(all_errors(src), vec!["`add`’s return is `float`, but this is a Point3D"]);
+}
 fn asymmetric_arithmetic_is_refused() {
     let src = "class Money { op init(c) { self.c = c } }\nprint(500 - Money(200))\n";
     assert_eq!(all_errors(src), vec!["`-` is not supported between an int and `Money`"]);

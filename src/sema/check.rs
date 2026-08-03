@@ -510,9 +510,47 @@ fn body(decl: &std::rc::Rc<crate::syntax::ast::FnDecl>, types: &Types, bound: &m
                 decl.name_span,
             ));
         }
+        check_return_types(&decl.body.stmts, &decl.name, ty, types, found);
     }
     stmts(&decl.body.stmts, types, bound, found);
     bound.pop();
+}
+
+fn check_return_types(
+    stmts: &[Stmt],
+    func_name: &str,
+    declared_ret_ty: &TypeExpr,
+    types: &Types,
+    found: &mut Vec<Raised>,
+) {
+    for stmt in stmts {
+        match &stmt.kind {
+            StmtKind::Return(Some(expr)) => {
+                let held = receiver_type(expr, types);
+                let what = format!("`{func_name}`’s return");
+                if let Some(err) = disagrees(declared_ret_ty, &held, &what, types, expr.span) {
+                    found.push(err);
+                }
+            }
+            StmtKind::If { then, otherwise, .. } => {
+                check_return_types(&then.stmts, func_name, declared_ret_ty, types, found);
+                if let Some(other) = otherwise {
+                    check_return_types(&[*(other.clone())], func_name, declared_ret_ty, types, found);
+                }
+            }
+            StmtKind::While { body, .. } | StmtKind::For { body, .. } => {
+                check_return_types(&body.stmts, func_name, declared_ret_ty, types, found);
+            }
+            StmtKind::Block(b) => {
+                check_return_types(&b.stmts, func_name, declared_ret_ty, types, found);
+            }
+            StmtKind::Try { body, handler, .. } => {
+                check_return_types(&body.stmts, func_name, declared_ret_ty, types, found);
+                check_return_types(&handler.stmts, func_name, declared_ret_ty, types, found);
+            }
+            _ => {}
+        }
+    }
 }
 
 fn check_field(field: &FieldDecl, types: &Types, found: &mut Vec<Raised>) {
@@ -624,8 +662,38 @@ fn expression(expr: &Expr, types: &Types, bound: &Bindings, found: &mut Vec<Rais
 
         check_builtin_binary_op(*op, lhs, rhs, expr.span, types, found);
 
+        let ltype = receiver_type(lhs, types);
+        if let Some(lname) = ltype.class_name() {
+            if types.declares_class(lname) {
+                let op_method = match op {
+                    crate::syntax::ast::BinaryOp::Add => Some("add"),
+                    crate::syntax::ast::BinaryOp::Sub => Some("sub"),
+                    crate::syntax::ast::BinaryOp::Mul => Some("mul"),
+                    crate::syntax::ast::BinaryOp::Div => Some("div"),
+                    crate::syntax::ast::BinaryOp::FloorDiv => Some("floor_div"),
+                    crate::syntax::ast::BinaryOp::Rem => Some("rem"),
+                    crate::syntax::ast::BinaryOp::Lt => Some("lt"),
+                    crate::syntax::ast::BinaryOp::Gt => Some("gt"),
+                    crate::syntax::ast::BinaryOp::BitAnd => Some("bit_and"),
+                    crate::syntax::ast::BinaryOp::BitOr => Some("bit_or"),
+                    crate::syntax::ast::BinaryOp::BitXor => Some("bit_xor"),
+                    crate::syntax::ast::BinaryOp::Shl => Some("shl"),
+                    crate::syntax::ast::BinaryOp::Shr => Some("shr"),
+                    _ => None,
+                };
+                if let Some(method_name) = op_method {
+                    if types.method_of(lname, method_name).is_none() {
+                        found.push(refusal(
+                            format!("`{}` is not supported for `{lname}`", binary_op_symbol(*op)),
+                            format!("class `{lname}` does not implement `op {}`", method_name),
+                            expr.span,
+                        ));
+                    }
+                }
+            }
+        }
+
         if matches!(op, crate::syntax::ast::BinaryOp::Add | crate::syntax::ast::BinaryOp::Sub | crate::syntax::ast::BinaryOp::Mul | crate::syntax::ast::BinaryOp::Div | crate::syntax::ast::BinaryOp::FloorDiv | crate::syntax::ast::BinaryOp::Rem) {
-            let ltype = receiver_type(lhs, types);
             let rtype = receiver_type(rhs, types);
             if let Some(lname) = ltype.class_name() {
                 if is_builtin_type(lname) {
