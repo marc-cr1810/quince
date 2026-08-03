@@ -95,6 +95,54 @@ impl Parser {
         Ok(stmts)
     }
 
+    /// Parses a whole program, recovering from syntax errors where possible.
+    pub fn parse_recovering(mut self) -> (Vec<Stmt>, Vec<Raised>) {
+        let mut stmts = Vec::new();
+        let mut errors = Vec::new();
+        while !self.at_end() {
+            match self.statement() {
+                Ok(stmt) => stmts.push(stmt),
+                Err(err) => {
+                    errors.push(err);
+                    self.synchronize();
+                }
+            }
+        }
+        (stmts, errors)
+    }
+
+    fn synchronize(&mut self) {
+        self.advance();
+        while !self.at_end() {
+            if self.pos > 0 && self.tokens[self.pos - 1].kind == TokenKind::Semi {
+                return;
+            }
+            match self.peek().kind {
+                TokenKind::Class
+                | TokenKind::Fn
+                | TokenKind::Let
+                | TokenKind::Final
+                | TokenKind::Const
+                | TokenKind::For
+                | TokenKind::If
+                | TokenKind::While
+                | TokenKind::Return
+                | TokenKind::Import
+                | TokenKind::Try
+                | TokenKind::Alias
+                | TokenKind::Public
+                | TokenKind::Private
+                | TokenKind::Protected
+                | TokenKind::Extend => return,
+                _ => {}
+            }
+            if self.peek().newline_before {
+                return;
+            }
+            self.advance();
+        }
+    }
+
     // -- statements --------------------------------------------------------
     fn statement(&mut self) -> Result<Stmt> {
         match self.peek().kind {

@@ -80,6 +80,7 @@ impl Infer {
                     parent,
                     methods,
                     fields,
+                    openness,
                     ..
                 } => {
                     let info = ClassInfo {
@@ -92,6 +93,7 @@ impl Infer {
                             .iter()
                             .map(|field| (field.name.clone(), field.visibility))
                             .collect(),
+                        openness: *openness,
                         span: stmt.span,
                     };
                     self.classes.insert(name.clone(), info);
@@ -113,10 +115,13 @@ impl Infer {
                             parent: None,
                             methods: HashMap::new(),
                             fields: HashMap::new(),
+                            openness: crate::syntax::ast::Openness::Open,
                             span: stmt.span,
                         });
                     for decl in methods {
-                        info.methods.insert(decl.name.clone(), Rc::clone(decl));
+                        info.methods
+                            .entry(decl.name.clone())
+                            .or_insert_with(|| Rc::clone(decl));
                     }
                 }
                 StmtKind::If { then, otherwise, .. } => {

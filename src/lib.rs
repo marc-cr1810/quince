@@ -44,3 +44,18 @@ pub fn compile_tokens(
     sema::resolve::resolve(&mut program)?;
     Ok(program)
 }
+
+/// Lexes and parses a source file leniently, recovering from errors where possible.
+pub fn compile_recovering(source: &str) -> (Vec<Stmt>, Vec<crate::error::Raised>) {
+    let tokens = match Lexer::new(source).tokenize() {
+        Ok(t) => t,
+        Err(err) => return (Vec::new(), vec![err]),
+    };
+    let (mut stmts, mut errors) = Parser::new(tokens).parse_recovering();
+    if let Err(err) = sema::resolve::resolve(&mut stmts) {
+        errors.push(err);
+    }
+    (stmts, errors)
+}
+
+

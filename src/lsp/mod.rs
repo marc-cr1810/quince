@@ -1,17 +1,9 @@
 //! The language server.
-//!
-//! One file per request the editor makes, because that is how the protocol is
-//! shaped and how the work arrives: v0.7 adds inlay hints (a new file), type
-//! completion after `:` (an arm in [`completion`]), and visibility- and
-//! smart-cast-aware filtering (two more).
-//!
-//! This file is the loop, the document cache, and the dispatch. Everything it
-//! dispatches to reads [`Types`] — the inference pass — rather than the source
-//! text, and [`crate::cursor`] is the one place either surface still touches raw
-//! characters.
 
+pub mod actions;
 pub mod completion;
 pub mod diagnostics;
+pub mod format;
 pub mod hints;
 pub mod hover;
 pub mod navigate;
@@ -26,54 +18,65 @@ use std::collections::HashMap;
 use lsp_server::{Connection, Message, Notification, Request, Response};
 use lsp_types::{
     notification::{Notification as _, PublishDiagnostics},
-    request::{Completion, GotoDefinition, HoverRequest, Request as _, SignatureHelpRequest}, CompletionOptions, CompletionParams, CompletionResponse, DidChangeTextDocumentParams, DidOpenTextDocumentParams,
-    DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams, HoverParams, HoverProviderCapability, OneOf, PublishDiagnosticsParams, SemanticTokenModifier, SemanticTokenType,
-    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
-    SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelpOptions, SignatureHelpParams, TextDocumentSyncCapability, TextDocumentSyncKind, Url,
+    request::{
+        CodeActionRequest, Completion, Formatting, GotoDefinition, HoverRequest,
+        InlayHintRequest, References, Rename, Request as _, SignatureHelpRequest,
+        WorkspaceSymbolRequest,
+    },
+    CodeActionParams, CodeActionProviderCapability, CodeActionResponse, CompletionOptions, CompletionParams, CompletionResponse,
+    DidChangeTextDocumentParams, DidOpenTextDocumentParams, DocumentFormattingParams,
+    DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams, HoverParams,
+    HoverProviderCapability, OneOf, PublishDiagnosticsParams, ReferenceParams, RenameParams,
+    SemanticTokenModifier, SemanticTokenType, SemanticTokensFullOptions, SemanticTokensLegend,
+    SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
+    SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelpOptions, SignatureHelpParams,
+    TextDocumentSyncCapability, TextDocumentSyncKind, Url, WorkspaceSymbolParams,
+
 };
 
-use quince::sema::infer::{Types, self};
+use quince::sema::infer::{self, Types};
 use quince::sema::symbols::{Kind, Symbol};
-use quince::sema::types::{Type};
+use quince::sema::types::Type;
 use quince::syntax::ast::Stmt;
 use crate::cursor::{path_ending_at, trailing_literal_type};
+use crate::lsp::actions::get_code_actions;
 use crate::lsp::completion::get_completions;
 use crate::lsp::diagnostics::publish_diagnostics;
+use crate::lsp::format::format_document;
 use crate::lsp::hints::get_inlay_hints;
 use crate::lsp::hover::{get_hover, get_signature_help};
-use crate::lsp::navigate::{get_definition, get_document_symbols};
+use crate::lsp::navigate::{
+    get_definition, get_document_symbols, get_references, get_workspace_symbols, rename_symbol,
+};
+use crate::lsp::position::position_to_offset;
 use crate::lsp::semantic::get_semantic_tokens;
 
 pub(crate) struct DocumentState {
     text: String,
     ast: Option<Vec<Stmt>>,
-    /// What the inference pass last made of this document.
-    ///
-    /// Held beside the tree rather than computed per request, because every
-    /// request over one document would compute the same thing and the answer
-    /// only changes when the text does.
-    ///
-    /// *Last*, not *current*, and that word is doing the work. Typing the `.`
-    /// in `p.` is what makes a document stop parsing, so the moment the pass is
-    /// most wanted is the moment there is no tree to run it over. Keeping the
-    /// previous answer is what makes it useful at all: the text before the
-    /// cursor is unchanged, so the offsets the lookup cares about still point
-    /// where they did, and a scope that contained the cursor still contains it.
-    /// What goes stale is everything after the edit, which is not what anyone
-    /// is asking about.
     types: Option<Types>,
 }
 
 impl DocumentState {
-    /// Reads a document, keeping what was known about the one it replaces.
     pub(crate) fn new(text: String, previous: Option<DocumentState>) -> DocumentState {
-        let ast = parse_ast_lenient(&text);
-        let types = match &ast {
-            Some(ast) => Some(infer::infer(ast)),
-            None => previous.and_then(|state| state.types),
+        let (stmts, errors) = quince::compile_recovering(&text);
+        let ast = if !stmts.is_empty() { Some(stmts) } else { None };
+        let types = match (&ast, previous) {
+            (Some(ast), Some(prev)) => {
+                let inferred = infer::infer(ast);
+                if !errors.is_empty() && prev.types.is_some() {
+                    prev.types
+                } else {
+                    Some(inferred)
+                }
+            }
+            (Some(ast), None) => Some(infer::infer(ast)),
+            (None, Some(prev)) => prev.types,
+            (None, None) => None,
         };
         DocumentState { text, ast, types }
     }
+
 
     pub(crate) fn text(&self) -> &str {
         &self.text
@@ -87,9 +90,7 @@ impl DocumentState {
         self.types.as_ref()
     }
 
-    /// Everything reachable through a dot on whatever `before` evaluates to.
     pub(crate) fn members_before(&self, before: &str, offset: u32) -> Vec<Symbol> {
-        // A class object gets methods and no fields — see `names_a_class`.
         let on_class_object = path_ending_at(before).is_some_and(|path| {
             self.types
                 .as_ref()
@@ -99,8 +100,6 @@ impl DocumentState {
         match self.type_of(before, offset) {
             Type::Class(class) => match &self.types {
                 Some(types) => {
-                    // Where the cursor is decides what it may reach, so the
-                    // editor stops offering what the language would refuse.
                     let inside = types.class_at(offset);
                     types
                         .members_of(&class.name)
@@ -116,11 +115,6 @@ impl DocumentState {
         }
     }
 
-    /// What the text ending at `before` evaluates to.
-    ///
-    /// A dotted path first, since a name needs the scope it was written in;
-    /// then a literal, which needs only the lexer. Both are answers the
-    /// language gives, and neither is a guess about what a line looks like.
     pub(crate) fn type_of(&self, before: &str, offset: u32) -> Type {
         if let Some(path) = path_ending_at(before)
             && let Some(types) = &self.types
@@ -145,13 +139,12 @@ pub(crate) const LEGEND_TYPES: &[SemanticTokenType] = &[
     SemanticTokenType::KEYWORD,   // 7
 ];
 
-/// Runs the Quince LSP server event loop over stdio.
 pub fn run_lsp_server() -> anyhow::Result<()> {
     let (connection, io_threads) = Connection::stdio();
 
     let server_capabilities = serde_json::to_value(&ServerCapabilities {
         text_document_sync: Some(TextDocumentSyncCapability::Kind(
-            TextDocumentSyncKind::FULL,
+            TextDocumentSyncKind::INCREMENTAL,
         )),
         completion_provider: Some(CompletionOptions {
             resolve_provider: Some(false),
@@ -165,6 +158,12 @@ pub fn run_lsp_server() -> anyhow::Result<()> {
             work_done_progress_options: Default::default(),
         }),
         definition_provider: Some(OneOf::Left(true)),
+        references_provider: Some(OneOf::Left(true)),
+        rename_provider: Some(OneOf::Left(true)),
+        workspace_symbol_provider: Some(OneOf::Left(true)),
+        code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+        document_formatting_provider: Some(OneOf::Left(true)),
+
         inlay_hint_provider: Some(OneOf::Left(true)),
         document_symbol_provider: Some(OneOf::Left(true)),
         semantic_tokens_provider: Some(
@@ -211,17 +210,6 @@ pub fn run_lsp_server() -> anyhow::Result<()> {
     Ok(())
 }
 
-pub(crate) fn parse_ast_lenient(source: &str) -> Option<Vec<Stmt>> {
-    if let Ok(stmts) = quince::compile(source) {
-        return Some(stmts);
-    }
-    if let Ok(tokens) = quince::syntax::lexer::Lexer::new(source).tokenize()
-        && let Ok(stmts) = quince::syntax::parser::Parser::new(tokens).parse()
-    {
-        return Some(stmts);
-    }
-    None
-}
 
 pub(crate) fn handle_request(
     connection: &Connection,
@@ -238,7 +226,7 @@ pub(crate) fn handle_request(
             let resp = Response::new_ok(id, CompletionResponse::Array(items));
             connection.sender.send(Message::Response(resp))?;
         }
-        lsp_types::request::InlayHintRequest::METHOD => {
+        InlayHintRequest::METHOD => {
             let params: lsp_types::InlayHintParams = serde_json::from_value(req.params)?;
             let uri = &params.text_document.uri;
             let hints = get_inlay_hints(documents.get(uri), params.range);
@@ -265,8 +253,44 @@ pub(crate) fn handle_request(
             let params: GotoDefinitionParams = serde_json::from_value(req.params)?;
             let uri = &params.text_document_position_params.text_document.uri;
             let pos = params.text_document_position_params.position;
-            let location = get_definition(uri, documents.get(uri), pos);
+            let location = get_definition(uri, documents.get(uri), documents, pos);
             let resp = Response::new_ok(id, location);
+            connection.sender.send(Message::Response(resp))?;
+        }
+        References::METHOD => {
+            let params: ReferenceParams = serde_json::from_value(req.params)?;
+            let uri = &params.text_document_position.text_document.uri;
+            let pos = params.text_document_position.position;
+            let locations = get_references(uri, documents.get(uri), pos);
+            let resp = Response::new_ok(id, locations);
+            connection.sender.send(Message::Response(resp))?;
+        }
+        Rename::METHOD => {
+            let params: RenameParams = serde_json::from_value(req.params)?;
+            let uri = &params.text_document_position.text_document.uri;
+            let pos = params.text_document_position.position;
+            let edit = rename_symbol(uri, documents.get(uri), pos, &params.new_name);
+            let resp = Response::new_ok(id, edit);
+            connection.sender.send(Message::Response(resp))?;
+        }
+        WorkspaceSymbolRequest::METHOD => {
+            let params: WorkspaceSymbolParams = serde_json::from_value(req.params)?;
+            let symbols = get_workspace_symbols(documents, &params.query);
+            let resp = Response::new_ok(id, symbols);
+            connection.sender.send(Message::Response(resp))?;
+        }
+        CodeActionRequest::METHOD => {
+            let params: CodeActionParams = serde_json::from_value(req.params)?;
+            let uri = &params.text_document.uri;
+            let actions = get_code_actions(documents.get(uri), params);
+            let resp = Response::new_ok(id, CodeActionResponse::from(actions));
+            connection.sender.send(Message::Response(resp))?;
+        }
+        Formatting::METHOD => {
+            let params: DocumentFormattingParams = serde_json::from_value(req.params)?;
+            let uri = &params.text_document.uri;
+            let edits = format_document(documents.get(uri), params);
+            let resp = Response::new_ok(id, edits);
             connection.sender.send(Message::Response(resp))?;
         }
         lsp_types::request::DocumentSymbolRequest::METHOD => {
@@ -308,12 +332,26 @@ pub(crate) fn handle_notification(
         "textDocument/didChange" => {
             let params: DidChangeTextDocumentParams = serde_json::from_value(notif.params)?;
             let uri = params.text_document.uri;
-            if let Some(change) = params.content_changes.into_iter().last() {
-                let previous = documents.remove(&uri);
-                let state = DocumentState::new(change.text.clone(), previous);
-                documents.insert(uri.clone(), state);
-                publish_diagnostics(connection, uri, &change.text)?;
+
+            let current_text = documents.get(&uri).map(|d| d.text.clone()).unwrap_or_default();
+            let mut updated_text = current_text;
+
+            for change in params.content_changes {
+                if let Some(range) = change.range {
+                    let start_offset = position_to_offset(&updated_text, range.start) as usize;
+                    let end_offset = position_to_offset(&updated_text, range.end) as usize;
+                    if start_offset <= end_offset && end_offset <= updated_text.len() {
+                        updated_text.replace_range(start_offset..end_offset, &change.text);
+                    }
+                } else {
+                    updated_text = change.text;
+                }
             }
+
+            let previous = documents.remove(&uri);
+            let state = DocumentState::new(updated_text.clone(), previous);
+            documents.insert(uri.clone(), state);
+            publish_diagnostics(connection, uri, &updated_text)?;
         }
         "textDocument/didClose" => {
             let params: lsp_types::DidCloseTextDocumentParams = serde_json::from_value(notif.params)?;

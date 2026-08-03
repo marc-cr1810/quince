@@ -31,22 +31,18 @@ use crate::lsp::position::span_to_range;
 pub(crate) fn publish_diagnostics(connection: &Connection, uri: Url, source: &str) -> anyhow::Result<()> {
     let mut diagnostics = Vec::new();
 
-    match quince::compile(source) {
-        // A program that will not run at all. One diagnostic, because the
-        // parser stops at the first thing it cannot read and everything after
-        // it would be a guess.
-        Err(err) => diagnostics.push(quince_error_to_diagnostic(source, &err)),
-        // A program that compiles, and what the pass can see will go wrong when
-        // it runs. `quince_error_to_diagnostic` already marks these as errors,
-        // which is what they are.
-        Ok(program) => {
-            let types = quince::sema::infer::infer(&program);
-            diagnostics.extend(
-                quince::sema::check::check(&program, &types)
-                    .iter()
-                    .map(|err| quince_error_to_diagnostic(source, err)),
-            );
-        }
+    let (program, errors) = quince::compile_recovering(source);
+    for err in &errors {
+        diagnostics.push(quince_error_to_diagnostic(source, err));
+    }
+
+    if !program.is_empty() {
+        let types = quince::sema::infer::infer(&program);
+        diagnostics.extend(
+            quince::sema::check::check(&program, &types)
+                .iter()
+                .map(|err| quince_error_to_diagnostic(source, err)),
+        );
     }
 
     let params = PublishDiagnosticsParams {
@@ -54,6 +50,7 @@ pub(crate) fn publish_diagnostics(connection: &Connection, uri: Url, source: &st
         diagnostics,
         version: None,
     };
+
 
     let notif = Notification {
         method: PublishDiagnostics::METHOD.to_string(),

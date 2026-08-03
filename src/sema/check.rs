@@ -44,7 +44,7 @@
 
 use crate::error::{ErrorKind, QuinceError, Raised};
 use crate::sema::infer::Types;
-use crate::sema::types::{Type, stated};
+use crate::sema::types::{Type, builtin_ancestor, stated};
 use crate::runtime::value::Native;
 use crate::sema::types::builtin_method;
 use crate::syntax::ast::{
@@ -128,18 +128,140 @@ fn stmts(stmts: &[Stmt], types: &Types, bound: &mut Bindings, found: &mut Vec<Ra
     }
 }
 
+fn is_builtin_type(name: &str) -> bool {
+    crate::runtime::class::BUILTINS
+        .iter()
+        .any(|b| b.name() == name)
+}
+
+fn is_unhashable_type(ty: &TypeExpr, types: &Types) -> bool {
+    let TypeName::Named(name) = &ty.name else { return false; };
+    match name.as_str() {
+        "list" | "dict" => true,
+        "int" | "float" | "string" | "bool" | "nil" | "any" => false,
+        user_class => {
+            if let Some(info) = types.classes.get(user_class) {
+                !info.methods.contains_key("eq") && !info.methods.contains_key("hash")
+            } else {
+                !is_builtin_type(user_class)
+            }
+        }
+    }
+}
+
+fn is_unhashable_expr(expr: &Expr, types: &Types) -> bool {
+    match &expr.kind {
+        ExprKind::List(_) | ExprKind::Dict(_) => true,
+        _ => {
+            let ty = types.of_expr(expr.span.start);
+            if let Some(name) = ty.class_name() {
+                matches!(name, "list" | "dict")
+            } else {
+                false
+            }
+        }
+    }
+}
+
+fn root_var(expr: &Expr) -> Option<&crate::syntax::ast::Var> {
+    match &expr.kind {
+        ExprKind::Var(v) => Some(v),
+        ExprKind::Index { target, .. } | ExprKind::Field { target, .. } => root_var(target),
+        _ => None,
+    }
+}
+
+fn has_return_value(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(|s| match &s.kind {
+        StmtKind::Return(Some(_)) => true,
+        StmtKind::If { then, otherwise, .. } => {
+            has_return_value(&then.stmts)
+                || otherwise.as_ref().map_or(false, |o| match &o.kind {
+                    StmtKind::Expr(_) => false,
+                    _ => has_return_value(&[*(o.clone())]),
+                })
+        }
+        StmtKind::While { body, .. } | StmtKind::For { body, .. } => has_return_value(&body.stmts),
+        StmtKind::Block(b) => has_return_value(&b.stmts),
+        StmtKind::Try { body, handler, .. } => {
+            has_return_value(&body.stmts) || has_return_value(&handler.stmts)
+        }
+        _ => false,
+    })
+}
+
+fn check_type_expr(ty: &TypeExpr, types: &Types, found: &mut Vec<Raised>) {
+    for arg in &ty.args {
+        check_type_expr(arg, types, found);
+    }
+    let TypeName::Named(name) = &ty.name else {
+        return;
+    };
+    let is_builtin = is_builtin_type(name) || matches!(name.as_str(), "function" | "any" | "nil" | "_");
+    if !is_builtin && !types.declares_class(name) {
+        found.push(refusal(
+            format!("unknown type `{name}`"),
+            format!("no type or class by the name `{name}` exists in scope — check spelling or declare the class"),
+            ty.span,
+        ));
+    }
+    match name.as_str() {
+        "int" | "float" | "string" | "bool" | "nil" | "any" | "function" => {
+            if !ty.args.is_empty() {
+                found.push(refusal(
+                    format!("`{name}` takes no type arguments, got {}", ty.args.len()),
+                    format!("`{name}` is not a generic type"),
+                    ty.span,
+                ));
+            }
+        }
+        _ => {}
+    }
+}
+
 fn one(stmt: &Stmt, types: &Types, bound: &mut Bindings, found: &mut Vec<Raised>) {
     match &stmt.kind {
         StmtKind::Let {
             name, value, ty, bind, ..
         } => {
             if let Some(ty) = ty {
+                check_type_expr(ty, types, found);
                 against(ty, value, &format!("`{name}`"), types, found);
             }
             expression(value, types, bound, found);
             bound.declare(name, *bind, ty.clone());
         }
-        StmtKind::Class { methods, fields, .. } => {
+        StmtKind::Class { name, parent, parent_span, fields, methods, .. } => {
+            if let Some(parent) = parent {
+                let pspan = parent_span.unwrap_or(stmt.span);
+                if parent.name == *name {
+                    found.push(refusal(
+                        format!("class `{name}` cannot inherit from itself"),
+                        "a class cannot extend itself".to_string(),
+                        pspan,
+                    ));
+                } else if parent.name == "function" {
+                    found.push(refusal(
+                        "cannot inherit from builtin type `function`".to_string(),
+                        "`function` is not a class and cannot be extended".to_string(),
+                        pspan,
+                    ));
+                } else if let Some(info) = types.classes.get(&parent.name) {
+                    if info.openness.closes_inheritance() {
+                        found.push(refusal(
+                            format!("cannot inherit from final class `{}`", parent.name),
+                            format!("`{}` was declared as final or sealed and cannot be inherited from", parent.name),
+                            pspan,
+                        ));
+                    }
+                } else if bound.kind(&parent.name).is_some() {
+                    found.push(refusal(
+                        format!("cannot inherit from variable `{}`", parent.name),
+                        "a superclass must be a class name".to_string(),
+                        pspan,
+                    ));
+                }
+            }
             for field in fields {
                 check_field(field, types, found);
             }
@@ -148,7 +270,67 @@ fn one(stmt: &Stmt, types: &Types, bound: &mut Bindings, found: &mut Vec<Raised>
             }
         }
         StmtKind::Fn { decl, .. } => body(decl, types, bound, found),
-        StmtKind::Extend { methods, .. } => {
+        StmtKind::Import { module, names, .. } => {
+            if let crate::syntax::ast::ImportNames::Names(names) = names {
+                if let Some(std_mod) = crate::builtins::stdlib::module_named(module) {
+                    for name in names {
+                        if !std_mod.members.iter().any(|(m, _)| *m == name.name) {
+                            found.push(refusal(
+                                format!("module `{module}` has no member `{}`", name.name),
+                                format!("module `{module}` exports: {}", std_mod.members.iter().map(|(m,_)| *m).collect::<Vec<_>>().join(", ")),
+                                name.span,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        StmtKind::Extend { target, target_span, methods, .. } => {
+            let is_known = is_builtin_type(&target.name) || types.declares_class(&target.name);
+            if !is_known {
+                found.push(refusal(
+                    format!("`{}` is not a class or type", target.name),
+                    "`extend` requires a class or builtin type name".to_string(),
+                    *target_span,
+                ));
+            } else {
+                if let Some(info) = types.classes.get(&target.name) {
+                    if info.openness.closes_extension() {
+                        found.push(refusal(
+                            format!("cannot extend complete class `{}`", target.name),
+                            format!("`{}` was declared as complete or sealed and cannot be extended", target.name),
+                            *target_span,
+                        ));
+                    }
+                }
+
+                let builtin_opt = crate::runtime::class::BUILTINS.iter().find(|b| b.name() == target.name);
+
+                for method in methods {
+                    let is_shadowing_user = types.classes.get(&target.name)
+                        .and_then(|info| info.methods.get(&method.name))
+                        .is_some_and(|existing| existing.name_span != method.name_span);
+                    let is_shadowing_builtin = builtin_ancestor(&types.classes, &target.name, &method.name).is_some()
+                        || (is_builtin_type(&target.name) && builtin_method(&target.name, &method.name).is_some());
+
+                    if let Some(op) = method.op {
+                        let natively_supported = builtin_opt.is_some_and(|b| b.natively_supports_op(op));
+                        if natively_supported || is_shadowing_user || is_shadowing_builtin {
+                            found.push(refusal(
+                                format!("`{}` natively supports `op {}` and cannot be overridden by an extension", target.name, op.name()),
+                                "an extension may only add ops that the type does not already natively support".to_string(),
+                                method.name_span,
+                            ));
+                        }
+                    } else if is_shadowing_user || is_shadowing_builtin {
+                        found.push(refusal(
+                            format!("`{}` is already a method of `{}`", method.name, target.name),
+                            "an extension adds methods to a type and cannot override existing ones".to_string(),
+                            method.name_span,
+                        ));
+                    }
+                }
+            }
             for decl in methods {
                 body(decl, types, bound, found);
             }
@@ -173,13 +355,32 @@ fn one(stmt: &Stmt, types: &Types, bound: &mut Bindings, found: &mut Vec<Raised>
             block(handler, types, bound, found);
         }
         StmtKind::Block(inner) => block(inner, types, bound, found),
-        StmtKind::Expr(expr) | StmtKind::Throw(expr) => expression(expr, types, bound, found),
+        StmtKind::Throw(expr) => {
+            expression(expr, types, bound, found);
+            let held = receiver_type(expr, types);
+            if let Some(cname) = held.class_name() {
+                if matches!(cname, "int" | "float" | "string" | "bool" | "nil" | "list" | "dict" | "function") {
+                    found.push(refusal(
+                        format!("cannot throw {}", an(cname)),
+                        "only instances of `Error` or its subclasses may be thrown".to_string(),
+                        expr.span,
+                    ));
+                } else if types.declares_class(cname) && !descends_from(types, cname, "Error") {
+                    found.push(refusal(
+                        format!("cannot throw instance of `{cname}`"),
+                        format!("`{cname}` does not inherit from `Error`"),
+                        expr.span,
+                    ));
+                }
+            }
+        }
+        StmtKind::Expr(expr) => expression(expr, types, bound, found),
         StmtKind::Return(value) => {
             if let Some(value) = value {
                 expression(value, types, bound, found);
             }
         }
-        StmtKind::Alias { .. } | StmtKind::Import { .. } => {}
+        StmtKind::Alias { .. } => {}
     }
 }
 
@@ -191,10 +392,124 @@ fn block(block: &Block, types: &Types, bound: &mut Bindings, found: &mut Vec<Rai
 
 /// A function body, with its parameters bound to the words they were declared
 /// with — so `fn f(const n) { n = 2 }` is caught where `const n = 1; n = 2` is.
+fn check_op_returns(decl: &crate::syntax::ast::FnDecl, types: &Types, found: &mut Vec<Raised>) {
+    let Some(op) = decl.op else { return };
+    let (required_type, op_name) = match op {
+        crate::syntax::ast::Op::Str => ("string", "string"),
+        crate::syntax::ast::Op::Len => ("int", "len"),
+        crate::syntax::ast::Op::Int => ("int", "int"),
+        crate::syntax::ast::Op::Float => ("float", "float"),
+        crate::syntax::ast::Op::Bool => ("bool", "bool"),
+        crate::syntax::ast::Op::List => ("list", "list"),
+        crate::syntax::ast::Op::Dict => ("dict", "dict"),
+        crate::syntax::ast::Op::Iter => ("list", "iter"),
+        crate::syntax::ast::Op::Eq => ("bool", "eq"),
+        crate::syntax::ast::Op::Cmp => ("int", "cmp"),
+        _ => return,
+    };
+
+    if let Some(ret) = &decl.returns {
+        if let TypeName::Named(name) = &ret.name {
+            if name != required_type {
+                found.push(refusal(
+                    format!("`op {op_name}` must return {}", an(required_type)),
+                    format!("declared return type is `{name}`"),
+                    ret.span,
+                ));
+            }
+        }
+    }
+
+    check_op_body_returns(&decl.body.stmts, op_name, required_type, types, found);
+}
+
+fn check_op_body_returns(stmts: &[Stmt], op_name: &str, required_type: &str, types: &Types, found: &mut Vec<Raised>) {
+    for stmt in stmts {
+        match &stmt.kind {
+            StmtKind::Return(Some(expr)) => {
+                let held = receiver_type(expr, types);
+                let actual_type = match &expr.kind {
+                    ExprKind::Int(_) => Some("int"),
+                    ExprKind::Float(_) => Some("float"),
+                    ExprKind::Str(_) => Some("string"),
+                    ExprKind::Bool(_) => Some("bool"),
+                    ExprKind::List(_) => Some("list"),
+                    ExprKind::Dict(_) => Some("dict"),
+                    ExprKind::Nil => Some("nil"),
+                    _ => held.class_name(),
+                };
+                if let Some(actual) = actual_type {
+                    if actual != required_type && actual != "any" && actual != "unknown" {
+                        found.push(refusal(
+                            format!("`op {op_name}` must return {}", an(required_type)),
+                            format!("`op {op_name}` returns {}, but {} is required", an(actual), an(required_type)),
+                            expr.span,
+                        ));
+                    }
+                }
+            }
+            StmtKind::If { then, otherwise, .. } => {
+                check_op_body_returns(&then.stmts, op_name, required_type, types, found);
+                if let Some(other) = otherwise {
+                    check_op_body_returns(&[*(other.clone())], op_name, required_type, types, found);
+                }
+            }
+            StmtKind::While { body, .. } | StmtKind::For { body, .. } => {
+                check_op_body_returns(&body.stmts, op_name, required_type, types, found);
+            }
+            StmtKind::Block(b) => {
+                check_op_body_returns(&b.stmts, op_name, required_type, types, found);
+            }
+            StmtKind::Try { body, handler, .. } => {
+                check_op_body_returns(&body.stmts, op_name, required_type, types, found);
+                check_op_body_returns(&handler.stmts, op_name, required_type, types, found);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn binary_op_symbol(op: crate::syntax::ast::BinaryOp) -> &'static str {
+    match op {
+        crate::syntax::ast::BinaryOp::Add => "+",
+        crate::syntax::ast::BinaryOp::Sub => "-",
+        crate::syntax::ast::BinaryOp::Mul => "*",
+        crate::syntax::ast::BinaryOp::Div => "/",
+        crate::syntax::ast::BinaryOp::FloorDiv => "//",
+        crate::syntax::ast::BinaryOp::Rem => "%",
+        crate::syntax::ast::BinaryOp::Eq => "==",
+        crate::syntax::ast::BinaryOp::Ne => "!=",
+        crate::syntax::ast::BinaryOp::Lt => "<",
+        crate::syntax::ast::BinaryOp::Le => "<=",
+        crate::syntax::ast::BinaryOp::Gt => ">",
+        crate::syntax::ast::BinaryOp::Ge => ">=",
+        crate::syntax::ast::BinaryOp::In => "in",
+        crate::syntax::ast::BinaryOp::BitAnd => "&",
+        crate::syntax::ast::BinaryOp::BitOr => "|",
+        crate::syntax::ast::BinaryOp::BitXor => "^",
+        crate::syntax::ast::BinaryOp::Shl => "<<",
+        crate::syntax::ast::BinaryOp::Shr => ">>",
+    }
+}
+
 fn body(decl: &std::rc::Rc<crate::syntax::ast::FnDecl>, types: &Types, bound: &mut Bindings, found: &mut Vec<Raised>) {
+    check_op_returns(decl, types, found);
     bound.push();
     for param in &decl.params {
+        if let Some(ty) = &param.ty {
+            check_type_expr(ty, types, found);
+        }
         bound.declare(&param.name, param.bind, param.ty.clone());
+    }
+    if let Some(ty) = &decl.returns {
+        check_type_expr(ty, types, found);
+        if !ty.nullable && !has_return_value(&decl.body.stmts) {
+            found.push(refusal(
+                format!("function `{}` declares return type `{}` but might return without a value", decl.name, ty.written()),
+                format!("return a value of type `{}` or declare the return type as `{}?`", ty.written(), ty.written()),
+                decl.name_span,
+            ));
+        }
     }
     stmts(&decl.body.stmts, types, bound, found);
     bound.pop();
@@ -204,23 +519,179 @@ fn check_field(field: &FieldDecl, types: &Types, found: &mut Vec<Raised>) {
     let Some(ty) = &field.ty else {
         return;
     };
+    check_type_expr(ty, types, found);
     against(ty, &field.value, &format!("`{}`", field.name), types, found);
 }
 
-/// Walks an expression for the mistakes decidable inside one.
-///
-/// Only the containers, and only their mutations. A `list[int]` that the pass
-/// can name has an element type, so `xs.push("a")` is as visible as
-/// `let xs: list[int] = ["a"]` was — and it is the form people actually write,
-/// since a list is usually built empty and filled.
-///
-/// What is *not* here is the rest of what a call could be checked for: an
-/// argument against a parameter's annotation, a native's declared types. Those
-/// need the pass to keep declarations it currently discards for a plain `fn`,
-/// which is a change to what it records rather than to what this asks.
 fn expression(expr: &Expr, types: &Types, bound: &Bindings, found: &mut Vec<Raised>) {
     for child in parts(expr) {
         expression(child, types, bound, found);
+    }
+
+    if let ExprKind::Binary { op, lhs, rhs } = &expr.kind {
+        if matches!(op, crate::syntax::ast::BinaryOp::Lt | crate::syntax::ast::BinaryOp::Le | crate::syntax::ast::BinaryOp::Gt | crate::syntax::ast::BinaryOp::Ge) {
+            let lhs_type = receiver_type(lhs, types);
+            let rhs_type = receiver_type(rhs, types);
+
+            if let Some(cname) = lhs_type.class_name() {
+                if types.declares_class(cname) {
+                    let has_cmp = types.method_of(cname, "cmp").is_some();
+                    let has_lt = types.method_of(cname, "lt").is_some();
+                    let has_gt = types.method_of(cname, "gt").is_some();
+
+                    if matches!(op, crate::syntax::ast::BinaryOp::Le | crate::syntax::ast::BinaryOp::Ge) && !has_cmp && (has_lt || has_gt) {
+                        found.push(refusal(
+                            format!("`{}` is not supported on `{cname}`", binary_op_symbol(*op)),
+                            "`<=` and `>=` require `op cmp` because deriving them from `op lt` would assume the order is total".to_string(),
+                            expr.span,
+                        ));
+                    }
+                }
+            }
+
+            if let Some(lname) = lhs_type.class_name() {
+                if is_builtin_type(lname) {
+                    if let Some(rcname) = rhs_type.class_name() {
+                        if types.declares_class(rcname) {
+                            let has_cmp = types.method_of(rcname, "cmp").is_some();
+                            let has_lt = types.method_of(rcname, "lt").is_some();
+                            let has_gt = types.method_of(rcname, "gt").is_some();
+                            if !has_cmp && (has_lt || has_gt) {
+                                found.push(refusal(
+                                    format!("`{}` is not supported between {} and `{rcname}`", binary_op_symbol(*op), an(lname)),
+                                    "reflecting a comparison on the right operand requires `op cmp` — `op lt` cannot be read backwards".to_string(),
+                                    expr.span,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if let ExprKind::Binary { op, lhs, rhs } = &expr.kind {
+        if matches!(op, crate::syntax::ast::BinaryOp::Div | crate::syntax::ast::BinaryOp::FloorDiv | crate::syntax::ast::BinaryOp::Rem) {
+            let is_zero = match &rhs.kind {
+                ExprKind::Int(0) => true,
+                ExprKind::Float(f) if *f == 0.0 => true,
+                _ => false,
+            };
+            if is_zero {
+                found.push(refusal(
+                    "division by zero".to_string(),
+                    "cannot divide by zero".to_string(),
+                    rhs.span,
+                ));
+            }
+        }
+
+        if matches!(op, crate::syntax::ast::BinaryOp::BitAnd | crate::syntax::ast::BinaryOp::BitOr | crate::syntax::ast::BinaryOp::BitXor | crate::syntax::ast::BinaryOp::Shl | crate::syntax::ast::BinaryOp::Shr) {
+            let ltype = receiver_type(lhs, types);
+            let rtype = receiver_type(rhs, types);
+            let method_name = match op {
+                crate::syntax::ast::BinaryOp::BitAnd => "bit_and",
+                crate::syntax::ast::BinaryOp::BitOr => "bit_or",
+                crate::syntax::ast::BinaryOp::BitXor => "bit_xor",
+                crate::syntax::ast::BinaryOp::Shl => "shl",
+                crate::syntax::ast::BinaryOp::Shr => "shr",
+                _ => unreachable!(),
+            };
+            let l_has_op = ltype.class_name().is_some_and(|c| types.method_of(c, method_name).is_some());
+            let r_has_op = rtype.class_name().is_some_and(|c| types.method_of(c, method_name).is_some());
+
+            if !l_has_op && !r_has_op {
+                if ltype.class_name() == Some("float") || rtype.class_name() == Some("float") {
+                    found.push(refusal(
+                        "bitwise operators are not supported on float".to_string(),
+                        "bitwise operators require integer operands".to_string(),
+                        expr.span,
+                    ));
+                }
+            }
+            if matches!(op, crate::syntax::ast::BinaryOp::Shl | crate::syntax::ast::BinaryOp::Shr) {
+                if let ExprKind::Int(n) = &rhs.kind {
+                    if *n < 0 || *n >= 64 {
+                        found.push(refusal(
+                            "shift count out of range (0..64)".to_string(),
+                            "shift count must be between 0 and 63 inclusive".to_string(),
+                            rhs.span,
+                        ));
+                    }
+                }
+            }
+        }
+
+        check_builtin_binary_op(*op, lhs, rhs, expr.span, types, found);
+
+        if matches!(op, crate::syntax::ast::BinaryOp::Add | crate::syntax::ast::BinaryOp::Sub | crate::syntax::ast::BinaryOp::Mul | crate::syntax::ast::BinaryOp::Div | crate::syntax::ast::BinaryOp::FloorDiv | crate::syntax::ast::BinaryOp::Rem) {
+            let ltype = receiver_type(lhs, types);
+            let rtype = receiver_type(rhs, types);
+            if let Some(lname) = ltype.class_name() {
+                if is_builtin_type(lname) {
+                    if let Some(rcname) = rtype.class_name() {
+                        if types.declares_class(rcname) {
+                            found.push(refusal(
+                                format!("`{}` is not supported between {} and `{rcname}`", binary_op_symbol(*op), an(lname)),
+                                "binary arithmetic asks the left operand only — a class on the right cannot answer".to_string(),
+                                expr.span,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if let ExprKind::Unary { op: crate::syntax::ast::UnaryOp::BitNot, rhs } = &expr.kind {
+        let rtype = receiver_type(rhs, types);
+        if let Some(cname) = rtype.class_name() {
+            if cname == "float" && types.method_of(cname, "bit_not").is_none() {
+                found.push(refusal(
+                    "bitwise operators are not supported on float".to_string(),
+                    "bitwise NOT requires integer operand".to_string(),
+                    expr.span,
+                ));
+            }
+        }
+    }
+
+    if let ExprKind::Slice { target, .. } = &expr.kind {
+        let held = receiver_type(target, types);
+        if let Some(cname) = held.class_name() {
+            if matches!(cname, "int" | "float" | "bool" | "nil") {
+                found.push(refusal(
+                    format!("cannot slice {}", an(cname)),
+                    "slicing is only supported on sequences like string and list".to_string(),
+                    expr.span,
+                ));
+            }
+        }
+    }
+
+    if let ExprKind::Binary { op: crate::syntax::ast::BinaryOp::In, rhs, .. } = &expr.kind {
+        let rhs_type = receiver_type(rhs, types);
+        if let Some(name) = rhs_type.class_name() {
+            if matches!(name, "int" | "float" | "bool" | "nil") {
+                found.push(refusal(
+                    format!("`in` is not supported on {}", an(name)),
+                    "`in` operator requires a container (such as list, dict, string) or a type implementing `op contains`".to_string(),
+                    expr.span,
+                ));
+            }
+        }
+    }
+
+    if let ExprKind::Dict(pairs) = &expr.kind {
+        for (k, _) in pairs {
+            if is_unhashable_expr(k, types) {
+                found.push(refusal(
+                    "unhashable key in dict literal".to_string(),
+                    "dict keys must be hashable immutable values (such as string, int, float, or bool)".to_string(),
+                    k.span,
+                ));
+            }
+        }
     }
 
     // Writing to a name bound once. The resolver refuses this for a local and
@@ -250,30 +721,74 @@ fn expression(expr: &Expr, types: &Types, bound: &Bindings, found: &mut Vec<Rais
         ));
     }
 
+    if let ExprKind::Is { ty, .. } = &expr.kind {
+        check_type_expr(ty, types, found);
+    }
+
+    if let ExprKind::Assign { target, .. } = &expr.kind
+        && let ExprKind::Field { target: receiver, .. } = &target.kind
+        && let ExprKind::Var(var) = &receiver.kind
+        && bound.kind(&var.name).is_some_and(|bind| bind.freezes())
+    {
+        found.push(refusal(
+            format!("cannot modify field of `{}`", var.name),
+            format!(
+                "`{}` is bound with `const`, which freezes the value deeply — declare it with `let` or `final` to allow modifying its fields",
+                var.name
+            ),
+            target.span,
+        ));
+    }
+
     // Reaching a member the declaration put out of reach. `may_offer` is the
     // same rule the completion list follows, so what the editor offers and what
     // it squiggles cannot disagree.
     if let ExprKind::Field { target, name, .. } = &expr.kind {
         visibility(target, name, expr.span, types, found);
+        let held = receiver_type(target, types);
+        if let Some(cname) = held.class_name() {
+            if is_builtin_type(cname) && builtin_method(cname, name).is_none() {
+                found.push(refusal(
+                    format!("`{cname}` has no method `{name}`"),
+                    format!("type `{cname}` does not define method `{name}`"),
+                    expr.span,
+                ));
+            }
+        }
     }
 
     let ExprKind::Call { callee, args } = &expr.kind else {
         // `xs[i] = v` is the other way into a typed container.
         if let ExprKind::Assign { target, value } = &expr.kind
-            && let ExprKind::Index { target: collection, .. } = &target.kind
+            && let ExprKind::Index { target: collection, index } = &target.kind
         {
             let held = receiver_type(collection, types);
             check_element(&held, "list", 0, value, "the item", types, found);
+            check_element(&held, "dict", 0, index, "the key", types, found);
             check_element(&held, "dict", 1, value, "the value", types, found);
         }
         return;
     };
     // A call to a `fn` the program declared, against the parameters it named.
     if let ExprKind::Var(var) = &callee.kind {
-        if let Some(decl) = types.function(&var.name) {
-            arguments(&decl.params, args, types, found);
+        if var.name == "function" {
+            found.push(refusal(
+                "builtin type `function` cannot be instantiated".to_string(),
+                "there is no value a function can be constructed from".to_string(),
+                expr.span,
+            ));
+        } else if let Some(decl) = types.function(&var.name) {
+            arguments(&decl.params, args, expr.span, types, found);
         } else if let Some(native) = types.native(&var.name) {
-            native_arguments(native, args, types, found);
+            native_arguments(native, args, expr.span, types, found);
+        } else if let Some(cname) = receiver_type(callee, types).class_name() {
+            if matches!(cname, "int" | "float" | "bool" | "nil") {
+                found.push(refusal(
+                    format!("{} is not callable", an(cname)),
+                    "only functions, methods, and classes can be called".to_string(),
+                    callee.span,
+                ));
+            }
         }
     }
 
@@ -286,9 +801,9 @@ fn expression(expr: &Expr, types: &Types, bound: &Bindings, found: &mut Vec<Rais
     if let Some(class) = receiver.class_name() {
         if let Some(decl) = types.method_of(class, name) {
             // The receiver is `params[0]` and nobody writes it.
-            arguments(decl.params.get(1..).unwrap_or(&[]), args, types, found);
+            arguments(decl.params.get(1..).unwrap_or(&[]), args, expr.span, types, found);
         } else if let Some(native) = builtin_method(class, name) {
-            native_arguments(native, args, types, found);
+            native_arguments(native, args, expr.span, types, found);
         }
     }
 
@@ -296,7 +811,7 @@ fn expression(expr: &Expr, types: &Types, bound: &Bindings, found: &mut Vec<Rais
     // it binds the name once and leaves the object alone, so a `final` list
     // still grows.
     if MUTATORS.contains(&name.as_str())
-        && let ExprKind::Var(var) = &target.kind
+        && let Some(var) = root_var(target)
         && bound.kind(&var.name).is_some_and(|bind| bind.freezes())
     {
         found.push(refusal(
@@ -319,11 +834,13 @@ fn expression(expr: &Expr, types: &Types, bound: &Bindings, found: &mut Vec<Rais
 }
 
 /// Refuses each argument the declaration has an annotation for.
-fn arguments(params: &[Param], args: &[Expr], types: &Types, found: &mut Vec<Raised>) {
-    // A mismatched count is an arity error, reported when the call runs. Saying
-    // something about the arguments of a call that cannot happen would be two
-    // complaints about one mistake.
+fn arguments(params: &[Param], args: &[Expr], span: crate::syntax::token::Span, types: &Types, found: &mut Vec<Raised>) {
     if params.len() != args.len() {
+        found.push(refusal(
+            format!("expected {} arguments, got {}", params.len(), args.len()),
+            format!("function declared with {} parameters", params.len()),
+            span,
+        ));
         return;
     }
     for (param, arg) in params.iter().zip(args) {
@@ -334,8 +851,13 @@ fn arguments(params: &[Param], args: &[Expr], types: &Types, found: &mut Vec<Rai
 }
 
 /// The same for a builtin, whose parameters name a *set* of types.
-fn native_arguments(native: &Native, args: &[Expr], types: &Types, found: &mut Vec<Raised>) {
+fn native_arguments(native: &Native, args: &[Expr], span: crate::syntax::token::Span, types: &Types, found: &mut Vec<Raised>) {
     if native.params.len() != args.len() {
+        found.push(refusal(
+            format!("`{}` expected {} arguments, got {}", native.name, native.params.len(), args.len()),
+            format!("`{}` takes {} arguments", native.name, native.params.len()),
+            span,
+        ));
         return;
     }
     for (param, arg) in native.params.iter().zip(args) {
@@ -409,6 +931,14 @@ fn receiver_type(expr: &Expr, types: &Types) -> Type {
         ExprKind::Bool(_) => Type::class("bool"),
         ExprKind::List(_) => Type::class("list"),
         ExprKind::Dict(_) => Type::class("dict"),
+        ExprKind::Call { callee, .. } => {
+            if let ExprKind::Var(var) = &callee.kind {
+                if types.declares_class(&var.name) || is_builtin_type(&var.name) {
+                    return Type::class(&var.name);
+                }
+            }
+            types.of_expr(expr.span.start)
+        }
         _ => types.of_expr(expr.span.start),
     }
 }
@@ -710,6 +1240,61 @@ fn an(name: &str) -> String {
     match name.starts_with(['a', 'e', 'i', 'o', 'u']) {
         true => format!("an {name}"),
         false => format!("a {name}"),
+    }
+}
+
+fn is_numeric_type(cname: &str) -> bool {
+    matches!(cname, "int" | "float")
+}
+
+fn check_builtin_binary_op(
+    op: crate::syntax::ast::BinaryOp,
+    lhs: &Expr,
+    rhs: &Expr,
+    span: crate::syntax::token::Span,
+    types: &Types,
+    found: &mut Vec<Raised>,
+) {
+    use crate::syntax::ast::BinaryOp::*;
+    let ltype = receiver_type(lhs, types);
+    let rtype = receiver_type(rhs, types);
+
+    let (Some(lname), Some(rname)) = (ltype.class_name(), rtype.class_name()) else { return };
+    if !is_builtin_type(lname) || !is_builtin_type(rname) {
+        return;
+    }
+
+    let op_method = match op {
+        Add => "add",
+        Sub => "sub",
+        Mul => "mul",
+        Div => "div",
+        FloorDiv => "floor_div",
+        Rem => "rem",
+        Lt => "lt",
+        Le => "le",
+        Gt => "gt",
+        Ge => "ge",
+        _ => return,
+    };
+
+    if types.method_of(lname, op_method).is_some() || types.method_of(rname, op_method).is_some() {
+        return;
+    }
+
+    let is_valid = match op {
+        Add => (is_numeric_type(lname) && is_numeric_type(rname)) || (lname == "string" && rname == "string") || (lname == "list" && rname == "list"),
+        Sub | Mul | Div | FloorDiv | Rem => is_numeric_type(lname) && is_numeric_type(rname),
+        Lt | Le | Gt | Ge => (is_numeric_type(lname) && is_numeric_type(rname)) || (lname == "string" && rname == "string"),
+        _ => true,
+    };
+
+    if !is_valid {
+        found.push(refusal(
+            format!("`{}` is not supported between {} and {}", binary_op_symbol(op), an(lname), an(rname)),
+            format!("type `{lname}` and type `{rname}` cannot be combined with `{}`", binary_op_symbol(op)),
+            span,
+        ));
     }
 }
 

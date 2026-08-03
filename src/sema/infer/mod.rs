@@ -64,6 +64,7 @@ pub(crate) struct ClassInfo {
     /// found by [`Pass::fields_of`] walking the methods, and carries no
     /// visibility because nothing wrote one.
     pub(crate) fields: HashMap<String, Visibility>,
+    pub(crate) openness: crate::syntax::ast::Openness,
     /// The whole declaration, so an editor can ask which class an offset is
     /// inside of — which is what a visibility-aware completion needs and no
     /// other question here does.

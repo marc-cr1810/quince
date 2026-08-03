@@ -563,9 +563,6 @@ fn what_the_pass_cannot_decide_it_does_not_report() {
         "fn f(n) {\n    let x: int = n\n}\n",
         // A subclass holds as its parent.
         "class A {\n    op init() { }\n}\nclass B extends A {\n    op init() { }\n}\nlet x: A = B()\n",
-        // Not a type at all, so not this check's business — the annotation is
-        // reported when it is applied.
-        "let x: Nonexistent = 1\n",
     ];
     for src in quiet {
         assert_eq!(warnings(src), Vec::<String>::new(), "for {src:?}");
@@ -769,13 +766,14 @@ fn a_call_is_checked_against_the_parameters_it_names() {
         // Widening, one level down as everywhere.
         "fn f(n: float) {\n    return n\n}\nlet a = f(1)\n",
         "from math import floor\nlet n = floor(2)\n",
-        // A mismatched count is an arity error, reported when the call runs —
-        // two complaints about one mistake would be worse than one.
-        "fn f(n: int) {\n    return n\n}\nlet a = f()\n",
     ];
     for src in quiet {
         assert_eq!(warnings(src), Vec::<String>::new(), "for {src:?}");
     }
+    assert_eq!(
+        warnings("fn f(n: int) {\n    return n\n}\nlet a = f()\n"),
+        vec!["expected 1 arguments, got 0"]
+    );
 }
 
 #[test]
@@ -814,4 +812,247 @@ fn a_reassignment_is_checked_against_the_declarations_annotation() {
         assert_eq!(warnings(src), Vec::<String>::new(), "for {src:?}");
     }
 }
+
+#[test]
+fn an_unknown_type_annotation_is_reported() {
+    assert_eq!(
+        warnings("let x: Nonexistent = 1\n"),
+        vec!["unknown type `Nonexistent`"]
+    );
+}
+
+#[test]
+fn extending_a_complete_class_is_reported() {
+    assert_eq!(
+        warnings("complete class Parser {\n  op init(s) { self.s = s }\n}\nextend Parser {\n  fn peek() { return self.s }\n}\n"),
+        vec!["cannot extend complete class `Parser`"]
+    );
+}
+
+#[test]
+fn modifying_a_field_on_a_const_variable_is_reported() {
+    assert_eq!(
+        warnings("class Point {\n  op init(x) { self.x = x }\n}\nconst p = Point(1)\np.x = 2\n"),
+        vec!["cannot modify field of `p`"]
+    );
+}
+
+#[test]
+fn extension_overriding_existing_method_is_reported() {
+    assert_eq!(
+        warnings("class Point {\n  op init(x) { self.x = x }\n  fn move() { }\n}\nextend Point {\n  fn move() { }\n}\n"),
+        vec!["`move` is already a method of `Point`"]
+    );
+}
+
+fn all_errors(src: &str) -> Vec<String> {
+    let (stmts, mut errors) = crate::compile_recovering(src);
+    if !stmts.is_empty() {
+        let types = infer(&stmts);
+        errors.extend(crate::sema::check::check(&stmts, &types));
+    }
+    errors.iter().map(|err| err.message.clone()).collect()
+}
+
+#[test]
+fn inheriting_from_final_class_is_refused() {
+    let src = "final class Money { op init(cents) { self.cents = cents } }\nclass Debt extends Money {}\n";
+    assert_eq!(all_errors(src), vec!["cannot inherit from final class `Money`"]);
+}
+
+#[test]
+fn import_unknown_member_is_refused() {
+    let src = "from math import floor, florr\n";
+    assert_eq!(all_errors(src), vec!["module `math` has no member `florr`"]);
+}
+
+#[test]
+fn invalid_in_operator_is_refused() {
+    let src = "print(1 in 2)\n";
+    assert_eq!(all_errors(src), vec!["`in` is not supported on an int"]);
+}
+
+#[test]
+fn malformed_generic_type_annotation_is_refused() {
+    let src = "let xs: list[int, string] = []\n";
+    assert_eq!(all_errors(src), vec!["`list` takes 1 argument, but 2 were written"]);
+}
+
+#[test]
+fn missing_return_value_is_refused() {
+    let src = "fn g(): int {}\ng()\n";
+    assert_eq!(all_errors(src), vec!["function `g` declares return type `int` but might return without a value"]);
+}
+
+#[test]
+fn arity_mismatch_is_refused() {
+    let src = "fn f(a, b) { return a }\nprint(f(1))\n";
+    assert_eq!(all_errors(src), vec!["expected 2 arguments, got 1"]);
+}
+
+#[test]
+fn unhashable_dict_key_is_refused() {
+    let src = "class Point { op init() {} }\nlet d: dict[Point, int] = {}\n";
+    assert_eq!(all_errors(src), vec!["`Point` cannot be a dict key"]);
+}
+
+#[test]
+fn nested_const_modification_is_refused() {
+    let src = "const xs = [1, [2, 3]]\nxs[1].push(9)\n";
+    assert_eq!(all_errors(src), vec!["cannot modify `xs`"]);
+}
+
+#[test]
+fn op_string_invalid_return_type_is_refused() {
+    let src = "class Bad { op init() {} op string() { return 42 } }\n";
+    assert_eq!(all_errors(src), vec!["`op string` must return a string"]);
+}
+
+#[test]
+fn op_len_invalid_return_type_is_refused() {
+    let src = "class Sized { op len() { return \"three\" } }\n";
+    assert_eq!(all_errors(src), vec!["`op len` must return an int"]);
+}
+
+#[test]
+fn op_iter_invalid_return_type_is_refused() {
+    let src = "class Countdown { op iter() { return {\"a\": 1} } }\n";
+    assert_eq!(all_errors(src), vec!["`op iter` must return a list"]);
+}
+
+#[test]
+fn op_int_invalid_return_type_is_refused() {
+    let src = "class Bad { op int() { return \"nope\" } }\n";
+    assert_eq!(all_errors(src), vec!["`op int` must return an int"]);
+}
+
+#[test]
+fn le_operator_without_cmp_is_refused() {
+    let src = "class Version { op init(n) { self.n = n } op lt(other) { return self.n < other.n } }\nlet a = Version(1) <= Version(2)\n";
+    assert_eq!(all_errors(src), vec!["`<=` is not supported on `Version`"]);
+}
+
+#[test]
+fn reflected_comparison_without_cmp_is_refused() {
+    let src = "class Rank { op init(n) { self.n = n } op lt(other) { return self.n < other.n } }\nlet a = 1 < Rank(2)\n";
+    assert_eq!(all_errors(src), vec!["`<` is not supported between an int and `Rank`"]);
+}
+
+#[test]
+fn div_zero_is_refused() {
+    let src = "print(1 / 0)\n";
+    assert_eq!(all_errors(src), vec!["division by zero"]);
+}
+
+#[test]
+fn bitwise_float_is_refused() {
+    let src = "print(1.5 & 2)\n";
+    assert_eq!(all_errors(src), vec!["bitwise operators are not supported on float"]);
+}
+
+#[test]
+fn extended_float_bitwise_is_allowed() {
+    let src = "extend float { op bit_and(val) { return int(self) & val } }\nprint(1.5 & 1)\n";
+    assert_eq!(all_errors(src), Vec::<String>::new());
+}
+
+#[test]
+fn extend_native_op_override_is_refused() {
+    let src = "extend string { op add(val) { return self } }\n";
+    assert_eq!(
+        all_errors(src),
+        vec!["`string` natively supports `op add` and cannot be overridden by an extension"]
+    );
+}
+
+#[test]
+fn primitive_incompatible_binary_op_is_refused() {
+    let src = "print(1 + \"str\")\n";
+    assert_eq!(all_errors(src), vec!["`+` is not supported between an int and a string"]);
+}
+
+#[test]
+fn out_of_bounds_shift_is_refused() {
+    let src = "print(1 << 99)\n";
+    assert_eq!(all_errors(src), vec!["shift count out of range (0..64)"]);
+}
+
+#[test]
+fn asymmetric_arithmetic_is_refused() {
+    let src = "class Money { op init(c) { self.c = c } }\nprint(500 - Money(200))\n";
+    assert_eq!(all_errors(src), vec!["`-` is not supported between an int and `Money`"]);
+}
+
+#[test]
+fn extends_function_is_refused() {
+    let src = "class Callable extends function {}\n";
+    assert_eq!(all_errors(src), vec!["cannot inherit from builtin type `function`"]);
+}
+
+#[test]
+fn extends_self_is_refused() {
+    let src = "class A extends A {}\n";
+    assert_eq!(all_errors(src), vec!["class `A` cannot inherit from itself"]);
+}
+
+#[test]
+fn extends_variable_is_refused() {
+    let src = "let n = 1\nclass C extends n {}\n";
+    assert_eq!(all_errors(src), vec!["cannot inherit from variable `n`"]);
+}
+
+#[test]
+fn op_eq_invalid_return_type_is_refused() {
+    let src = "class Sloppy { op init(n) { self.n = n } op eq(other) { return 1 } }\n";
+    assert_eq!(all_errors(src), vec!["`op eq` must return a bool"]);
+}
+
+#[test]
+fn op_cmp_invalid_return_type_is_refused() {
+    let src = "class Weight { op init(kg) { self.kg = kg } op cmp(other) { return 1.5 } }\n";
+    assert_eq!(all_errors(src), vec!["`op cmp` must return an int"]);
+}
+
+#[test]
+fn op_bool_invalid_return_type_is_refused() {
+    let src = "class Bad { op init() {} op bool() { return [1, 2] } }\n";
+    assert_eq!(all_errors(src), vec!["`op bool` must return a bool"]);
+}
+
+#[test]
+fn non_callable_invocation_is_refused() {
+    let src = "let x = 1\nx()\n";
+    assert_eq!(all_errors(src), vec!["an int is not callable"]);
+}
+
+#[test]
+fn construct_function_is_refused() {
+    let src = "function(print)\n";
+    assert_eq!(all_errors(src), vec!["builtin type `function` cannot be instantiated"]);
+}
+
+#[test]
+fn field_on_builtin_is_refused() {
+    let src = "let n = 1\nn.field = 2\n";
+    assert_eq!(all_errors(src), vec!["`int` has no method `field`"]);
+}
+
+#[test]
+fn non_existent_builtin_method_is_refused() {
+    let src = "let xs = [1]\nxs.nope()\n";
+    assert_eq!(all_errors(src), vec!["`list` has no method `nope`"]);
+}
+
+#[test]
+fn slice_non_sequence_is_refused() {
+    let src = "let n = 5\nprint(n[1:2])\n";
+    assert_eq!(all_errors(src), vec!["cannot slice an int"]);
+}
+
+#[test]
+fn throw_non_error_is_refused() {
+    let src = "throw 10\n";
+    assert_eq!(all_errors(src), vec!["cannot throw an int"]);
+}
+
 

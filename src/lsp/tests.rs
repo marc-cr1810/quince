@@ -478,3 +478,53 @@ fn a_certain_mistake_is_drawn_as_an_error() {
         Some(lsp_types::DiagnosticSeverity::ERROR)
     );
 }
+
+#[test]
+fn test_references_and_rename_handlers() {
+    let src = "fn add(a, b) {\n    return a + b\n}\nlet total = add(1, 2)\n";
+    let state = DocumentState::new(src.to_string(), None);
+    let uri = Url::parse("file:///test.qn").unwrap();
+    let pos = Position { line: 0, character: 3 }; // 'add'
+
+    let refs = crate::lsp::navigate::get_references(&uri, Some(&state), pos);
+    assert_eq!(refs.len(), 2);
+
+    let edit = crate::lsp::navigate::rename_symbol(&uri, Some(&state), pos, "sum").unwrap();
+    let changes = edit.changes.unwrap();
+    assert_eq!(changes.get(&uri).unwrap().len(), 2);
+}
+
+#[test]
+fn test_workspace_symbols_search() {
+    let src = "class Calculator {\n    fn calculate() {\n        return 0\n    }\n}\n";
+    let state = DocumentState::new(src.to_string(), None);
+    let uri = Url::parse("file:///calc.qn").unwrap();
+    let mut docs = HashMap::new();
+    docs.insert(uri, state);
+
+    let syms = crate::lsp::navigate::get_workspace_symbols(&docs, "calc");
+    assert_eq!(syms.len(), 2); // Calculator and calculate
+}
+
+#[test]
+fn test_document_formatting() {
+    let unformatted = "fn test() {\nlet x = 1\n}\n";
+    let state = DocumentState::new(unformatted.to_string(), None);
+    let edits = crate::lsp::format::format_document(
+        Some(&state),
+        lsp_types::DocumentFormattingParams {
+            text_document: lsp_types::TextDocumentIdentifier {
+                uri: Url::parse("file:///test.qn").unwrap(),
+            },
+            options: lsp_types::FormattingOptions {
+                tab_size: 4,
+                insert_spaces: true,
+                ..Default::default()
+            },
+            work_done_progress_params: Default::default(),
+        },
+    );
+    assert!(!edits.is_empty());
+    assert_eq!(edits[0].new_text, "fn test() {\n    let x = 1\n}\n");
+}
+
