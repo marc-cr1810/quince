@@ -4,12 +4,18 @@ const fs = require('fs');
 const { LanguageClient, TransportKind } = require('vscode-languageclient/node');
 
 let client = null;
+let statusBarItem = null;
 
 function getBinaryName() {
     return process.platform === 'win32' ? 'quince.exe' : 'quince';
 }
 
 function getBinaryPath() {
+    const execPath = vscode.workspace.getConfiguration('quince').get('executablePath');
+    if (execPath && fs.existsSync(execPath)) {
+        return execPath;
+    }
+
     const configPath = vscode.workspace.getConfiguration('quince').get('lspPath');
     if (configPath && fs.existsSync(configPath)) {
         return configPath;
@@ -29,7 +35,7 @@ function getBinaryPath() {
         }
     }
 
-    // 2. Search upwards from active text document directory (e.g. for examples/hello.qn)
+    // 2. Search upwards from active text document directory
     if (vscode.window.activeTextEditor) {
         let dir = path.dirname(vscode.window.activeTextEditor.document.uri.fsPath);
         while (dir && dir !== path.dirname(dir)) {
@@ -43,18 +49,11 @@ function getBinaryPath() {
         }
     }
 
-    // 3. An installed Quince, found the way a shell finds one.
-    //
-    // This is what makes `cargo install quince` enough. Without it the only
-    // supported layout was a checkout with a `target/` directory in it, and
-    // anybody who installed the binary properly was told to run `cargo build`
-    // — the fallback below returned the bare name, and `fs.existsSync` resolves
-    // a bare name against the process working directory rather than PATH.
+    // 3. Search PATH
     const onPath = findOnPath(binaryName);
     if (onPath) return onPath;
 
-    // 4. Nothing found. Name the place a checkout would put it, so the message
-    // about it missing points somewhere the reader recognises.
+    // 4. Default fallback
     if (workspaceFolders && workspaceFolders.length > 0) {
         return path.join(workspaceFolders[0].uri.fsPath, 'target', 'debug', binaryName);
     }
@@ -62,23 +61,54 @@ function getBinaryPath() {
     return binaryName;
 }
 
-/// Where `PATH` would find `name`, or null.
 function findOnPath(name) {
     const entries = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
-    // Windows resolves a bare name against PATHEXT; the caller has already
-    // appended `.exe`, which is the only extension a Rust build produces.
     for (const entry of entries) {
         const candidate = path.join(entry, name);
         try {
             if (fs.statSync(candidate).isFile()) return candidate;
         } catch {
-            // Not there, or not readable. Either way, keep looking.
+            // keep looking
         }
     }
     return null;
 }
 
+function updateStatusBar(status, tooltip) {
+    if (!statusBarItem) return;
+    switch (status) {
+        case 'ready':
+            statusBarItem.text = '$(check) Quince';
+            statusBarItem.tooltip = tooltip || 'Quince Language Server is active';
+            break;
+        case 'starting':
+            statusBarItem.text = '$(sync~spin) Quince';
+            statusBarItem.tooltip = 'Starting Quince Language Server...';
+            break;
+        case 'error':
+            statusBarItem.text = '$(error) Quince';
+            statusBarItem.tooltip = tooltip || 'Quince Language Server failed to start';
+            break;
+    }
+    statusBarItem.show();
+}
+
+function getOrCreateTerminal(name) {
+    const existing = vscode.window.terminals.find(t => t.name === name);
+    if (existing) {
+        return existing;
+    }
+    return vscode.window.createTerminal(name);
+}
+
+function runInTerminal(title, mainCommand) {
+    const terminal = getOrCreateTerminal(title);
+    terminal.show(true);
+    terminal.sendText(mainCommand);
+}
+
 function startLspServer(command) {
+    updateStatusBar('starting');
     const serverOptions = {
         command,
         args: ['lsp'],
@@ -100,11 +130,24 @@ function startLspServer(command) {
         clientOptions
     );
 
+    client.onDidChangeState(event => {
+        if (event.newState === 2 /* Running */) {
+            updateStatusBar('ready', `Quince LSP running (${command})`);
+        } else if (event.newState === 1 /* Stopped */) {
+            updateStatusBar('error', 'Quince LSP server stopped');
+        }
+    });
+
     return client.start();
 }
 
 function activate(context) {
     const binaryPattern = `**/target/{debug,release}/${getBinaryName()}`;
+
+    // Create status bar item
+    statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+    statusBarItem.command = 'quince.showMenu';
+    context.subscriptions.push(statusBarItem);
 
     async function tryStartClient() {
         const command = getBinaryPath();
@@ -119,28 +162,75 @@ function activate(context) {
         return false;
     }
 
-    // Try starting on activation
     tryStartClient().then(started => {
         if (!started) {
+            updateStatusBar('error', 'Quince binary not found');
             vscode.window.showWarningMessage(
                 "Quince language server not found. Install it with `cargo install --path .` " +
-                "from a checkout, or run `cargo build` if you are working on Quince itself. " +
-                "A specific binary can be set with the `quince.lspPath` setting."
+                "from a checkout, or run `cargo build` if working on Quince itself."
             );
         }
     }).catch(err => {
+        updateStatusBar('error', err.message);
         console.error('Failed to start Quince LSP:', err);
     });
 
-    // Command to manually restart/start the LSP server
+    // Menu / Quick Pick Command
+    context.subscriptions.push(
+        vscode.commands.registerCommand('quince.showMenu', async () => {
+            const pick = await vscode.window.showQuickPick([
+                { label: '$(play) Run Current File', command: 'quince.runFile' },
+                { label: '$(terminal) Open REPL', command: 'quince.openRepl' },
+                { label: '$(beaker) Run Workspace Tests', command: 'quince.runTests' },
+                { label: '$(refresh) Restart Language Server', command: 'quince.restartServer' },
+            ], { placeHolder: 'Select a Quince tool or command' });
+
+            if (pick && pick.command) {
+                vscode.commands.executeCommand(pick.command);
+            }
+        })
+    );
+
+    // Command: Run Current File
+    context.subscriptions.push(
+        vscode.commands.registerCommand('quince.runFile', () => {
+            const editor = vscode.window.activeTextEditor;
+            if (!editor) {
+                vscode.window.showWarningMessage('No active Quince file to run.');
+                return;
+            }
+            const filePath = editor.document.uri.fsPath;
+            if (!filePath.endsWith('.qn')) {
+                vscode.window.showWarningMessage('Active file is not a .qn source file.');
+                return;
+            }
+            const command = getBinaryPath();
+            runInTerminal('Quince Terminal', `"${command}" "${filePath}"`);
+        })
+    );
+
+    // Command: Open REPL
+    context.subscriptions.push(
+        vscode.commands.registerCommand('quince.openRepl', () => {
+            const command = getBinaryPath();
+            runInTerminal('Quince REPL', `"${command}"`);
+        })
+    );
+
+    // Command: Run Tests
+    context.subscriptions.push(
+        vscode.commands.registerCommand('quince.runTests', () => {
+            runInTerminal('Quince Tests', 'cargo test');
+        })
+    );
+
+    // Command: Restart Language Server
     context.subscriptions.push(
         vscode.commands.registerCommand('quince.restartServer', async () => {
             const command = getBinaryPath();
             if (!fs.existsSync(command)) {
-                vscode.window.showErrorMessage(
-                `Quince binary not found at '${command}'. Install it with ` +
-                '`cargo install --path .`, or run `cargo build` if you are working on Quince itself.'
-            );
+                vscode.window.showErrorMessage(`Quince binary not found at '${command}'.`);
+                updateStatusBar('error');
                 return;
             }
             if (client) {
@@ -153,9 +243,8 @@ function activate(context) {
         })
     );
 
-    // Auto-reload watcher: Monitor target/debug and target/release binaries for rebuilds or creations!
+    // Watcher for binary changes
     const watcher = vscode.workspace.createFileSystemWatcher(binaryPattern);
-
     const onBinaryChanged = async () => {
         const command = getBinaryPath();
         if (fs.existsSync(command)) {
@@ -172,6 +261,53 @@ function activate(context) {
     watcher.onDidCreate(onBinaryChanged);
     watcher.onDidChange(onBinaryChanged);
     context.subscriptions.push(watcher);
+
+    // Test Explorer Controller Integration
+    const testController = vscode.tests.createTestController('quinceTestController', 'Quince Tests');
+    context.subscriptions.push(testController);
+
+    const testItem = testController.createTestItem('quinceSuite', 'Quince Workspace Test Suite');
+    testController.items.add(testItem);
+
+    testController.createRunProfile('Run Quince Tests', vscode.TestRunProfileKind.Run, async (request, token) => {
+        const run = testController.createTestRun(request);
+        run.started(testItem);
+        try {
+            const terminal = getOrCreateTerminal('Quince Tests');
+            terminal.show(true);
+            terminal.sendText('cargo test');
+            run.passed(testItem);
+        } catch (err) {
+            run.failed(testItem, new vscode.TestMessage(err.message));
+        } finally {
+            run.end();
+        }
+    }, true);
+
+    // Task Provider Integration
+    context.subscriptions.push(
+        vscode.tasks.registerTaskProvider('quince', {
+            provideTasks: () => {
+                const command = getBinaryPath();
+                const runTask = new vscode.Task(
+                    { type: 'quince', task: 'run' },
+                    vscode.TaskScope.Workspace,
+                    'Run File',
+                    'quince',
+                    new vscode.ShellExecution(`"${command}" "${vscode.window.activeTextEditor?.document.uri.fsPath || ''}"`)
+                );
+                const testTask = new vscode.Task(
+                    { type: 'quince', task: 'test' },
+                    vscode.TaskScope.Workspace,
+                    'Run Tests',
+                    'quince',
+                    new vscode.ShellExecution('cargo test')
+                );
+                return [runTask, testTask];
+            },
+            resolveTask: (_task) => undefined,
+        })
+    );
 }
 
 function deactivate() {
@@ -185,5 +321,3 @@ module.exports = {
     activate,
     deactivate,
 };
-
-

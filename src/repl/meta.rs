@@ -9,17 +9,25 @@ use quince::interp::Interp;
 use quince::interp::show::Ask;
 use quince::syntax::lexer::Lexer;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MetaAction {
+    Handled,
+    NotMeta,
+    Exit,
+}
+
 pub(crate) fn handle_meta_command(
     input: &str,
     interp: &mut Interp,
     use_color_stdout: bool,
     use_color_stderr: bool,
-) -> Result<bool> {
+) -> Result<MetaAction> {
     let mut parts = input.splitn(2, ' ');
     let cmd = parts.next().unwrap_or("");
     let arg = parts.next().unwrap_or("").trim();
 
     match cmd {
+        ":exit" | ":quit" => Ok(MetaAction::Exit),
         ":help" => {
             println!(
                 "{}",
@@ -57,7 +65,15 @@ pub(crate) fn handle_meta_command(
                 "  {}  Clear screen and reset REPL environment",
                 Style::YELLOW.paint(":clear", use_color_stdout)
             );
-            Ok(true)
+            println!(
+                "  {}   Exit the REPL",
+                Style::YELLOW.paint(":exit", use_color_stdout)
+            );
+            println!(
+                "  {}   Exit the REPL",
+                Style::YELLOW.paint(":quit", use_color_stdout)
+            );
+            Ok(MetaAction::Handled)
         }
         ":vars" => {
             let globals = interp.get_globals();
@@ -94,7 +110,7 @@ pub(crate) fn handle_meta_command(
                     println!("{name_str} = {val_str} {type_str}");
                 }
             }
-            Ok(true)
+            Ok(MetaAction::Handled)
         }
         ":type" => {
             if arg.is_empty() {
@@ -102,7 +118,7 @@ pub(crate) fn handle_meta_command(
                     "{}",
                     Style::DIM.paint("Usage: :type <expression>", use_color_stdout)
                 );
-                return Ok(true);
+                return Ok(MetaAction::Handled);
             }
             match quince::compile(arg) {
                 Ok(program) => match interp.run_repl(&program) {
@@ -117,7 +133,7 @@ pub(crate) fn handle_meta_command(
                 },
                 Err(err) => eprintln!("{}", err.report_styled(arg, "<repl>", use_color_stderr)),
             }
-            Ok(true)
+            Ok(MetaAction::Handled)
         }
         ":ast" => {
             if arg.is_empty() {
@@ -125,7 +141,7 @@ pub(crate) fn handle_meta_command(
                     "{}",
                     Style::DIM.paint("Usage: :ast <expression>", use_color_stdout)
                 );
-                return Ok(true);
+                return Ok(MetaAction::Handled);
             }
             match quince::compile(arg) {
                 Ok(program) => {
@@ -138,7 +154,7 @@ pub(crate) fn handle_meta_command(
                 }
                 Err(err) => eprintln!("{}", err.report_styled(arg, "<repl>", use_color_stderr)),
             }
-            Ok(true)
+            Ok(MetaAction::Handled)
         }
         ":tokens" => {
             if arg.is_empty() {
@@ -146,7 +162,7 @@ pub(crate) fn handle_meta_command(
                     "{}",
                     Style::DIM.paint("Usage: :tokens <expression>", use_color_stdout)
                 );
-                return Ok(true);
+                return Ok(MetaAction::Handled);
             }
             match Lexer::new(arg).tokenize() {
                 Ok(tokens) => {
@@ -162,7 +178,7 @@ pub(crate) fn handle_meta_command(
                 }
                 Err(err) => eprintln!("{}", err.report_styled(arg, "<repl>", use_color_stderr)),
             }
-            Ok(true)
+            Ok(MetaAction::Handled)
         }
         ":load" => {
             if arg.is_empty() {
@@ -170,7 +186,7 @@ pub(crate) fn handle_meta_command(
                     "{}",
                     Style::DIM.paint("Usage: :load <filename.q>", use_color_stdout)
                 );
-                return Ok(true);
+                return Ok(MetaAction::Handled);
             }
             let source = match std::fs::read_to_string(arg) {
                 Ok(src) => src,
@@ -179,14 +195,14 @@ pub(crate) fn handle_meta_command(
                         "{}",
                         Style::RED.paint(format!("could not read {arg}: {err}"), use_color_stderr)
                     );
-                    return Ok(true);
+                    return Ok(MetaAction::Handled);
                 }
             };
             let program = match quince::compile(&source) {
                 Ok(p) => p,
                 Err(err) => {
                     eprintln!("{}", err.report_styled(&source, arg, use_color_stderr));
-                    return Ok(true);
+                    return Ok(MetaAction::Handled);
                 }
             };
             match interp.run_repl(&program) {
@@ -196,7 +212,7 @@ pub(crate) fn handle_meta_command(
                 ),
                 Err(err) => eprintln!("{}", err.report_styled(&source, arg, use_color_stderr)),
             }
-            Ok(true)
+            Ok(MetaAction::Handled)
         }
         ":time" => {
             if arg.is_empty() {
@@ -204,29 +220,24 @@ pub(crate) fn handle_meta_command(
                     "{}",
                     Style::DIM.paint("Usage: :time <expression>", use_color_stdout)
                 );
-                return Ok(true);
+                return Ok(MetaAction::Handled);
             }
             let start = Instant::now();
             let program = match quince::compile(arg) {
                 Ok(p) => p,
                 Err(err) => {
                     eprintln!("{}", err.report_styled(arg, "<repl>", use_color_stderr));
-                    return Ok(true);
+                    return Ok(MetaAction::Handled);
                 }
             };
             match interp.run_repl(&program) {
                 Ok(Some(val)) => {
                     let elapsed = start.elapsed();
-                    // Printed the way the prompt would print it, `op string` and
-                    // all: this echoes a result, so showing it differently from
-                    // the same expression typed bare would be a difference with
-                    // no reason behind it. Measured before rendering, so what the
-                    // timing reports is the expression and not its printing.
                     let val_str = match interp.display_pretty(&val, use_color_stdout, Ask::Class) {
                         Ok(text) => text,
                         Err(err) => {
                             eprintln!("{}", err.report_styled(arg, "<repl>", use_color_stderr));
-                            return Ok(true);
+                            return Ok(MetaAction::Handled);
                         }
                     };
                     let time_str = Style::DIM
@@ -241,14 +252,15 @@ pub(crate) fn handle_meta_command(
                 }
                 Err(err) => eprintln!("{}", err.report_styled(arg, "<repl>", use_color_stderr)),
             }
-            Ok(true)
+            Ok(MetaAction::Handled)
         }
         ":clear" => {
             print!("\x1B[2J\x1B[1;1H");
             let _ = std::io::Write::flush(&mut std::io::stdout());
             *interp = Interp::new();
-            Ok(true)
+            Ok(MetaAction::Handled)
         }
+        "exit" | "quit" | "exit()" | "quit()" => Ok(MetaAction::Exit),
         _ if input.starts_with(':') => {
             println!(
                 "{}",
@@ -257,8 +269,8 @@ pub(crate) fn handle_meta_command(
                     use_color_stdout
                 )
             );
-            Ok(true)
+            Ok(MetaAction::Handled)
         }
-        _ => Ok(false),
+        _ => Ok(MetaAction::NotMeta),
     }
 }

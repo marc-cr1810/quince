@@ -80,18 +80,57 @@
     ],
     "commands": [
       {
+        "command": "quince.runFile",
+        "title": "Quince: Run Current File",
+        "icon": "$(play)"
+      },
+      {
+        "command": "quince.openRepl",
+        "title": "Quince: Open REPL",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "quince.runTests",
+        "title": "Quince: Run Workspace Tests",
+        "icon": "$(beaker)"
+      },
+      {
         "command": "quince.restartServer",
         "title": "Quince: Restart Language Server"
       }
     ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "quince.runFile",
+          "group": "navigation",
+          "when": "resourceLangId == quince"
+        }
+      ]
+    },
     "configuration": {
       "type": "object",
       "title": "Quince Language Server",
       "properties": {
+        "quince.executablePath": {
+          "type": "string",
+          "default": "",
+          "description": "Custom path to the Quince executable binary. Defaults to target/debug/quince or PATH."
+        },
         "quince.lspPath": {
           "type": "string",
           "default": "",
           "description": "Custom path to the Quince LSP executable binary. Defaults to target/debug/quince in the current workspace."
+        },
+        "quince.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Traces the communication between VS Code and the Quince language server."
         }
       }
     }

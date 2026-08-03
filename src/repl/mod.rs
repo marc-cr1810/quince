@@ -28,18 +28,18 @@ use quince::interp::show::Ask;
 use quince::runtime::value::Value;
 use crate::repl::helper::QuinceHelper;
 use crate::repl::highlight::count_open_braces;
-use crate::repl::meta::handle_meta_command;
+use crate::repl::meta::{handle_meta_command, MetaAction};
 use crate::repl::snapshot::Snapshot;
 
 const META_COMMANDS: &[&str] = &[
-    ":help", ":vars", ":type", ":ast", ":tokens", ":clear", ":load", ":time",
+    ":help", ":vars", ":type", ":ast", ":tokens", ":clear", ":load", ":time", ":exit", ":quit",
 ];
 
 /// Runs the interactive REPL with live syntax highlighting and line history.
 pub fn run_repl(use_color_stdout: bool, use_color_stderr: bool) -> Result<()> {
     let pkg_name = Style::BOLD_CYAN.paint("quince", use_color_stdout);
     let version = Style::YELLOW.paint(env!("CARGO_PKG_VERSION"), use_color_stdout);
-    let hint = Style::DIM.paint("ctrl-d to exit, :help for commands", use_color_stdout);
+    let hint = Style::DIM.paint("ctrl-d or :exit to exit, :help for commands", use_color_stdout);
     println!("{pkg_name} {version} — {hint}");
 
     let config = rustyline::Config::builder().auto_add_history(true).build();
@@ -75,6 +75,7 @@ pub fn run_repl(use_color_stdout: bool, use_color_stderr: bool) -> Result<()> {
                 continue;
             }
             Err(rustyline::error::ReadlineError::Eof) => {
+                println!("{}", Style::DIM.paint("Goodbye!", use_color_stdout));
                 break;
             }
             Err(err) => {
@@ -99,17 +100,22 @@ pub fn run_repl(use_color_stdout: bool, use_color_stderr: bool) -> Result<()> {
             }
         }
 
-        // Handle REPL Meta-Commands
+        // Handle REPL Meta-Commands & exit commands
         let trimmed_line = line.trim();
-        if buffer.is_empty() && trimmed_line.starts_with(':')
-            && handle_meta_command(
+        if buffer.is_empty() {
+            match handle_meta_command(
                 trimmed_line,
                 &mut interp,
                 use_color_stdout,
                 use_color_stderr,
-            )?
-        {
-            continue;
+            )? {
+                MetaAction::Handled => continue,
+                MetaAction::Exit => {
+                    println!("{}", Style::DIM.paint("Goodbye!", use_color_stdout));
+                    break;
+                }
+                MetaAction::NotMeta => {}
+            }
         }
 
         buffer.push_str(&line);
