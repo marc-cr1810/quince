@@ -53,7 +53,7 @@ use crate::lsp::highlight::get_document_highlights;
 use crate::lsp::hints::get_inlay_hints;
 use crate::lsp::hover::{get_hover, get_signature_help};
 use crate::lsp::navigate::{
-    get_definition, get_document_symbols, get_hierarchical_document_symbols, get_references, get_workspace_symbols, rename_symbol,
+    get_definition, get_hierarchical_document_symbols, get_references, get_workspace_symbols, rename_symbol,
 };
 use crate::lsp::position::position_to_offset;
 use crate::lsp::selection::get_selection_ranges;

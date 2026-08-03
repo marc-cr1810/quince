@@ -1,6 +1,6 @@
 //! Selection range provider for AST expansion/shrinkage.
 
-use lsp_types::{Position, Range, SelectionRange};
+use lsp_types::{Position, SelectionRange};
 use quince::syntax::ast::{Expr, ExprKind, Stmt, StmtKind};
 use quince::syntax::token::Span;
 use crate::lsp::DocumentState;

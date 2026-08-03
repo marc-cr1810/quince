@@ -747,3 +747,24 @@ fn every_error_says_what_to_do_about_it() {
         failures.join("\n")
     );
 }
+
+/// Initializing a new project directory creates main.qn and .gitignore.
+#[test]
+fn initialising_a_new_project_creates_main_and_gitignore() {
+    let temp = std::env::temp_dir().join(format!("quince_init_test_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_quince"))
+        .args(["init", temp.to_str().unwrap()])
+        .output()
+        .expect("the binary should run");
+
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let main_file = temp.join("main.qn");
+    assert!(main_file.exists(), "main.qn should be created");
+    let content = std::fs::read_to_string(&main_file).expect("main.qn should be readable");
+    assert!(content.contains("fn main()"), "main.qn should contain starter function");
+
+    let gitignore = temp.join(".gitignore");
+    assert!(gitignore.exists(), ".gitignore should be created");
+
+    let _ = std::fs::remove_dir_all(&temp);
+}

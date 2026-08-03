@@ -95,6 +95,11 @@
         "icon": "$(beaker)"
       },
       {
+        "command": "quince.init",
+        "title": "Quince: Initialize New Project",
+        "icon": "$(folder-plus)"
+      },
+      {
         "command": "quince.restartServer",
         "title": "Quince: Restart Language Server"
       }

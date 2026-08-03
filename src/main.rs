@@ -40,8 +40,48 @@ fn main() -> Result<()> {
         Command::Repl => {
             quince::interp::with_stack(|| repl::run_repl(use_color_stdout, use_color_stderr))
         }
+        Command::Init { path } => {
+            let target_dir = path.unwrap_or_else(|| PathBuf::from("."));
+            init_project(&target_dir, use_color_stdout)
+        }
         Command::Lsp { .. } => lsp::run_lsp_server(),
     }
+}
+
+fn init_project(dir: &std::path::Path, use_color_stdout: bool) -> Result<()> {
+    if !dir.exists() {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("could not create directory {}", dir.display()))?;
+    }
+
+    let main_path = dir.join("main.qn");
+    if !main_path.exists() {
+        let template = "## Main entry point for the Quince project.\n\nfn main() {\n    print(\"Hello from Quince!\")\n}\n\nmain()\n";
+        std::fs::write(&main_path, template)
+            .with_context(|| format!("could not create {}", main_path.display()))?;
+        let msg = Style::GREEN.paint(format!("Created {}", main_path.display()), use_color_stdout);
+        println!("{msg}");
+    } else {
+        let msg = Style::YELLOW.paint(format!("{} already exists", main_path.display()), use_color_stdout);
+        println!("{msg}");
+    }
+
+    let gitignore_path = dir.join(".gitignore");
+    if !gitignore_path.exists() {
+        let gitignore_content = "*.log\n";
+        let _ = std::fs::write(&gitignore_path, gitignore_content);
+    }
+
+    let canonical = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let success = Style::BOLD_CYAN.paint(
+        format!("Initialized Quince project in {}", canonical.display()),
+        use_color_stdout,
+    );
+    println!("{success}");
+    let hint = Style::DIM.paint("Run your project with: quince main.qn", use_color_stdout);
+    println!("{hint}");
+
+    Ok(())
 }
 
 fn run(

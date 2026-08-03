@@ -413,7 +413,7 @@ pub(crate) fn rename_symbol(
     })
 }
 
-pub(crate) fn get_hierarchical_document_symbols(uri: &Url, state: Option<&DocumentState>) -> Vec<DocumentSymbol> {
+pub(crate) fn get_hierarchical_document_symbols(_uri: &Url, state: Option<&DocumentState>) -> Vec<DocumentSymbol> {
     let mut symbols = Vec::new();
     let state = match state {
         Some(s) => s,

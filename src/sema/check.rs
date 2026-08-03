@@ -134,7 +134,7 @@ fn is_builtin_type(name: &str) -> bool {
         .any(|b| b.name() == name)
 }
 
-fn is_unhashable_type(ty: &TypeExpr, types: &Types) -> bool {
+fn _is_unhashable_type(ty: &TypeExpr, types: &Types) -> bool {
     let TypeName::Named(name) = &ty.name else { return false; };
     match name.as_str() {
         "list" | "dict" => true,

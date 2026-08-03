@@ -35,6 +35,11 @@ pub enum Command {
     },
     /// Start an interactive session
     Repl,
+    /// Initialize a new Quince project in a directory
+    Init {
+        /// Directory path to initialize (defaults to current directory)
+        path: Option<PathBuf>,
+    },
     /// Run Language Server Protocol (LSP) daemon over stdio
     Lsp {
         /// Use stdio transport (default)

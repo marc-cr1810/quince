@@ -181,6 +181,7 @@ function activate(context) {
             const pick = await vscode.window.showQuickPick([
                 { label: '$(play) Run Current File', command: 'quince.runFile' },
                 { label: '$(terminal) Open REPL', command: 'quince.openRepl' },
+                { label: '$(folder-plus) Initialize New Project', command: 'quince.init' },
                 { label: '$(beaker) Run Workspace Tests', command: 'quince.runTests' },
                 { label: '$(refresh) Restart Language Server', command: 'quince.restartServer' },
             ], { placeHolder: 'Select a Quince tool or command' });
@@ -188,6 +189,39 @@ function activate(context) {
             if (pick && pick.command) {
                 vscode.commands.executeCommand(pick.command);
             }
+        })
+    );
+
+    // Command: Initialize New Project
+    context.subscriptions.push(
+        vscode.commands.registerCommand('quince.init', async () => {
+            const command = getBinaryPath();
+            let targetDir = null;
+            if (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0) {
+                targetDir = vscode.workspace.workspaceFolders[0].uri.fsPath;
+            }
+            if (!targetDir) {
+                const folderUri = await vscode.window.showOpenDialog({
+                    canSelectFiles: false,
+                    canSelectFolders: true,
+                    canSelectMany: false,
+                    openLabel: 'Select directory to initialize Quince project'
+                });
+                if (folderUri && folderUri.length > 0) {
+                    targetDir = folderUri[0].fsPath;
+                }
+            }
+            if (!targetDir) {
+                return;
+            }
+            runInTerminal('Quince Terminal', `"${command}" init "${targetDir}"`);
+            const mainFile = path.join(targetDir, 'main.qn');
+            setTimeout(async () => {
+                if (fs.existsSync(mainFile)) {
+                    const doc = await vscode.workspace.openTextDocument(mainFile);
+                    await vscode.window.showTextDocument(doc);
+                }
+            }, 800);
         })
     );
 
