@@ -594,4 +594,42 @@ fn test_expanded_code_actions() {
     assert!(!actions.is_empty());
 }
 
+#[test]
+fn test_folding_ranges() {
+    let src = "## Header comment\n## Line 2\nfn foo() {\n    let x = 1\n}\n";
+    let state = DocumentState::new(src.to_string(), None);
+    let ranges = crate::lsp::folding::get_folding_ranges(Some(&state));
+    assert_eq!(ranges.len(), 2);
+}
+
+#[test]
+fn test_selection_ranges() {
+    let src = "fn bar() {\n    let count = 42\n}\n";
+    let state = DocumentState::new(src.to_string(), None);
+    let pos = Position { line: 1, character: 10 };
+    let sel = crate::lsp::selection::get_selection_ranges(Some(&state), vec![pos]);
+    assert_eq!(sel.len(), 1);
+}
+
+#[test]
+fn test_document_highlights() {
+    let src = "let total = 10\nlet copy = total + 1\n";
+    let state = DocumentState::new(src.to_string(), None);
+    let uri = Url::parse("file:///test.qn").unwrap();
+    let pos = Position { line: 0, character: 5 };
+    let hl = crate::lsp::highlight::get_document_highlights(&uri, Some(&state), pos);
+    assert_eq!(hl.len(), 2);
+}
+
+#[test]
+fn test_code_lenses() {
+    let src = "fn greet() {\n    return \"hi\"\n}\nlet g = greet()\n";
+    let state = DocumentState::new(src.to_string(), None);
+    let uri = Url::parse("file:///test.qn").unwrap();
+    let lenses = crate::lsp::codelens::get_code_lenses(&uri, Some(&state));
+    assert_eq!(lenses.len(), 1);
+    assert_eq!(lenses[0].command.as_ref().unwrap().title, "1 reference");
+}
+
+
 

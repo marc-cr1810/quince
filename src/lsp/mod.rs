@@ -1,13 +1,17 @@
 //! The language server.
 
 pub mod actions;
+pub mod codelens;
 pub mod completion;
 pub mod diagnostics;
+pub mod folding;
 pub mod format;
+pub mod highlight;
 pub mod hints;
 pub mod hover;
 pub mod navigate;
 pub mod position;
+pub mod selection;
 pub mod semantic;
 
 #[cfg(test)]
@@ -19,19 +23,19 @@ use lsp_server::{Connection, Message, Notification, Request, Response};
 use lsp_types::{
     notification::{Notification as _, PublishDiagnostics},
     request::{
-        CodeActionRequest, Completion, Formatting, GotoDefinition, HoverRequest,
-        InlayHintRequest, References, Rename, Request as _, SignatureHelpRequest,
-        WorkspaceSymbolRequest,
+        CodeActionRequest, CodeLensRequest, Completion, DocumentHighlightRequest, FoldingRangeRequest,
+        Formatting, GotoDefinition, HoverRequest, InlayHintRequest, References, Rename, Request as _,
+        SelectionRangeRequest, SignatureHelpRequest, WorkspaceSymbolRequest,
     },
-    CodeActionParams, CodeActionProviderCapability, CodeActionResponse, CompletionOptions, CompletionParams, CompletionResponse,
-    DidChangeTextDocumentParams, DidOpenTextDocumentParams, DocumentFormattingParams,
-    DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams, HoverParams,
+    CodeActionParams, CodeActionProviderCapability, CodeActionResponse, CodeLensOptions, CodeLensParams,
+    CompletionOptions, CompletionParams, CompletionResponse, DidChangeTextDocumentParams, DidOpenTextDocumentParams,
+    DocumentFormattingParams, DocumentHighlightParams, DocumentSymbolParams, DocumentSymbolResponse,
+    FoldingRangeParams, FoldingRangeProviderCapability, GotoDefinitionParams, HoverParams,
     HoverProviderCapability, OneOf, PublishDiagnosticsParams, ReferenceParams, RenameParams,
-    SemanticTokenModifier, SemanticTokenType, SemanticTokensFullOptions, SemanticTokensLegend,
-    SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
-    SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelpOptions, SignatureHelpParams,
-    TextDocumentSyncCapability, TextDocumentSyncKind, Url, WorkspaceSymbolParams,
-
+    SelectionRangeParams, SelectionRangeProviderCapability, SemanticTokenModifier, SemanticTokenType,
+    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
+    SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelpOptions,
+    SignatureHelpParams, TextDocumentSyncCapability, TextDocumentSyncKind, Url, WorkspaceSymbolParams,
 };
 
 use quince::sema::infer::{self, Types};
@@ -40,15 +44,19 @@ use quince::sema::types::Type;
 use quince::syntax::ast::Stmt;
 use crate::cursor::{path_ending_at, trailing_literal_type};
 use crate::lsp::actions::get_code_actions;
+use crate::lsp::codelens::get_code_lenses;
 use crate::lsp::completion::get_completions;
 use crate::lsp::diagnostics::publish_diagnostics;
+use crate::lsp::folding::get_folding_ranges;
 use crate::lsp::format::format_document;
+use crate::lsp::highlight::get_document_highlights;
 use crate::lsp::hints::get_inlay_hints;
 use crate::lsp::hover::{get_hover, get_signature_help};
 use crate::lsp::navigate::{
     get_definition, get_document_symbols, get_hierarchical_document_symbols, get_references, get_workspace_symbols, rename_symbol,
 };
 use crate::lsp::position::position_to_offset;
+use crate::lsp::selection::get_selection_ranges;
 use crate::lsp::semantic::get_semantic_tokens;
 
 pub(crate) struct DocumentState {
@@ -163,6 +171,12 @@ pub fn run_lsp_server() -> anyhow::Result<()> {
         workspace_symbol_provider: Some(OneOf::Left(true)),
         code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
         document_formatting_provider: Some(OneOf::Left(true)),
+        folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
+        selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
+        document_highlight_provider: Some(OneOf::Left(true)),
+        code_lens_provider: Some(CodeLensOptions {
+            resolve_provider: Some(false),
+        }),
 
         inlay_hint_provider: Some(OneOf::Left(true)),
         document_symbol_provider: Some(OneOf::Left(true)),
@@ -298,6 +312,35 @@ pub(crate) fn handle_request(
             let uri = &params.text_document.uri;
             let symbols = get_hierarchical_document_symbols(uri, documents.get(uri));
             let resp = Response::new_ok(id, DocumentSymbolResponse::Nested(symbols));
+            connection.sender.send(Message::Response(resp))?;
+        }
+        FoldingRangeRequest::METHOD => {
+            let params: FoldingRangeParams = serde_json::from_value(req.params)?;
+            let uri = &params.text_document.uri;
+            let ranges = get_folding_ranges(documents.get(uri));
+            let resp = Response::new_ok(id, ranges);
+            connection.sender.send(Message::Response(resp))?;
+        }
+        SelectionRangeRequest::METHOD => {
+            let params: SelectionRangeParams = serde_json::from_value(req.params)?;
+            let uri = &params.text_document.uri;
+            let ranges = get_selection_ranges(documents.get(uri), params.positions);
+            let resp = Response::new_ok(id, ranges);
+            connection.sender.send(Message::Response(resp))?;
+        }
+        DocumentHighlightRequest::METHOD => {
+            let params: DocumentHighlightParams = serde_json::from_value(req.params)?;
+            let uri = &params.text_document_position_params.text_document.uri;
+            let pos = params.text_document_position_params.position;
+            let highlights = get_document_highlights(uri, documents.get(uri), pos);
+            let resp = Response::new_ok(id, highlights);
+            connection.sender.send(Message::Response(resp))?;
+        }
+        CodeLensRequest::METHOD => {
+            let params: CodeLensParams = serde_json::from_value(req.params)?;
+            let uri = &params.text_document.uri;
+            let lenses = get_code_lenses(uri, documents.get(uri));
+            let resp = Response::new_ok(id, lenses);
             connection.sender.send(Message::Response(resp))?;
         }
         "textDocument/semanticTokens/full" => {
