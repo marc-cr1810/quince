@@ -100,6 +100,16 @@
         "icon": "$(folder-plus)"
       },
       {
+        "command": "quince.showAst",
+        "title": "Quince: Inspect AST",
+        "icon": "$(code)"
+      },
+      {
+        "command": "quince.showTokens",
+        "title": "Quince: Inspect Tokens",
+        "icon": "$(list-tree)"
+      },
+      {
         "command": "quince.restartServer",
         "title": "Quince: Restart Language Server"
       }
@@ -110,6 +120,13 @@
           "command": "quince.runFile",
           "group": "navigation",
           "when": "resourceLangId == quince"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "quince.runFile",
+          "group": "navigation",
+          "when": "resourceExtname == .qn"
         }
       ]
     },
