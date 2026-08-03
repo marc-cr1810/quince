@@ -1,6 +1,6 @@
 //! CodeLens provider.
 
-use lsp_types::{Command, CodeLens, Position, Url};
+use lsp_types::{Command, CodeLens, Position, Uri as Url};
 use quince::syntax::ast::StmtKind;
 use crate::lsp::DocumentState;
 use crate::lsp::navigate::{find_name_range, get_references};

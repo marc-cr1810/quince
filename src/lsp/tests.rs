@@ -483,7 +483,7 @@ fn a_certain_mistake_is_drawn_as_an_error() {
 fn test_references_and_rename_handlers() {
     let src = "fn add(a, b) {\n    return a + b\n}\nlet total = add(1, 2)\n";
     let state = DocumentState::new(src.to_string(), None);
-    let uri = Url::parse("file:///test.qn").unwrap();
+    let uri = "file:///test.qn".parse().unwrap();
     let pos = Position { line: 0, character: 3 }; // 'add'
 
     let refs = crate::lsp::navigate::get_references(&uri, Some(&state), pos);
@@ -498,7 +498,7 @@ fn test_references_and_rename_handlers() {
 fn test_workspace_symbols_search() {
     let src = "class Calculator {\n    fn calculate() {\n        return 0\n    }\n}\n";
     let state = DocumentState::new(src.to_string(), None);
-    let uri = Url::parse("file:///calc.qn").unwrap();
+    let uri = "file:///calc.qn".parse().unwrap();
     let mut docs = HashMap::new();
     docs.insert(uri, state);
 
@@ -514,7 +514,7 @@ fn test_document_formatting() {
         Some(&state),
         lsp_types::DocumentFormattingParams {
             text_document: lsp_types::TextDocumentIdentifier {
-                uri: Url::parse("file:///test.qn").unwrap(),
+                uri: "file:///test.qn".parse().unwrap(),
             },
             options: lsp_types::FormattingOptions {
                 tab_size: 4,
@@ -532,7 +532,7 @@ fn test_document_formatting() {
 fn test_hierarchical_document_symbols() {
     let src = "class Point {\n    let x = 0\n    fn move() {\n        return 1\n    }\n}\n";
     let state = DocumentState::new(src.to_string(), None);
-    let uri = Url::parse("file:///point.qn").unwrap();
+    let uri = "file:///point.qn".parse().unwrap();
     let symbols = crate::lsp::navigate::get_hierarchical_document_symbols(&uri, Some(&state));
     assert_eq!(symbols.len(), 1);
     assert_eq!(symbols[0].name, "Point");
@@ -548,7 +548,7 @@ fn test_hierarchical_document_symbols() {
 fn test_ast_aware_references_ignores_comments_and_strings() {
     let src = "// add is cool\nlet add = 1\nlet msg = \"add\"\nlet total = add + 2\n";
     let state = DocumentState::new(src.to_string(), None);
-    let uri = Url::parse("file:///test.qn").unwrap();
+    let uri = "file:///test.qn".parse().unwrap();
     let pos = Position { line: 1, character: 4 }; // 'add' variable
     let refs = crate::lsp::navigate::get_references(&uri, Some(&state), pos);
     assert_eq!(refs.len(), 2);
@@ -558,7 +558,7 @@ fn test_ast_aware_references_ignores_comments_and_strings() {
 fn test_expanded_code_actions() {
     let src = "let n = math.floor(1.5)\n";
     let state = DocumentState::new(src.to_string(), None);
-    let uri = Url::parse("file:///test.qn").unwrap();
+    let uri = "file:///test.qn".parse().unwrap();
 
     let diag = lsp_types::Diagnostic {
         range: Range {
@@ -615,7 +615,7 @@ fn test_selection_ranges() {
 fn test_document_highlights() {
     let src = "let total = 10\nlet copy = total + 1\n";
     let state = DocumentState::new(src.to_string(), None);
-    let uri = Url::parse("file:///test.qn").unwrap();
+    let uri = "file:///test.qn".parse().unwrap();
     let pos = Position { line: 0, character: 5 };
     let hl = crate::lsp::highlight::get_document_highlights(&uri, Some(&state), pos);
     assert_eq!(hl.len(), 2);
@@ -625,7 +625,7 @@ fn test_document_highlights() {
 fn test_code_lenses() {
     let src = "fn greet() {\n    return \"hi\"\n}\nlet g = greet()\n";
     let state = DocumentState::new(src.to_string(), None);
-    let uri = Url::parse("file:///test.qn").unwrap();
+    let uri = "file:///test.qn".parse().unwrap();
     let lenses = crate::lsp::codelens::get_code_lenses(&uri, Some(&state));
     assert_eq!(lenses.len(), 1);
     assert_eq!(lenses[0].command.as_ref().unwrap().title, "1 reference");

@@ -1,6 +1,6 @@
 //! Document highlight provider.
 
-use lsp_types::{DocumentHighlight, DocumentHighlightKind, Position, Url};
+use lsp_types::{DocumentHighlight, DocumentHighlightKind, Position, Uri as Url};
 use crate::lsp::DocumentState;
 use crate::lsp::navigate::get_references;
 

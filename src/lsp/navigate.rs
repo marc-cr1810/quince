@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use lsp_types::{
     DocumentSymbol, GotoDefinitionResponse, Location, Position,
-    Range, SymbolInformation, SymbolKind, Url, WorkspaceEdit, TextEdit,
+    Range, SymbolInformation, SymbolKind, Uri as Url, WorkspaceEdit, TextEdit,
 };
 
 use quince::syntax::ast::{Expr, ExprKind, FnDecl, Stmt, StmtKind};
@@ -49,7 +49,8 @@ pub(crate) fn get_definition(
     }
 
     // 3. Search non-open files in the workspace directory (Cross-file lookup)
-    if let Ok(file_path) = uri.to_file_path()
+    if let Ok(parsed_url) = url::Url::parse(uri.as_str())
+        && let Ok(file_path) = parsed_url.to_file_path()
         && let Some(parent_dir) = file_path.parent()
     {
         let candidates = [
@@ -63,7 +64,9 @@ pub(crate) fn get_definition(
                     let (ast, _) = quince::compile_recovering(&source);
                     if !ast.is_empty() && let Some(span) = find_decl_span(&ast, &word) {
                         let range = span_to_range(&source, span);
-                        if let Ok(target_uri) = Url::from_file_path(&cand) {
+                        if let Ok(target_url) = url::Url::from_file_path(&cand)
+                            && let Ok(target_uri) = target_url.as_str().parse()
+                        {
                             return Some(GotoDefinitionResponse::Scalar(Location {
                                 uri: target_uri,
                                 range,

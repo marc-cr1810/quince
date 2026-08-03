@@ -22,7 +22,7 @@ use lsp_server::{Connection, Message, Notification};
 use lsp_types::{
     notification::{Notification as _, PublishDiagnostics},
 
-    Diagnostic, DiagnosticSeverity, PublishDiagnosticsParams, Url,
+    Diagnostic, DiagnosticSeverity, PublishDiagnosticsParams, Uri as Url,
 };
 
 use quince::error::QuinceError;

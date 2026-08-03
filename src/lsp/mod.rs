@@ -35,7 +35,7 @@ use lsp_types::{
     SelectionRangeParams, SelectionRangeProviderCapability, SemanticTokenModifier, SemanticTokenType,
     SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
     SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelpOptions,
-    SignatureHelpParams, TextDocumentSyncCapability, TextDocumentSyncKind, Url, WorkspaceSymbolParams,
+    SignatureHelpParams, TextDocumentSyncCapability, TextDocumentSyncKind, Uri as Url, WorkspaceSymbolParams,
 };
 
 use quince::sema::infer::{self, Types};

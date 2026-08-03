@@ -982,6 +982,7 @@ fn return_type_annotation_mismatch_is_refused() {
     let src = "class Point3D { op init() {} }\nextend Point3D { op add(other) : float { return self } }\n";
     assert_eq!(all_errors(src), vec!["`add`’s return is `float`, but this is a Point3D"]);
 }
+#[test]
 fn asymmetric_arithmetic_is_refused() {
     let src = "class Money { op init(c) { self.c = c } }\nprint(500 - Money(200))\n";
     assert_eq!(all_errors(src), vec!["`-` is not supported between an int and `Money`"]);
