@@ -15,8 +15,12 @@ pub struct Cli {
     #[arg(long, global = true, value_enum, default_value_t = ColorChoice::Auto)]
     pub color: ColorChoice,
 
+    /// Path to a .qn file to execute directly (e.g. `quince script.qn`)
+    #[arg(value_name = "FILE")]
+    pub file: Option<PathBuf>,
+
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 #[derive(Subcommand)]

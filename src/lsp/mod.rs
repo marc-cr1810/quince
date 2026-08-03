@@ -46,7 +46,7 @@ use crate::lsp::format::format_document;
 use crate::lsp::hints::get_inlay_hints;
 use crate::lsp::hover::{get_hover, get_signature_help};
 use crate::lsp::navigate::{
-    get_definition, get_document_symbols, get_references, get_workspace_symbols, rename_symbol,
+    get_definition, get_document_symbols, get_hierarchical_document_symbols, get_references, get_workspace_symbols, rename_symbol,
 };
 use crate::lsp::position::position_to_offset;
 use crate::lsp::semantic::get_semantic_tokens;
@@ -296,8 +296,8 @@ pub(crate) fn handle_request(
         lsp_types::request::DocumentSymbolRequest::METHOD => {
             let params: DocumentSymbolParams = serde_json::from_value(req.params)?;
             let uri = &params.text_document.uri;
-            let symbols = get_document_symbols(uri, documents.get(uri));
-            let resp = Response::new_ok(id, DocumentSymbolResponse::Flat(symbols));
+            let symbols = get_hierarchical_document_symbols(uri, documents.get(uri));
+            let resp = Response::new_ok(id, DocumentSymbolResponse::Nested(symbols));
             connection.sender.send(Message::Response(resp))?;
         }
         "textDocument/semanticTokens/full" => {

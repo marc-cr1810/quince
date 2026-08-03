@@ -19,7 +19,13 @@ fn main() -> Result<()> {
     let use_color_stdout = cli.color.use_color_stdout();
     let use_color_stderr = cli.color.use_color_stderr();
 
-    match cli.command {
+    let command = match (cli.command, cli.file) {
+        (Some(cmd), _) => cmd,
+        (None, Some(file)) => Command::Run { file, dump: None },
+        (None, None) => Command::Repl,
+    };
+
+    match command {
         // Both paths run on a thread Quince sizes itself rather than on
         // whatever stack the platform handed `main`. See `STACK_SIZE`.
         Command::Run { file, dump } => {

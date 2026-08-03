@@ -528,3 +528,70 @@ fn test_document_formatting() {
     assert_eq!(edits[0].new_text, "fn test() {\n    let x = 1\n}\n");
 }
 
+#[test]
+fn test_hierarchical_document_symbols() {
+    let src = "class Point {\n    let x = 0\n    fn move() {\n        return 1\n    }\n}\n";
+    let state = DocumentState::new(src.to_string(), None);
+    let uri = Url::parse("file:///point.qn").unwrap();
+    let symbols = crate::lsp::navigate::get_hierarchical_document_symbols(&uri, Some(&state));
+    assert_eq!(symbols.len(), 1);
+    assert_eq!(symbols[0].name, "Point");
+    let children = symbols[0].children.as_ref().unwrap();
+    assert_eq!(children.len(), 2);
+    assert_eq!(children[0].name, "x");
+    assert_eq!(children[0].kind, lsp_types::SymbolKind::FIELD);
+    assert_eq!(children[1].name, "move");
+    assert_eq!(children[1].kind, lsp_types::SymbolKind::METHOD);
+}
+
+#[test]
+fn test_ast_aware_references_ignores_comments_and_strings() {
+    let src = "// add is cool\nlet add = 1\nlet msg = \"add\"\nlet total = add + 2\n";
+    let state = DocumentState::new(src.to_string(), None);
+    let uri = Url::parse("file:///test.qn").unwrap();
+    let pos = Position { line: 1, character: 4 }; // 'add' variable
+    let refs = crate::lsp::navigate::get_references(&uri, Some(&state), pos);
+    assert_eq!(refs.len(), 2);
+}
+
+#[test]
+fn test_expanded_code_actions() {
+    let src = "let n = math.floor(1.5)\n";
+    let state = DocumentState::new(src.to_string(), None);
+    let uri = Url::parse("file:///test.qn").unwrap();
+
+    let diag = lsp_types::Diagnostic {
+        range: Range {
+            start: Position { line: 0, character: 8 },
+            end: Position { line: 0, character: 12 },
+        },
+        severity: Some(lsp_types::DiagnosticSeverity::ERROR),
+        code: None,
+        code_description: None,
+        source: Some("quince".to_string()),
+        message: "unknown module math".to_string(),
+        related_information: None,
+        tags: None,
+        data: None,
+    };
+
+    let params = lsp_types::CodeActionParams {
+        text_document: lsp_types::TextDocumentIdentifier { uri },
+        range: Range {
+            start: Position { line: 0, character: 8 },
+            end: Position { line: 0, character: 12 },
+        },
+        context: lsp_types::CodeActionContext {
+            diagnostics: vec![diag],
+            only: None,
+            trigger_kind: None,
+        },
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+    };
+
+    let actions = crate::lsp::actions::get_code_actions(Some(&state), params);
+    assert!(!actions.is_empty());
+}
+
+
