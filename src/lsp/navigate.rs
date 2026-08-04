@@ -6,10 +6,51 @@ use lsp_types::{
     Range, SymbolInformation, SymbolKind, Uri as Url, WorkspaceEdit, TextEdit,
 };
 
-use quince::syntax::ast::{Expr, ExprKind, FnDecl, Stmt, StmtKind};
+use quince::syntax::ast::{Expr, ExprKind, FnDecl, ImportNames, Stmt, StmtKind, TypeExpr, TypeName};
 use quince::syntax::token::Span;
 use crate::lsp::DocumentState;
 use crate::lsp::position::{get_word_at_position, offset_to_position, span_to_range};
+
+fn load_module_ast(
+    current_uri: &Url,
+    module_name: &str,
+    documents: &HashMap<Url, DocumentState>,
+) -> Option<(Url, String, Vec<Stmt>)> {
+    for (doc_uri, doc_state) in documents {
+        let path = doc_uri.path().as_str();
+        if path.ends_with(&format!("/{module_name}.qn"))
+            || path.ends_with(&format!("/{module_name}/mod.qn"))
+        {
+            if let Some(ast) = doc_state.ast.clone() {
+                return Some((doc_uri.clone(), doc_state.text.clone(), ast));
+            }
+        }
+    }
+
+    if let Ok(parsed_url) = url::Url::parse(current_uri.as_str())
+        && let Ok(file_path) = parsed_url.to_file_path()
+        && let Some(parent_dir) = file_path.parent()
+    {
+        let candidates = [
+            parent_dir.join(format!("{module_name}.qn")),
+            parent_dir.join(module_name).join("mod.qn"),
+        ];
+        for cand in candidates {
+            if cand.exists() && cand.is_file() {
+                if let Ok(source) = std::fs::read_to_string(&cand) {
+                    let (ast, _) = quince::compile_recovering(&source);
+                    if let Ok(target_url) = url::Url::from_file_path(&cand)
+                        && let Ok(target_uri) = target_url.as_str().parse()
+                    {
+                        return Some((target_uri, source, ast));
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
 
 pub(crate) fn get_definition(
     uri: &Url,
@@ -20,19 +61,67 @@ pub(crate) fn get_definition(
     let state = state?;
     let word = get_word_at_position(&state.text, pos)?;
 
-    // 1. Search current file's AST first
+    // 1. Check if `word` is a module or an imported symbol in current file's AST
+    if let Some(ast) = state.ast.as_ref() {
+        for stmt in ast {
+            if let StmtKind::Import { module, names, .. } = &stmt.kind {
+                if word == *module {
+                    if let Some((target_uri, _, _)) = load_module_ast(uri, module, documents) {
+                        return Some(GotoDefinitionResponse::Scalar(Location {
+                            uri: target_uri,
+                            range: Range::default(),
+                        }));
+                    }
+                }
+                if let ImportNames::Names(import_names) = names {
+                    if import_names.iter().any(|n| n.name == word) {
+                        if let Some((target_uri, source, target_ast)) = load_module_ast(uri, module, documents) {
+                            if let Some(span) = find_decl_span(&target_ast, &word) {
+                                let range = find_name_range(&source, span, &word)
+                                    .unwrap_or_else(|| span_to_range(&source, span));
+                                return Some(GotoDefinitionResponse::Scalar(Location {
+                                    uri: target_uri,
+                                    range,
+                                }));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Search current file's AST
     if let Some(ast) = state.ast.as_ref()
         && let Some(span) = find_decl_span(ast, &word)
     {
-        let range = span_to_range(&state.text, span);
-        let location = Location {
+        let range = find_name_range(&state.text, span, &word)
+            .unwrap_or_else(|| span_to_range(&state.text, span));
+        return Some(GotoDefinitionResponse::Scalar(Location {
             uri: uri.clone(),
             range,
-        };
-        return Some(GotoDefinitionResponse::Scalar(location));
+        }));
     }
 
-    // 2. Search other open documents in the workspace
+    // 3. Search imported modules defined in current file even if cursor wasn't on the import statement line
+    if let Some(ast) = state.ast.as_ref() {
+        for stmt in ast {
+            if let StmtKind::Import { module, .. } = &stmt.kind {
+                if let Some((target_uri, source, target_ast)) = load_module_ast(uri, module, documents) {
+                    if let Some(span) = find_decl_span(&target_ast, &word) {
+                        let range = find_name_range(&source, span, &word)
+                            .unwrap_or_else(|| span_to_range(&source, span));
+                        return Some(GotoDefinitionResponse::Scalar(Location {
+                            uri: target_uri,
+                            range,
+                        }));
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. Search other open documents in the workspace
     for (doc_uri, doc_state) in documents {
         if doc_uri == uri {
             continue;
@@ -40,7 +129,8 @@ pub(crate) fn get_definition(
         if let Some(ast) = doc_state.ast.as_ref()
             && let Some(span) = find_decl_span(ast, &word)
         {
-            let range = span_to_range(&doc_state.text, span);
+            let range = find_name_range(&doc_state.text, span, &word)
+                .unwrap_or_else(|| span_to_range(&doc_state.text, span));
             return Some(GotoDefinitionResponse::Scalar(Location {
                 uri: doc_uri.clone(),
                 range,
@@ -48,22 +138,29 @@ pub(crate) fn get_definition(
         }
     }
 
-    // 3. Search non-open files in the workspace directory (Cross-file lookup)
+    // 5. Search non-open files in workspace directory
     if let Ok(parsed_url) = url::Url::parse(uri.as_str())
         && let Ok(file_path) = parsed_url.to_file_path()
         && let Some(parent_dir) = file_path.parent()
     {
+        let lower_word = word.to_lowercase();
         let candidates = [
             parent_dir.join(format!("{word}.qn")),
-            parent_dir.join(word.clone()).join("mod.qn"),
+            parent_dir.join(format!("{lower_word}.qn")),
+            parent_dir.join(&word).join("mod.qn"),
+            parent_dir.join(&lower_word).join("mod.qn"),
         ];
 
         for cand in candidates {
             if cand.exists() && cand.is_file() {
                 if let Ok(source) = std::fs::read_to_string(&cand) {
                     let (ast, _) = quince::compile_recovering(&source);
-                    if !ast.is_empty() && let Some(span) = find_decl_span(&ast, &word) {
-                        let range = span_to_range(&source, span);
+                    if !ast.is_empty() {
+                        let target_span = find_decl_span(&ast, &word);
+                        let range = match target_span {
+                            Some(span) => find_name_range(&source, span, &word).unwrap_or_else(|| span_to_range(&source, span)),
+                            None => Range::default(),
+                        };
                         if let Ok(target_url) = url::Url::from_file_path(&cand)
                             && let Ok(target_uri) = target_url.as_str().parse()
                         {
@@ -71,6 +168,29 @@ pub(crate) fn get_definition(
                                 uri: target_uri,
                                 range,
                             }));
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Ok(entries) = std::fs::read_dir(parent_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() && path.extension().is_some_and(|e| e == "qn") {
+                    if let Ok(source) = std::fs::read_to_string(&path) {
+                        let (ast, _) = quince::compile_recovering(&source);
+                        if let Some(span) = find_decl_span(&ast, &word) {
+                            let range = find_name_range(&source, span, &word)
+                                .unwrap_or_else(|| span_to_range(&source, span));
+                            if let Ok(target_url) = url::Url::from_file_path(&path)
+                                && let Ok(target_uri) = target_url.as_str().parse()
+                            {
+                                return Some(GotoDefinitionResponse::Scalar(Location {
+                                    uri: target_uri,
+                                    range,
+                                }));
+                            }
                         }
                     }
                 }
@@ -84,20 +204,85 @@ pub(crate) fn get_definition(
 pub(crate) fn find_decl_span(stmts: &[Stmt], target: &str) -> Option<Span> {
     for stmt in stmts {
         match &stmt.kind {
-            StmtKind::Fn { decl, .. } if decl.name == target => return Some(stmt.span),
-            StmtKind::Class { name, .. } if name == target => return Some(stmt.span),
-            StmtKind::Let { name, .. } if name == target => return Some(stmt.span),
-            StmtKind::Alias { name, .. } if name == target => return Some(stmt.span),
-            StmtKind::Class { methods, fields, .. } => {
+            StmtKind::Fn { decl, .. } => {
+                if decl.name == target {
+                    return Some(decl.name_span);
+                }
+                for param in &decl.params {
+                    if param.name == target {
+                        return Some(param.span);
+                    }
+                }
+                if let Some(span) = find_decl_span(&decl.body.stmts, target) {
+                    return Some(span);
+                }
+            }
+            StmtKind::Class { name, methods, fields, .. } => {
+                if name == target {
+                    return Some(stmt.span);
+                }
                 for m in methods {
                     if m.name == target {
-                        return Some(m.body.span);
+                        return Some(m.name_span);
+                    }
+                    for param in &m.params {
+                        if param.name == target {
+                            return Some(param.span);
+                        }
+                    }
+                    if let Some(span) = find_decl_span(&m.body.stmts, target) {
+                        return Some(span);
                     }
                 }
                 for f in fields {
                     if f.name == target {
                         return Some(f.name_span);
                     }
+                }
+            }
+            StmtKind::Extend { methods, .. } => {
+                for m in methods {
+                    if m.name == target {
+                        return Some(m.name_span);
+                    }
+                    for param in &m.params {
+                        if param.name == target {
+                            return Some(param.span);
+                        }
+                    }
+                    if let Some(span) = find_decl_span(&m.body.stmts, target) {
+                        return Some(span);
+                    }
+                }
+            }
+            StmtKind::Let { name, .. } if name == target => return Some(stmt.span),
+            StmtKind::Alias { name, .. } if name == target => return Some(stmt.span),
+            StmtKind::Block(b) => {
+                if let Some(span) = find_decl_span(&b.stmts, target) {
+                    return Some(span);
+                }
+            }
+            StmtKind::If { then, otherwise, .. } => {
+                if let Some(span) = find_decl_span(&then.stmts, target) {
+                    return Some(span);
+                }
+                if let Some(o) = otherwise {
+                    if let Some(span) = find_decl_span(&[*(o.clone())], target) {
+                        return Some(span);
+                    }
+                }
+            }
+            StmtKind::While { body, .. } | StmtKind::For { body, .. } => {
+                if let Some(span) = find_decl_span(&body.stmts, target) {
+                    return Some(span);
+                }
+            }
+            StmtKind::Try { body, handler, .. } => {
+                if let Some(span) = find_decl_span(&body.stmts, target) {
+                    return Some(span);
+                }
+                if let Some(span) = find_decl_span(&handler.stmts, target) {
+                    return Some(span);
                 }
             }
             _ => {}
@@ -143,31 +328,20 @@ pub(crate) fn find_name_range(source: &str, span: Span, name: &str) -> Option<Ra
     None
 }
 
-pub(crate) fn get_references(uri: &Url, state: Option<&DocumentState>, pos: Position) -> Vec<Location> {
-    let state = match state {
-        Some(s) => s,
-        None => return Vec::new(),
-    };
-    let word = match get_word_at_position(&state.text, pos) {
-        Some(w) => w,
-        None => return Vec::new(),
-    };
-
+fn collect_file_references(source: &str, ast: Option<&[Stmt]>, target: &str) -> Vec<Range> {
     let mut ranges = Vec::new();
-    if let Some(ast) = state.ast() {
-        collect_ast_references(&state.text, ast, &word, &mut ranges);
+    if let Some(ast) = ast {
+        collect_ast_references(source, ast, target, &mut ranges);
     } else {
-        // Fallback to text matching if AST recovery failed completely
-        let text = &state.text;
-        let len = word.len();
-        for (line_idx, line) in text.lines().enumerate() {
+        let len = target.len();
+        let is_ident_char = |c: char| c.is_alphanumeric() || c == '_';
+        for (line_idx, line) in source.lines().enumerate() {
             let mut start_col = 0;
-            while let Some(found_idx) = line[start_col..].find(&word) {
+            while let Some(found_idx) = line[start_col..].find(target) {
                 let col = start_col + found_idx;
                 let prev_char = if col > 0 { line[..col].chars().last() } else { None };
                 let next_char = line[col + len..].chars().next();
 
-                let is_ident_char = |c: char| c.is_alphanumeric() || c == '_';
                 let left_ok = prev_char.map_or(true, |c| !is_ident_char(c));
                 let right_ok = next_char.map_or(true, |c| !is_ident_char(c));
 
@@ -181,14 +355,81 @@ pub(crate) fn get_references(uri: &Url, state: Option<&DocumentState>, pos: Posi
             }
         }
     }
-
     ranges
-        .into_iter()
-        .map(|range| Location {
+}
+
+pub(crate) fn get_references(
+    uri: &Url,
+    state: Option<&DocumentState>,
+    documents: &HashMap<Url, DocumentState>,
+    pos: Position,
+) -> Vec<Location> {
+    let state = match state {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    let word = match get_word_at_position(&state.text, pos) {
+        Some(w) => w,
+        None => return Vec::new(),
+    };
+
+    let mut locations = Vec::new();
+
+    // 1. Current document
+    let current_ranges = collect_file_references(&state.text, state.ast(), &word);
+    for r in current_ranges {
+        locations.push(Location {
             uri: uri.clone(),
-            range,
-        })
-        .collect()
+            range: r,
+        });
+    }
+
+    // 2. Other open documents in the workspace
+    for (doc_uri, doc_state) in documents {
+        if doc_uri == uri {
+            continue;
+        }
+        let doc_ranges = collect_file_references(&doc_state.text, doc_state.ast(), &word);
+        for r in doc_ranges {
+            locations.push(Location {
+                uri: doc_uri.clone(),
+                range: r,
+            });
+        }
+    }
+
+    // 3. Search non-open files in workspace directory
+    if let Ok(parsed_url) = url::Url::parse(uri.as_str())
+        && let Ok(file_path) = parsed_url.to_file_path()
+        && let Some(parent_dir) = file_path.parent()
+    {
+        if let Ok(entries) = std::fs::read_dir(parent_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() && path.extension().is_some_and(|e| e == "qn") {
+                    if let Ok(target_url) = url::Url::from_file_path(&path)
+                        && let Ok(target_uri) = target_url.as_str().parse()
+                    {
+                        if target_uri == *uri || documents.contains_key(&target_uri) {
+                            continue;
+                        }
+                        if let Ok(source) = std::fs::read_to_string(&path) {
+                            let (ast, _) = quince::compile_recovering(&source);
+                            let ranges = collect_file_references(&source, Some(&ast), &word);
+                            for r in ranges {
+                                locations.push(Location {
+                                    uri: target_uri.clone(),
+                                    range: r,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    locations
 }
 
 fn collect_ast_references(source: &str, stmts: &[Stmt], target: &str, ranges: &mut Vec<Range>) {
@@ -308,18 +549,37 @@ fn visit_stmt(source: &str, stmt: &Stmt, target: &str, ranges: &mut Vec<Range>) 
     }
 }
 
-fn visit_fndecl(source: &str, decl: &FnDecl, span: Span, target: &str, ranges: &mut Vec<Range>) {
+fn check_type_expr(source: &str, ty: &TypeExpr, target: &str, ranges: &mut Vec<Range>) {
+    if let TypeName::Named(name) = &ty.name {
+        if name == target {
+            if let Some(r) = find_name_range(source, ty.span, target) {
+                ranges.push(r);
+            }
+        }
+    }
+    for arg in &ty.args {
+        check_type_expr(source, arg, target, ranges);
+    }
+}
+
+fn visit_fndecl(source: &str, decl: &FnDecl, _span: Span, target: &str, ranges: &mut Vec<Range>) {
     if decl.name == target {
-        if let Some(r) = find_name_range(source, span, target) {
+        if let Some(r) = find_name_range(source, decl.name_span, target) {
             ranges.push(r);
         }
     }
     for param in &decl.params {
         if param.name == target {
-            if let Some(r) = find_name_range(source, span, target) {
+            if let Some(r) = find_name_range(source, param.span, target) {
                 ranges.push(r);
             }
         }
+        if let Some(ty) = &param.ty {
+            check_type_expr(source, ty, target, ranges);
+        }
+    }
+    if let Some(ret) = &decl.returns {
+        check_type_expr(source, ret, target, ranges);
     }
     collect_ast_references(source, &decl.body.stmts, target, ranges);
 }
@@ -412,23 +672,22 @@ fn fn_decl_signature(decl: &FnDecl) -> String {
 pub(crate) fn rename_symbol(
     uri: &Url,
     state: Option<&DocumentState>,
+    documents: &HashMap<Url, DocumentState>,
     pos: Position,
     new_name: &str,
 ) -> Option<WorkspaceEdit> {
-    let refs = get_references(uri, state, pos);
+    let refs = get_references(uri, state, documents, pos);
     if refs.is_empty() {
         return None;
     }
-    let edits: Vec<TextEdit> = refs
-        .into_iter()
-        .map(|loc| TextEdit {
+
+    let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+    for loc in refs {
+        changes.entry(loc.uri).or_default().push(TextEdit {
             range: loc.range,
             new_text: new_name.to_string(),
-        })
-        .collect();
-
-    let mut changes = HashMap::new();
-    changes.insert(uri.clone(), edits);
+        });
+    }
 
     Some(WorkspaceEdit {
         changes: Some(changes),

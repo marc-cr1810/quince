@@ -26,23 +26,30 @@ use lsp_types::{
 };
 
 use quince::error::QuinceError;
+use crate::lsp::DocumentState;
 use crate::lsp::position::span_to_range;
 
-pub(crate) fn publish_diagnostics(connection: &Connection, uri: Url, source: &str) -> anyhow::Result<()> {
+pub(crate) fn publish_diagnostics(
+    connection: &Connection,
+    uri: Url,
+    state: Option<&DocumentState>,
+) -> anyhow::Result<()> {
+    let Some(state) = state else { return Ok(()); };
     let mut diagnostics = Vec::new();
 
-    let (program, errors) = quince::compile_recovering(source);
+    let (program, errors) = quince::compile_recovering(&state.text);
     for err in &errors {
-        diagnostics.push(quince_error_to_diagnostic(source, err));
+        diagnostics.push(quince_error_to_diagnostic(&state.text, err));
     }
 
     if !program.is_empty() {
-        let types = quince::sema::infer::infer(&program);
-        diagnostics.extend(
-            quince::sema::check::check(&program, &types)
-                .iter()
-                .map(|err| quince_error_to_diagnostic(source, err)),
-        );
+        if let Some(types) = &state.types {
+            diagnostics.extend(
+                quince::sema::check::check(&program, types)
+                    .iter()
+                    .map(|err| quince_error_to_diagnostic(&state.text, err)),
+            );
+        }
     }
 
     let params = PublishDiagnosticsParams {

@@ -1060,4 +1060,64 @@ fn throw_non_error_is_refused() {
     assert_eq!(all_errors(src), vec!["cannot throw an int"]);
 }
 
+#[test]
+fn custom_module_import_names_resolution() {
+    let gates_src = "class Had {\n  op init(target) { self.target = target }\n  fn apply(state) { return state }\n}\nfn create_engine(num_qubits) { return Had(0) }\n";
+    let main_src = "from gates import Had, create_engine\nlet h = Had(1)\nlet eng = create_engine(2)\n";
+
+    let gates_stmts = crate::compile(gates_src).expect("gates compiles");
+    let main_stmts = crate::compile(main_src).expect("main compiles");
+
+    let resolver = |name: &str| {
+        if name == "gates" {
+            Some(gates_stmts.clone())
+        } else {
+            None
+        }
+    };
+
+    let types = infer_with_resolver(&main_stmts, &resolver);
+    let end = main_src.len() as u32;
+
+    assert_eq!(types.of_name("h", end).class_name(), Some("Had"));
+    assert_eq!(types.of_name("eng", end).class_name(), Some("Had"));
+
+    // Check that Had's methods were transferred to main's scope
+    assert!(types.has_method("Had", "apply"));
+
+    // Check fn_decl for create_engine
+    let fn_decl = types.function("create_engine").expect("fn decl registered");
+    assert_eq!(fn_decl.name, "create_engine");
+    assert_eq!(fn_decl.params.len(), 1);
+    assert_eq!(fn_decl.params[0].name, "num_qubits");
+}
+
+#[test]
+fn custom_module_dot_import_resolution() {
+    let gates_src = "class Had {\n  op init(target) { self.target = target }\n}\nfn create_engine(num_qubits) { return Had(0) }\n";
+    let main_src = "import gates\nlet h = gates.Had(1)\nlet eng = gates.create_engine(2)\n";
+
+    let gates_stmts = crate::compile(gates_src).expect("gates compiles");
+    let main_stmts = crate::compile(main_src).expect("main compiles");
+
+    let resolver = |name: &str| {
+        if name == "gates" {
+            Some(gates_stmts.clone())
+        } else {
+            None
+        }
+    };
+
+    let types = infer_with_resolver(&main_stmts, &resolver);
+    let end = main_src.len() as u32;
+
+    assert_eq!(types.of_name("gates", end), Type::module("gates"));
+    assert_eq!(types.of_path("gates.Had()", end).class_name(), Some("Had"));
+    assert_eq!(types.of_path("gates.create_engine()", end).class_name(), Some("Had"));
+
+    let symbols = types.module_symbols("gates");
+    assert!(symbols.iter().any(|s| s.name == "Had" && s.kind == Kind::Class));
+    assert!(symbols.iter().any(|s| s.name == "create_engine" && s.kind == Kind::Function));
+}
+
 

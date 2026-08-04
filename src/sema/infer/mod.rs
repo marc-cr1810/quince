@@ -52,23 +52,24 @@ use crate::syntax::token::Span;
 
 
 /// What one class declaration said, before anything was worked out from it.
-pub(crate) struct ClassInfo {
+#[derive(Clone, Debug)]
+pub struct ClassInfo {
     /// The name after `extends`, if there was one. Kept as a name rather than a
     /// resolved handle because a parent may be declared further down the file,
     /// or not at all.
-    pub(crate) parent: Option<String>,
-    pub(crate) methods: HashMap<String, Rc<FnDecl>>,
+    pub parent: Option<String>,
+    pub methods: HashMap<String, Rc<FnDecl>>,
     /// The fields the body declared, by name, and how far each reaches.
     ///
     /// Only the declared ones. A field an `op init` assigned into existence is
     /// found by [`Pass::fields_of`] walking the methods, and carries no
     /// visibility because nothing wrote one.
-    pub(crate) fields: HashMap<String, Visibility>,
-    pub(crate) openness: crate::syntax::ast::Openness,
+    pub fields: HashMap<String, Visibility>,
+    pub openness: crate::syntax::ast::Openness,
     /// The whole declaration, so an editor can ask which class an offset is
     /// inside of — which is what a visibility-aware completion needs and no
     /// other question here does.
-    pub(crate) span: Span,
+    pub span: Span,
 }
 
 /// One name in scope, and what is known about it.
@@ -123,6 +124,45 @@ pub(crate) fn lookup(bindings: &[Binding], name: &str, offset: u32) -> Option<us
         .map(|(index, _)| index)
 }
 
+/// What a custom module exports to importers.
+#[derive(Clone, Debug)]
+pub struct ModuleInfo {
+    pub name: String,
+    pub symbols: Vec<Symbol>,
+    pub classes: HashMap<String, ClassInfo>,
+    pub functions: HashMap<String, Type>,
+    pub fn_decls: HashMap<String, Rc<FnDecl>>,
+    pub methods: HashMap<(String, String), Type>,
+    pub fields: HashMap<String, HashMap<String, Type>>,
+}
+
+/// A hook allowing module imports to be resolved against workspace documents or the filesystem.
+pub trait ModuleResolver {
+    fn resolve_module(&self, name: &str) -> Option<Vec<Stmt>>;
+}
+
+pub struct NoResolver;
+impl ModuleResolver for NoResolver {
+    fn resolve_module(&self, _name: &str) -> Option<Vec<Stmt>> {
+        None
+    }
+}
+
+impl<F> ModuleResolver for F
+where
+    F: Fn(&str) -> Option<Vec<Stmt>>,
+{
+    fn resolve_module(&self, name: &str) -> Option<Vec<Stmt>> {
+        self(name)
+    }
+}
+
+impl ModuleResolver for &dyn ModuleResolver {
+    fn resolve_module(&self, name: &str) -> Option<Vec<Stmt>> {
+        (**self).resolve_module(name)
+    }
+}
+
 /// Everything the pass worked out, ready to be asked questions.
 pub struct Types {
     /// Keyed by where the expression starts, which is unique: no two
@@ -148,6 +188,8 @@ pub struct Types {
     pub(crate) natives: HashMap<String, &'static crate::runtime::value::Native>,
     /// What each method returns, by the class that declares it and its name.
     pub(crate) methods: HashMap<(String, String), Type>,
+    /// Custom non-stdlib modules imported by this program.
+    pub(crate) modules: HashMap<String, ModuleInfo>,
 }
 
 impl Types {
@@ -453,6 +495,20 @@ impl Types {
         }
     }
 
+    /// Every symbol a module (custom or stdlib) offers after its dot.
+    pub fn module_symbols(&self, module: &str) -> Vec<Symbol> {
+        if let Some(info) = self.modules.get(module) {
+            info.symbols.clone()
+        } else {
+            crate::sema::symbols::module_symbols(module)
+        }
+    }
+
+    /// Access the resolved custom modules.
+    pub fn modules(&self) -> &HashMap<String, ModuleInfo> {
+        &self.modules
+    }
+
     /// What a dotted path evaluates to, as seen from `offset`.
     ///
     /// `p.origin.x`, `math.pi`, `b.twin().n` — the form an editor has in hand
@@ -494,9 +550,26 @@ impl Types {
         for segment in segments {
             let Type::Class(class) = &ty else {
                 ty = match (&ty, called(segment)) {
-                    (Type::Module(module), None) => module_member(module, segment),
+                    (Type::Module(module), None) => {
+                        if let Some(info) = self.modules.get(module.as_ref()) {
+                            info.symbols
+                                .iter()
+                                .find(|s| s.name == segment)
+                                .map_or(Type::Unknown, |s| s.ty.clone())
+                        } else {
+                            module_member(module, segment)
+                        }
+                    }
                     (Type::Module(module), Some(name)) => {
-                        module_native(module, name).map_or(Type::Unknown, returned_by)
+                        if let Some(info) = self.modules.get(module.as_ref()) {
+                            if info.classes.contains_key(name) {
+                                Type::class(name)
+                            } else {
+                                info.functions.get(name).cloned().unwrap_or(Type::Unknown)
+                            }
+                        } else {
+                            module_native(module, name).map_or(Type::Unknown, returned_by)
+                        }
                     }
                     _ => Type::Unknown,
                 };
@@ -534,14 +607,13 @@ pub(crate) fn called(segment: &str) -> Option<&str> {
 }
 
 /// Works out what it can about a program.
-///
-/// Takes the AST the resolver accepted, though it does not read the slots —
-/// what it needs is that names mean what the scope rules say they mean. The
-/// language server hands it unresolved trees too, because a document mid-edit
-/// is often all there is, and the answers are the same wherever a name is
-/// unambiguous.
 pub fn infer(program: &[Stmt]) -> Types {
-    let mut pass = Infer::default();
+    infer_with_resolver(program, &NoResolver)
+}
+
+/// Works out what it can about a program, resolving custom imported modules.
+pub fn infer_with_resolver(program: &[Stmt], resolver: &dyn ModuleResolver) -> Types {
+    let mut pass = Infer::new(resolver);
     pass.declare(program);
     pass.fields();
     pass.scopes.push(FILE);
@@ -555,5 +627,6 @@ pub fn infer(program: &[Stmt]) -> Types {
         fn_decls: pass.fn_decls,
         natives: pass.natives,
         methods: pass.method_returns,
+        modules: pass.modules,
     }
 }

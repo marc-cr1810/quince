@@ -12,8 +12,10 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::builtins::stdlib;
-use crate::sema::infer::{Binding, ClassInfo, FILE, lookup, module_native};
-use crate::sema::symbols::{Kind, Symbol, described_by, module_symbols, symbol_for};
+use crate::sema::infer::{
+    Binding, ClassInfo, FILE, ModuleInfo, ModuleResolver, NoResolver, infer_with_resolver, lookup, module_native,
+};
+use crate::sema::symbols::{Kind, Symbol, described_by, module_symbols, push_once, symbol_for};
 use crate::sema::types::{
     ClassType, Type, binary, builtin_ancestor, builtin_constructor, module_member, returned_by, stated,
 };
@@ -23,8 +25,10 @@ use crate::syntax::ast::{
 use crate::syntax::token::Span;
 
 
-#[derive(Default)]
-pub(crate) struct Infer {
+pub(crate) struct Infer<'a> {
+    pub(crate) resolver: &'a dyn ModuleResolver,
+    pub(crate) modules: HashMap<String, ModuleInfo>,
+    pub(crate) computing_modules: HashSet<String>,
     pub(crate) classes: HashMap<String, ClassInfo>,
     pub(crate) functions: HashMap<String, Rc<FnDecl>>,
     /// Return types worked out so far, keyed by the identity of the
@@ -60,7 +64,35 @@ pub(crate) struct Infer {
     pub(crate) receivers: Vec<String>,
 }
 
-impl Infer {
+impl Default for Infer<'static> {
+    fn default() -> Self {
+        Self::new(&NoResolver)
+    }
+}
+
+impl<'a> Infer<'a> {
+    pub(crate) fn new(resolver: &'a dyn ModuleResolver) -> Self {
+        Self {
+            resolver,
+            modules: HashMap::new(),
+            computing_modules: HashSet::new(),
+            classes: HashMap::new(),
+            functions: HashMap::new(),
+            returns: HashMap::new(),
+            computing: HashSet::new(),
+            computing_fields: HashSet::new(),
+            fields: HashMap::new(),
+            function_returns: HashMap::new(),
+            fn_decls: HashMap::new(),
+            natives: HashMap::new(),
+            method_returns: HashMap::new(),
+            exprs: HashMap::new(),
+            bindings: Vec::new(),
+            scopes: Vec::new(),
+            receivers: Vec::new(),
+        }
+    }
+
     /// Finds every class and every function first, so a call to one declared
     /// further down is not a call to nothing.
     ///
@@ -322,40 +354,138 @@ impl Infer {
 
             StmtKind::Import { module, names, .. } => {
                 let known = stdlib::module_named(module).is_some();
-                match names {
-                    ImportNames::Module => {
-                        let ty = if known {
-                            Type::module(module)
-                        } else {
-                            Type::Unknown
-                        };
-                        self.bind(module, Kind::Module, ty, stmt.span.start);
-                    }
-                    ImportNames::Names(names) => {
-                        // The member's own symbol, so `from math import floor`
-                        // leaves `floor` with the documentation and parameters
-                        // `math.floor` has. Binding only its type would have
-                        // made the shorter spelling the worse one.
-                        let members = module_symbols(module);
-                        for name in names {
-                            match members.iter().find(|symbol| symbol.name == name.name) {
-                                Some(symbol) if known => {
-                                    // Which native the name now stands for, so
-                                    // `floor(x)` is checked the way
-                                    // `math.floor(x)` is. The symbol carries
-                                    // the documentation and the parameter
-                                    // *names*; this carries what they accept.
-                                    if let Some(native) = module_native(module, &name.name) {
-                                        self.natives.insert(name.name.clone(), native);
+                if !known
+                    && !self.modules.contains_key(module)
+                    && self.computing_modules.insert(module.clone())
+                {
+                    if let Some(stmts) = self.resolver.resolve_module(module) {
+                        let module_types = infer_with_resolver(&stmts, self.resolver);
+                        let mut exported_symbols = Vec::new();
+                        for binding in &module_types.bindings {
+                            if binding.scope == FILE && binding.symbol.visibility.exported() {
+                                let mut sym = binding.symbol.clone();
+                                if sym.kind == Kind::Class {
+                                    if let Some(info) = module_types.classes.get(&sym.name) {
+                                        sym.params = info
+                                            .methods
+                                            .get("init")
+                                            .map(|init| {
+                                                init.params
+                                                    .iter()
+                                                    .filter(|p| !p.receiver)
+                                                    .map(|p| p.name.clone())
+                                                    .collect()
+                                            })
+                                            .unwrap_or_default();
                                     }
-                                    self.bind_symbol(symbol.clone(), stmt.span.start)
                                 }
-                                _ => self.bind(
+                                push_once(&mut exported_symbols, sym);
+                            }
+                        }
+                        let info = ModuleInfo {
+                            name: module.clone(),
+                            symbols: exported_symbols,
+                            classes: module_types.classes.clone(),
+                            functions: module_types.functions.clone(),
+                            fn_decls: module_types.fn_decls.clone(),
+                            methods: module_types.methods.clone(),
+                            fields: module_types.fields.clone(),
+                        };
+                        self.modules.insert(module.clone(), info);
+                    }
+                    self.computing_modules.remove(module);
+                }
+
+                if known {
+                    match names {
+                        ImportNames::Module => {
+                            let ty = Type::module(module);
+                            self.bind(module, Kind::Module, ty, stmt.span.start);
+                        }
+                        ImportNames::Names(names) => {
+                            let members = module_symbols(module);
+                            for name in names {
+                                match members.iter().find(|symbol| symbol.name == name.name) {
+                                    Some(symbol) => {
+                                        if let Some(native) = module_native(module, &name.name) {
+                                            self.natives.insert(name.name.clone(), native);
+                                        }
+                                        self.bind_symbol(symbol.clone(), stmt.span.start);
+                                    }
+                                    _ => self.bind(
+                                        &name.name,
+                                        Kind::Variable,
+                                        Type::Unknown,
+                                        stmt.span.start,
+                                    ),
+                                }
+                            }
+                        }
+                    }
+                } else if let Some(module_info) = self.modules.get(module).cloned() {
+                    match names {
+                        ImportNames::Module => {
+                            let ty = Type::module(module);
+                            self.bind(module, Kind::Module, ty, stmt.span.start);
+                        }
+                        ImportNames::Names(names) => {
+                            for name in names {
+                                if let Some(symbol) =
+                                    module_info.symbols.iter().find(|s| s.name == name.name)
+                                {
+                                    if symbol.kind == Kind::Class {
+                                        if let Some(info) = module_info.classes.get(&name.name) {
+                                            self.classes.insert(name.name.clone(), info.clone());
+                                        }
+                                        for ((cls, mname), mtype) in &module_info.methods {
+                                            if cls == &name.name {
+                                                self.method_returns.insert(
+                                                    (cls.clone(), mname.clone()),
+                                                    mtype.clone(),
+                                                );
+                                            }
+                                        }
+                                        if let Some(fmap) = module_info.fields.get(&name.name) {
+                                            self.fields.insert(name.name.clone(), fmap.clone());
+                                        }
+                                    } else if symbol.kind == Kind::Function {
+                                        if let Some(retty) = module_info.functions.get(&name.name)
+                                        {
+                                            self.function_returns
+                                                .insert(name.name.clone(), retty.clone());
+                                        }
+                                        if let Some(decl) = module_info.fn_decls.get(&name.name) {
+                                            self.functions
+                                                .insert(name.name.clone(), Rc::clone(decl));
+                                            self.fn_decls
+                                                .insert(name.name.clone(), Rc::clone(decl));
+                                        }
+                                    }
+                                    self.bind_symbol(symbol.clone(), stmt.span.start);
+                                } else {
+                                    self.bind(
+                                        &name.name,
+                                        Kind::Variable,
+                                        Type::Unknown,
+                                        stmt.span.start,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    match names {
+                        ImportNames::Module => {
+                            self.bind(module, Kind::Module, Type::Unknown, stmt.span.start);
+                        }
+                        ImportNames::Names(names) => {
+                            for name in names {
+                                self.bind(
                                     &name.name,
                                     Kind::Variable,
                                     Type::Unknown,
                                     stmt.span.start,
-                                ),
+                                );
                             }
                         }
                     }

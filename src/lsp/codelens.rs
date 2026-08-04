@@ -1,5 +1,6 @@
 //! CodeLens provider.
 
+use std::collections::HashMap;
 use lsp_types::{Command, CodeLens, Position, Uri as Url};
 use quince::syntax::ast::StmtKind;
 use crate::lsp::DocumentState;
@@ -9,6 +10,7 @@ use crate::lsp::position::span_to_range;
 pub(crate) fn get_code_lenses(
     uri: &Url,
     state: Option<&DocumentState>,
+    documents: &HashMap<Url, DocumentState>,
 ) -> Vec<CodeLens> {
     let mut lenses = Vec::new();
     let Some(state) = state else {
@@ -33,8 +35,8 @@ pub(crate) fn get_code_lenses(
                 character: name_range.start.character,
             };
 
-            let refs = get_references(uri, Some(state), pos);
-            let ref_count = refs.iter().filter(|loc| loc.range != name_range).count();
+            let refs = get_references(uri, Some(state), documents, pos);
+            let ref_count = refs.iter().filter(|loc| loc.range != name_range || loc.uri != *uri).count();
 
             let title = if ref_count == 1 {
                 "1 reference".to_string()

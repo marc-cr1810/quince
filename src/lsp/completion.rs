@@ -104,7 +104,7 @@ pub(crate) fn get_completions(state: Option<&DocumentState>, pos: Position) -> V
         let col = (pos.character as usize).min(line.len());
         match import_site(&line[..col]) {
             Some(ImportSite::Module) => {
-                return quince::builtins::stdlib::MODULES
+                let mut items: Vec<CompletionItem> = quince::builtins::stdlib::MODULES
                     .iter()
                     .map(|module| CompletionItem {
                         label: module.name.to_string(),
@@ -122,12 +122,36 @@ pub(crate) fn get_completions(state: Option<&DocumentState>, pos: Position) -> V
                         ..Default::default()
                     })
                     .collect();
+
+                if let Some(types) = state.types() {
+                    for (mod_name, mod_info) in types.modules() {
+                        if !items.iter().any(|item| item.label == *mod_name) {
+                            items.push(CompletionItem {
+                                label: mod_name.clone(),
+                                kind: Some(CompletionItemKind::MODULE),
+                                detail: Some(format!(
+                                    "{} — {}",
+                                    mod_name,
+                                    mod_info
+                                        .symbols
+                                        .iter()
+                                        .map(|s| s.name.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                )),
+                                ..Default::default()
+                            });
+                        }
+                    }
+                }
+                return items;
             }
             Some(ImportSite::Member(module)) => {
-                return quince::sema::symbols::module_symbols(&module)
-                    .iter()
-                    .map(item_of)
-                    .collect();
+                let symbols = state
+                    .types()
+                    .map(|types| types.module_symbols(&module))
+                    .unwrap_or_else(|| quince::sema::symbols::module_symbols(&module));
+                return symbols.iter().map(item_of).collect();
             }
             None => {}
         }

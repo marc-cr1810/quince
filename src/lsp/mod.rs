@@ -59,6 +59,47 @@ use crate::lsp::position::position_to_offset;
 use crate::lsp::selection::get_selection_ranges;
 use crate::lsp::semantic::get_semantic_tokens;
 
+pub(crate) struct LspResolver<'a> {
+    pub(crate) current_uri: Option<&'a Url>,
+    pub(crate) documents: &'a HashMap<Url, DocumentState>,
+}
+
+impl<'a> infer::ModuleResolver for LspResolver<'a> {
+    fn resolve_module(&self, name: &str) -> Option<Vec<Stmt>> {
+        let target_filename = format!("{name}.qn");
+        for (uri, state) in self.documents {
+            let path_str = uri.as_str();
+            if path_str.ends_with(&format!("/{target_filename}")) || path_str.ends_with(&target_filename) {
+                if let Some(ast) = state.ast() {
+                    return Some(ast.to_vec());
+                }
+            }
+        }
+
+        if let Some(current_uri) = self.current_uri {
+            if let Ok(parsed) = url::Url::parse(current_uri.as_str()) {
+                if parsed.scheme() == "file" {
+                    if let Ok(file_path) = parsed.to_file_path() {
+                        if let Some(parent) = file_path.parent() {
+                            let cand = parent.join(&target_filename);
+                            if cand.exists() && cand.is_file() {
+                                if let Ok(src) = std::fs::read_to_string(&cand) {
+                                    let (stmts, _) = quince::compile_recovering(&src);
+                                    if !stmts.is_empty() {
+                                        return Some(stmts);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        None
+    }
+}
+
 pub(crate) struct DocumentState {
     text: String,
     ast: Option<Vec<Stmt>>,
@@ -66,19 +107,33 @@ pub(crate) struct DocumentState {
 }
 
 impl DocumentState {
+    #[allow(dead_code)]
     pub(crate) fn new(text: String, previous: Option<DocumentState>) -> DocumentState {
+        Self::new_with_documents(text, None, &HashMap::new(), previous)
+    }
+
+    pub(crate) fn new_with_documents(
+        text: String,
+        uri: Option<&Url>,
+        documents: &HashMap<Url, DocumentState>,
+        previous: Option<DocumentState>,
+    ) -> DocumentState {
         let (stmts, errors) = quince::compile_recovering(&text);
         let ast = if !stmts.is_empty() { Some(stmts) } else { None };
+        let resolver = LspResolver {
+            current_uri: uri,
+            documents,
+        };
         let types = match (&ast, previous) {
             (Some(ast), Some(prev)) => {
-                let inferred = infer::infer(ast);
+                let inferred = infer::infer_with_resolver(ast, &resolver);
                 if !errors.is_empty() && prev.types.is_some() {
                     prev.types
                 } else {
                     Some(inferred)
                 }
             }
-            (Some(ast), None) => Some(infer::infer(ast)),
+            (Some(ast), None) => Some(infer::infer_with_resolver(ast, &resolver)),
             (None, Some(prev)) => prev.types,
             (None, None) => None,
         };
@@ -275,7 +330,7 @@ pub(crate) fn handle_request(
             let params: ReferenceParams = serde_json::from_value(req.params)?;
             let uri = &params.text_document_position.text_document.uri;
             let pos = params.text_document_position.position;
-            let locations = get_references(uri, documents.get(uri), pos);
+            let locations = get_references(uri, documents.get(uri), documents, pos);
             let resp = Response::new_ok(id, locations);
             connection.sender.send(Message::Response(resp))?;
         }
@@ -283,7 +338,7 @@ pub(crate) fn handle_request(
             let params: RenameParams = serde_json::from_value(req.params)?;
             let uri = &params.text_document_position.text_document.uri;
             let pos = params.text_document_position.position;
-            let edit = rename_symbol(uri, documents.get(uri), pos, &params.new_name);
+            let edit = rename_symbol(uri, documents.get(uri), documents, pos, &params.new_name);
             let resp = Response::new_ok(id, edit);
             connection.sender.send(Message::Response(resp))?;
         }
@@ -339,7 +394,7 @@ pub(crate) fn handle_request(
         CodeLensRequest::METHOD => {
             let params: CodeLensParams = serde_json::from_value(req.params)?;
             let uri = &params.text_document.uri;
-            let lenses = get_code_lenses(uri, documents.get(uri));
+            let lenses = get_code_lenses(uri, documents.get(uri), documents);
             let resp = Response::new_ok(id, lenses);
             connection.sender.send(Message::Response(resp))?;
         }
@@ -369,8 +424,11 @@ pub(crate) fn handle_notification(
             let uri = params.text_document.uri;
             let text = params.text_document.text;
             let previous = documents.remove(&uri);
-            documents.insert(uri.clone(), DocumentState::new(text.clone(), previous));
-            publish_diagnostics(connection, uri, &text)?;
+            documents.insert(
+                uri.clone(),
+                DocumentState::new_with_documents(text.clone(), Some(&uri), documents, previous),
+            );
+            publish_diagnostics(connection, uri.clone(), documents.get(&uri))?;
         }
         "textDocument/didChange" => {
             let params: DidChangeTextDocumentParams = serde_json::from_value(notif.params)?;
@@ -392,9 +450,9 @@ pub(crate) fn handle_notification(
             }
 
             let previous = documents.remove(&uri);
-            let state = DocumentState::new(updated_text.clone(), previous);
+            let state = DocumentState::new_with_documents(updated_text.clone(), Some(&uri), documents, previous);
             documents.insert(uri.clone(), state);
-            publish_diagnostics(connection, uri, &updated_text)?;
+            publish_diagnostics(connection, uri.clone(), documents.get(&uri))?;
         }
         "textDocument/didClose" => {
             let params: lsp_types::DidCloseTextDocumentParams = serde_json::from_value(notif.params)?;

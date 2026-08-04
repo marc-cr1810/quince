@@ -9,7 +9,8 @@ pub(crate) fn get_document_highlights(
     state: Option<&DocumentState>,
     pos: Position,
 ) -> Vec<DocumentHighlight> {
-    let refs = get_references(uri, state, pos);
+    let empty_docs = std::collections::HashMap::new();
+    let refs = get_references(uri, state, &empty_docs, pos);
     refs.into_iter()
         .map(|loc| DocumentHighlight {
             range: loc.range,

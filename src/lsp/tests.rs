@@ -1,6 +1,6 @@
 use super::*;
 
-use lsp_types::{HoverContents, MarkedString, Position, Range};
+use lsp_types::{GotoDefinitionResponse, HoverContents, MarkedString, Position, Range};
 
 use crate::cursor::in_type_position;
 use crate::lsp::completion::{get_completions, text_before_dot};
@@ -485,11 +485,12 @@ fn test_references_and_rename_handlers() {
     let state = DocumentState::new(src.to_string(), None);
     let uri = "file:///test.qn".parse().unwrap();
     let pos = Position { line: 0, character: 3 }; // 'add'
+    let empty_docs = HashMap::new();
 
-    let refs = crate::lsp::navigate::get_references(&uri, Some(&state), pos);
+    let refs = crate::lsp::navigate::get_references(&uri, Some(&state), &empty_docs, pos);
     assert_eq!(refs.len(), 2);
 
-    let edit = crate::lsp::navigate::rename_symbol(&uri, Some(&state), pos, "sum").unwrap();
+    let edit = crate::lsp::navigate::rename_symbol(&uri, Some(&state), &empty_docs, pos, "sum").unwrap();
     let changes = edit.changes.unwrap();
     assert_eq!(changes.get(&uri).unwrap().len(), 2);
 }
@@ -550,7 +551,8 @@ fn test_ast_aware_references_ignores_comments_and_strings() {
     let state = DocumentState::new(src.to_string(), None);
     let uri = "file:///test.qn".parse().unwrap();
     let pos = Position { line: 1, character: 4 }; // 'add' variable
-    let refs = crate::lsp::navigate::get_references(&uri, Some(&state), pos);
+    let empty_docs = HashMap::new();
+    let refs = crate::lsp::navigate::get_references(&uri, Some(&state), &empty_docs, pos);
     assert_eq!(refs.len(), 2);
 }
 
@@ -626,9 +628,160 @@ fn test_code_lenses() {
     let src = "fn greet() {\n    return \"hi\"\n}\nlet g = greet()\n";
     let state = DocumentState::new(src.to_string(), None);
     let uri = "file:///test.qn".parse().unwrap();
-    let lenses = crate::lsp::codelens::get_code_lenses(&uri, Some(&state));
+    let empty_docs = HashMap::new();
+    let lenses = crate::lsp::codelens::get_code_lenses(&uri, Some(&state), &empty_docs);
     assert_eq!(lenses.len(), 1);
     assert_eq!(lenses[0].command.as_ref().unwrap().title, "1 reference");
+}
+
+#[test]
+fn test_lsp_cross_document_resolution() {
+    let math_utils_uri: Url = "file:///workspace/math_utils.qn".parse().unwrap();
+    let math_utils_src = "class Vector {\n op init(x, y) { self.x = x\n self.y = y }\n}\nfn square(x) { return x * x }\n";
+    let math_utils_state = DocumentState::new(math_utils_src.to_string(), None);
+
+    let mut documents = HashMap::new();
+    documents.insert(math_utils_uri.clone(), math_utils_state);
+
+    let main_uri: Url = "file:///workspace/main.qn".parse().unwrap();
+    let main_src = "from math_utils import Vector, square\nlet v = Vector(3, 4)\nlet sq = square(5)\n";
+    let main_state = DocumentState::new_with_documents(
+        main_src.to_string(),
+        Some(&main_uri),
+        &documents,
+        None,
+    );
+
+    let types = main_state.types().expect("types inferred for main");
+    let end = main_src.len() as u32;
+
+    assert_eq!(types.of_name("v", end).class_name(), Some("Vector"));
+
+    // Check completion for `from math_utils import `
+    let pos = Position { line: 0, character: 23 };
+    let completions = get_completions(Some(&main_state), pos);
+    let labels: Vec<_> = completions.into_iter().map(|c| c.label).collect();
+    assert!(labels.contains(&"Vector".to_string()), "Completions: {labels:?}");
+    assert!(labels.contains(&"square".to_string()), "Completions: {labels:?}");
+
+    // Check dot completion on `v.`
+    let pos_dot = Position { line: 1, character: 7 }; // right after `v`
+    let v_members = main_state.members_before("v", position_to_offset(main_src, pos_dot));
+    let member_names: Vec<_> = v_members.into_iter().map(|s| s.name).collect();
+    assert!(member_names.contains(&"x".to_string()), "Members: {member_names:?}");
+    assert!(member_names.contains(&"y".to_string()), "Members: {member_names:?}");
+}
+
+#[test]
+fn test_cross_document_diagnostics_no_unknown_type() {
+    let matrix_uri: Url = "file:///workspace/matrix.qn".parse().unwrap();
+    let matrix_src = "public class Matrix {\n op init() {}\n}\nfn matrix_identity(n) { return Matrix() }\n";
+    let matrix_state = DocumentState::new(matrix_src.to_string(), None);
+
+    let mut documents = HashMap::new();
+    documents.insert(matrix_uri.clone(), matrix_state);
+
+    let gate_uri: Url = "file:///workspace/gate.qn".parse().unwrap();
+    let gate_src = "from matrix import Matrix, matrix_identity\npublic class QuantumGate {\n public fn get_matrix(): Matrix {\n return matrix_identity(2)\n }\n}\n";
+    let gate_state = DocumentState::new_with_documents(
+        gate_src.to_string(),
+        Some(&gate_uri),
+        &documents,
+        None,
+    );
+
+    let (program, errors) = quince::compile_recovering(gate_src);
+    assert!(errors.is_empty());
+    let types = gate_state.types().expect("types inferred for gate");
+    let check_errors = quince::sema::check::check(&program, types);
+    assert!(
+        check_errors.is_empty(),
+        "Expected zero diagnostics/type errors for imported Matrix class, but got: {check_errors:?}"
+    );
+}
+
+#[test]
+fn test_goto_definition_cross_document() {
+    let matrix_uri: Url = "file:///workspace/matrix.qn".parse().unwrap();
+    let matrix_src = "public class Matrix {\n op init() {}\n}\nfn matrix_identity(n) { return Matrix() }\n";
+    let matrix_state = DocumentState::new(matrix_src.to_string(), None);
+
+    let mut documents = HashMap::new();
+    documents.insert(matrix_uri.clone(), matrix_state);
+
+    let gate_uri: Url = "file:///workspace/gate.qn".parse().unwrap();
+    let gate_src = "from matrix import Matrix, matrix_identity\npublic class QuantumGate {\n public fn get_matrix(): Matrix {\n return matrix_identity(2)\n }\n}\n";
+    let gate_state = DocumentState::new_with_documents(
+        gate_src.to_string(),
+        Some(&gate_uri),
+        &documents,
+        None,
+    );
+
+    // 1. Definition on `Matrix` type annotation in get_matrix(): Matrix
+    // Line 2, character 25 is on `Matrix`
+    let pos_matrix = Position { line: 2, character: 25 };
+    let def_matrix = get_definition(&gate_uri, Some(&gate_state), &documents, pos_matrix);
+    assert!(def_matrix.is_some(), "Definition for Matrix should be found");
+    if let Some(GotoDefinitionResponse::Scalar(loc)) = def_matrix {
+        assert_eq!(loc.uri, matrix_uri);
+    } else {
+        panic!("Expected scalar location for Matrix");
+    }
+
+    // 2. Definition on `matrix_identity` call
+    // Line 3, character 15 is on `matrix_identity`
+    let pos_fn = Position { line: 3, character: 15 };
+    let def_fn = get_definition(&gate_uri, Some(&gate_state), &documents, pos_fn);
+    assert!(def_fn.is_some(), "Definition for matrix_identity should be found");
+    if let Some(GotoDefinitionResponse::Scalar(loc)) = def_fn {
+        assert_eq!(loc.uri, matrix_uri);
+    } else {
+        panic!("Expected scalar location for matrix_identity");
+    }
+
+    // 3. Definition on `matrix` module name in `from matrix import ...`
+    // Line 0, character 7 is on `matrix`
+    let pos_mod = Position { line: 0, character: 7 };
+    let def_mod = get_definition(&gate_uri, Some(&gate_state), &documents, pos_mod);
+    assert!(def_mod.is_some(), "Definition for matrix module should be found");
+    if let Some(GotoDefinitionResponse::Scalar(loc)) = def_mod {
+        assert_eq!(loc.uri, matrix_uri);
+    } else {
+        panic!("Expected scalar location for matrix module");
+    }
+}
+
+#[test]
+fn test_cross_module_reference_count() {
+    let complex_uri: Url = "file:///workspace/complex.qn".parse().unwrap();
+    let complex_src = "public class Complex {\n op init(re, im) {}\n}\nfn complex_one(): Complex {\n return Complex(1.0, 0.0)\n}\n";
+    let complex_state = DocumentState::new(complex_src.to_string(), None);
+
+    let mut documents = HashMap::new();
+    documents.insert(complex_uri.clone(), complex_state);
+
+    let main_uri: Url = "file:///workspace/main.qn".parse().unwrap();
+    let main_src = "from complex import Complex, complex_one\nlet c1 = complex_one()\nlet c2 = complex_one()\n";
+    let main_state = DocumentState::new_with_documents(
+        main_src.to_string(),
+        Some(&main_uri),
+        &documents,
+        None,
+    );
+    documents.insert(main_uri.clone(), main_state);
+
+    let comp_state = documents.get(&complex_uri);
+    let lenses = crate::lsp::codelens::get_code_lenses(&complex_uri, comp_state, &documents);
+    let fn_lens = lenses
+        .iter()
+        .find(|l| l.range.start.line == 3)
+        .expect("code lens for complex_one");
+    assert_eq!(
+        fn_lens.command.as_ref().unwrap().title,
+        "3 references",
+        "Expected 3 references to complex_one across documents"
+    );
 }
 
 
