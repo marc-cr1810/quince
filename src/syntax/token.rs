@@ -4,7 +4,7 @@ use std::fmt;
 ///
 /// Line and column are derived from this on demand rather than stored, so the
 /// offsets stay the single source of truth.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Span {
     pub start: u32,
     pub end: u32,

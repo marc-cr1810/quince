@@ -784,5 +784,108 @@ fn test_cross_module_reference_count() {
     );
 }
 
+#[test]
+fn test_throw_custom_exception_subclass_across_modules() {
+    let errors_uri: Url = "file:///workspace/errors.qn".parse().unwrap();
+    let errors_src = r#"
+public class QuantumError extends Error {
+    public final details: string = ""
+    op init(message: string, details: string) {
+        super.init(message)
+        self.details = details
+    }
+}
+
+public final class CircuitValidationError extends QuantumError {
+    op init(reason: string) {
+        super.init("Circuit validation failed: " + reason, "")
+    }
+}
+"#;
+    let errors_state = DocumentState::new(errors_src.to_string(), None);
+    let mut documents = HashMap::new();
+    documents.insert(errors_uri.clone(), errors_state);
+
+    let circuit_uri: Url = "file:///workspace/circuit.qn".parse().unwrap();
+    let circuit_src = r#"
+from errors import CircuitValidationError
+
+fn validate(num_qubits: int) {
+    if num_qubits <= 0 {
+        throw CircuitValidationError("Circuit must have at least 1 qubit")
+    }
+}
+"#;
+    let circuit_state = DocumentState::new_with_documents(
+        circuit_src.to_string(),
+        Some(&circuit_uri),
+        &documents,
+        None,
+    );
+
+    let (program, errors) = quince::compile_recovering(circuit_src);
+    assert!(errors.is_empty());
+    let types = circuit_state.types().expect("types inferred for circuit");
+    let check_errors = quince::sema::check::check(&program, types);
+    assert!(
+        check_errors.is_empty(),
+        "expected zero diagnostics when throwing CircuitValidationError, got: {:?}",
+        check_errors
+    );
+}
+
+#[test]
+fn test_private_method_accessibility_inside_class_with_imports() {
+    let errors_uri: Url = "file:///workspace/errors.qn".parse().unwrap();
+    let errors_src = r#"
+public class CircuitValidationError extends Error {
+    op init(msg: string) { super.init(msg) }
+}
+"#;
+    let errors_state = DocumentState::new(errors_src.to_string(), None);
+    let mut documents = HashMap::new();
+    documents.insert(errors_uri.clone(), errors_state);
+
+    let circuit_uri: Url = "file:///workspace/circuit.qn".parse().unwrap();
+    let circuit_src = r#"
+from errors import CircuitValidationError
+
+public class QuantumCircuit {
+    public final num_qubits: int = 0
+
+    op init(num_qubits: int) {
+        self.num_qubits = num_qubits
+    }
+
+    private fn validate_qubit(q: int) {
+        if q < 0 || q >= self.num_qubits {
+            throw CircuitValidationError("out of bounds")
+        }
+    }
+
+    public fn h(qubit: int) {
+        self.validate_qubit(qubit)
+        return self
+    }
+}
+"#;
+    let circuit_state = DocumentState::new_with_documents(
+        circuit_src.to_string(),
+        Some(&circuit_uri),
+        &documents,
+        None,
+    );
+
+    let (program, errors) = quince::compile_recovering(circuit_src);
+    assert!(errors.is_empty());
+    let types = circuit_state.types().expect("types inferred for circuit");
+    let check_errors = quince::sema::check::check(&program, types);
+    assert!(
+        check_errors.is_empty(),
+        "expected zero diagnostics for private method call inside class, got: {:?}",
+        check_errors
+    );
+}
+
 
 

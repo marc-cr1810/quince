@@ -70,6 +70,8 @@ pub struct ClassInfo {
     /// inside of — which is what a visibility-aware completion needs and no
     /// other question here does.
     pub span: Span,
+    /// Whether this class was imported from another module file rather than declared locally.
+    pub is_imported: bool,
 }
 
 /// One name in scope, and what is known about it.
@@ -165,9 +167,8 @@ impl ModuleResolver for &dyn ModuleResolver {
 
 /// Everything the pass worked out, ready to be asked questions.
 pub struct Types {
-    /// Keyed by where the expression starts, which is unique: no two
-    /// expressions in one file begin at the same byte.
-    pub(crate) exprs: HashMap<u32, Type>,
+    /// Keyed by exact AST expression Span.
+    pub(crate) exprs: HashMap<Span, Type>,
     pub(crate) bindings: Vec<Binding>,
     pub(crate) classes: HashMap<String, ClassInfo>,
     pub(crate) fields: HashMap<String, HashMap<String, Type>>,
@@ -193,12 +194,19 @@ pub struct Types {
 }
 
 impl Types {
-    /// What the expression starting at `offset` evaluates to.
-    ///
-    /// Where two expressions start at the same byte — a call and the name being
-    /// called — the outer one answers, since it is the value the line produces.
-    pub fn of_expr(&self, offset: u32) -> Type {
-        self.exprs.get(&offset).cloned().unwrap_or_default()
+    /// What the expression at `span` evaluates to.
+    pub fn of_expr(&self, span: Span) -> Type {
+        self.exprs.get(&span).cloned().unwrap_or_default()
+    }
+
+    /// What the smallest expression containing `offset` evaluates to.
+    pub fn of_offset(&self, offset: u32) -> Type {
+        self.exprs
+            .iter()
+            .filter(|(span, _)| span.start <= offset && offset <= span.end)
+            .min_by_key(|(span, _)| span.end - span.start)
+            .map(|(_, ty)| ty.clone())
+            .unwrap_or_default()
     }
 
     /// What `name` holds, as seen from `offset`. See [`lookup`].
@@ -268,12 +276,25 @@ impl Types {
         self.fn_decls.get(name)
     }
 
+    /// Looks up class info across current document classes and imported modules.
+    pub fn class_info(&self, class: &str) -> Option<&ClassInfo> {
+        if let Some(info) = self.classes.get(class) {
+            return Some(info);
+        }
+        for module in self.modules.values() {
+            if let Some(info) = module.classes.get(class) {
+                return Some(info);
+            }
+        }
+        None
+    }
+
     /// The method `name` on `class`, searching its ancestors.
     pub fn method_of(&self, class: &str, name: &str) -> Option<&Rc<FnDecl>> {
         let mut current = class;
         let mut seen = 0;
         loop {
-            let info = self.classes.get(current)?;
+            let info = self.class_info(current)?;
             if let Some(decl) = info.methods.get(name) {
                 return Some(decl);
             }
@@ -292,7 +313,7 @@ impl Types {
         let mut current = class.to_string();
         let mut seen = 0;
         loop {
-            let info = self.classes.get(&current)?;
+            let info = self.class_info(&current)?;
             if let Some(visibility) = info.fields.get(name) {
                 return Some((*visibility, current));
             }
@@ -314,13 +335,17 @@ impl Types {
     /// name, and the builtins are offered from their own table anyway.
     pub fn class_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self.classes.keys().cloned().collect();
+        for module in self.modules.values() {
+            names.extend(module.classes.keys().cloned());
+        }
         names.sort();
+        names.dedup();
         names
     }
 
     /// Whether the program declared a class by this name.
     pub fn declares(&self, class: &str) -> bool {
-        self.classes.contains_key(class)
+        self.class_info(class).is_some()
     }
 
     /// Every name visible at `offset`, innermost first.
@@ -367,23 +392,38 @@ impl Types {
             if !seen.insert(current.clone()) {
                 break;
             }
-            if let Some(info) = self.classes.get(&current) {
+            if let Some(info) = self.class_info(&current) {
                 for (name, decl) in &info.methods {
                     let ty = self
                         .methods
                         .get(&(current.clone(), name.clone()))
+                        .or_else(|| {
+                            for module in self.modules.values() {
+                                if let Some(t) = module.methods.get(&(current.clone(), name.clone())) {
+                                    return Some(t);
+                                }
+                            }
+                            None
+                        })
                         .cloned()
                         .unwrap_or_default();
                     push_once(&mut found, symbol_for(decl, Kind::Method, ty));
                 }
             }
-            if let Some(fields) = self.fields.get(&current) {
+            let fields_opt = self.fields.get(&current).or_else(|| {
+                for module in self.modules.values() {
+                    if let Some(f) = module.fields.get(&current) {
+                        return Some(f);
+                    }
+                }
+                None
+            });
+            if let Some(fields) = fields_opt {
                 for (name, ty) in fields {
                     // A declared field carries the word it was written with; one
                     // an `init` invented carries none, and is public.
                     let visibility = self
-                        .classes
-                        .get(&current)
+                        .class_info(&current)
                         .and_then(|info| info.fields.get(name))
                         .copied()
                         .unwrap_or_default();
@@ -403,7 +443,7 @@ impl Types {
                     push_once(&mut found, symbol);
                 }
             }
-            match self.classes.get(&current).and_then(|info| info.parent.clone()) {
+            match self.class_info(&current).and_then(|info| info.parent.clone()) {
                 Some(parent) => current = parent,
                 None => break,
             }
@@ -419,7 +459,7 @@ impl Types {
     pub fn class_at(&self, offset: u32) -> Option<&str> {
         self.classes
             .iter()
-            .filter(|(_, info)| info.span.start <= offset && offset <= info.span.end)
+            .filter(|(_, info)| !info.is_imported && info.span.start <= offset && offset <= info.span.end)
             .min_by_key(|(_, info)| info.span.end - info.span.start)
             .map(|(name, _)| name.as_str())
     }
@@ -468,12 +508,12 @@ impl Types {
     /// from — and the difference decides whether a name the pass does not
     /// recognise is a mistake or simply something it was not told about.
     pub fn declares_class(&self, name: &str) -> bool {
-        self.classes.contains_key(name)
+        self.class_info(name).is_some()
     }
 
     /// The class `class` extends, if the program said so.
     pub fn parent_of(&self, class: &str) -> Option<&str> {
-        self.classes.get(class)?.parent.as_deref()
+        self.class_info(class)?.parent.as_deref()
     }
 
     /// Walks a class and then its ancestors, stopping at the first answer.
@@ -491,7 +531,7 @@ impl Types {
             if let Some(answer) = ask(self, &current) {
                 return Some(answer);
             }
-            current = self.classes.get(&current)?.parent.clone()?;
+            current = self.class_info(&current)?.parent.clone()?;
         }
     }
 

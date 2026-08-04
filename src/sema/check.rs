@@ -153,7 +153,7 @@ fn is_unhashable_expr(expr: &Expr, types: &Types) -> bool {
     match &expr.kind {
         ExprKind::List(_) | ExprKind::Dict(_) => true,
         _ => {
-            let ty = types.of_expr(expr.span.start);
+            let ty = types.of_expr(expr.span);
             if let Some(name) = ty.class_name() {
                 matches!(name, "list" | "dict")
             } else {
@@ -932,7 +932,7 @@ fn native_arguments(native: &Native, args: &[Expr], span: crate::syntax::token::
         if param.accepts.is_empty() {
             continue;
         }
-        let held = types.of_expr(arg.span.start);
+        let held = types.of_expr(arg.span);
         let Some(actual) = held.class_name() else {
             continue;
         };
@@ -966,7 +966,7 @@ fn visibility(
     let Some((reach, owner)) = types.reach_of(&class, name) else {
         return;
     };
-    if types.may_offer(reach, &class, types.class_at(span.start)) {
+    if types.may_offer(reach, &owner, types.class_at(span.start)) {
         return;
     }
     let word = reach.word().unwrap_or("private");
@@ -1005,9 +1005,9 @@ fn receiver_type(expr: &Expr, types: &Types) -> Type {
                     return Type::class(&var.name);
                 }
             }
-            types.of_expr(expr.span.start)
+            types.of_expr(expr.span)
         }
-        _ => types.of_expr(expr.span.start),
+        _ => types.of_expr(expr.span),
     }
 }
 
@@ -1035,7 +1035,7 @@ fn check_element(
     let Some(wanted) = held.args().get(slot) else {
         return;
     };
-    let actual = types.of_expr(value.span.start);
+    let actual = types.of_expr(value.span);
     if fits(types, wanted, &actual) {
         return;
     }
@@ -1127,7 +1127,7 @@ fn against(
         _ => {}
     }
 
-    let held = types.of_expr(value.span.start);
+    let held = types.of_expr(value.span);
     if let Some(err) = disagrees(ty, &held, what, types, value.span) {
         found.push(err);
     }
@@ -1386,5 +1386,29 @@ mod tests {
                 "`{mutator}` is listed as mutating and is not a method of any builtin"
             );
         }
+    }
+
+    #[test]
+    fn binary_ops_starting_at_same_offset_produce_no_false_errors() {
+        let code = r#"
+            class Helper {
+                fn count(): int { return 10; }
+                fn score(): float { return 0.5; }
+            }
+            let h = Helper();
+            if len([1, 2]) > 0 {
+                let x = 1;
+            }
+            if h.count() > 0 {
+                let y = 1;
+            }
+            if h.score() > 0.0001 {
+                let z = 1;
+            }
+        "#;
+        let ast = crate::compile(code).expect("valid code compiles");
+        let types = crate::sema::infer::infer(&ast);
+        let errors = check(&ast, &types);
+        assert!(errors.is_empty(), "expected no false errors, got: {:?}", errors);
     }
 }

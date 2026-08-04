@@ -55,7 +55,7 @@ pub(crate) struct Infer<'a> {
     /// Which builtin each imported name stands for.
     pub(crate) natives: HashMap<String, &'static crate::runtime::value::Native>,
     pub(crate) method_returns: HashMap<(String, String), Type>,
-    pub(crate) exprs: HashMap<u32, Type>,
+    pub(crate) exprs: HashMap<Span, Type>,
     pub(crate) bindings: Vec<Binding>,
     /// Enclosing block spans, innermost last.
     pub(crate) scopes: Vec<Span>,
@@ -127,6 +127,7 @@ impl<'a> Infer<'a> {
                             .collect(),
                         openness: *openness,
                         span: stmt.span,
+                        is_imported: false,
                     };
                     self.classes.insert(name.clone(), info);
                 }
@@ -149,6 +150,7 @@ impl<'a> Infer<'a> {
                             fields: HashMap::new(),
                             openness: crate::syntax::ast::Openness::Open,
                             span: stmt.span,
+                            is_imported: false,
                         });
                     for decl in methods {
                         info.methods
@@ -434,19 +436,31 @@ impl<'a> Infer<'a> {
                                     module_info.symbols.iter().find(|s| s.name == name.name)
                                 {
                                     if symbol.kind == Kind::Class {
-                                        if let Some(info) = module_info.classes.get(&name.name) {
-                                            self.classes.insert(name.name.clone(), info.clone());
-                                        }
-                                        for ((cls, mname), mtype) in &module_info.methods {
-                                            if cls == &name.name {
-                                                self.method_returns.insert(
-                                                    (cls.clone(), mname.clone()),
-                                                    mtype.clone(),
-                                                );
+                                        let mut to_import = vec![name.name.clone()];
+                                        let mut visited = HashSet::new();
+                                        while let Some(cls_name) = to_import.pop() {
+                                            if !visited.insert(cls_name.clone()) {
+                                                continue;
                                             }
-                                        }
-                                        if let Some(fmap) = module_info.fields.get(&name.name) {
-                                            self.fields.insert(name.name.clone(), fmap.clone());
+                                            if let Some(info) = module_info.classes.get(&cls_name) {
+                                                let mut imported_info = info.clone();
+                                                imported_info.is_imported = true;
+                                                self.classes.insert(cls_name.clone(), imported_info);
+                                                if let Some(parent) = &info.parent {
+                                                    to_import.push(parent.clone());
+                                                }
+                                                for ((cls, mname), mtype) in &module_info.methods {
+                                                    if cls == &cls_name {
+                                                        self.method_returns.insert(
+                                                            (cls.clone(), mname.clone()),
+                                                            mtype.clone(),
+                                                        );
+                                                    }
+                                                }
+                                                if let Some(fmap) = module_info.fields.get(&cls_name) {
+                                                    self.fields.insert(cls_name.clone(), fmap.clone());
+                                                }
+                                            }
                                         }
                                     } else if symbol.kind == Kind::Function {
                                         if let Some(retty) = module_info.functions.get(&name.name)
@@ -738,13 +752,13 @@ impl<'a> Infer<'a> {
 
     /// What an expression already walked evaluates to.
     fn of(&self, expr: &Expr) -> Type {
-        self.exprs.get(&expr.span.start).cloned().unwrap_or_default()
+        self.exprs.get(&expr.span).cloned().unwrap_or_default()
     }
 
     /// Walks an expression, records what it evaluates to, and answers with it.
     fn expr(&mut self, expr: &Expr) -> Type {
         let ty = self.decide(expr);
-        self.exprs.insert(expr.span.start, ty.clone());
+        self.exprs.insert(expr.span, ty.clone());
         ty
     }
 
@@ -1008,7 +1022,7 @@ impl<'a> Infer<'a> {
                 // The callee is the method itself, and the call is what it
                 // produces. Both get recorded, at their own spans.
                 let member = self.read(&target, name);
-                self.exprs.insert(callee.span.start, member);
+                self.exprs.insert(callee.span, member);
                 match &target {
                     // The program's own method first, so a class extending a
                     // builtin that overrides `sort` is answered by what it

@@ -73,7 +73,7 @@ fn one(stmt: &Stmt, types: &Types, found: &mut Vec<(u32, String)>) {
             if ty.is_some() {
                 return;
             }
-            if let Some(label) = hint(&types.of_expr(value.span.start)) {
+            if let Some(label) = hint(&types.of_expr(value.span)) {
                 found.push((name_span.end, label));
             }
         }
@@ -82,7 +82,7 @@ fn one(stmt: &Stmt, types: &Types, found: &mut Vec<(u32, String)>) {
                 if field.ty.is_some() {
                     continue;
                 }
-                if let Some(label) = hint(&types.of_expr(field.value.span.start)) {
+                if let Some(label) = hint(&types.of_expr(field.value.span)) {
                     found.push((field.name_span.end, label));
                 }
             }
