@@ -113,13 +113,34 @@ pub(crate) fn find_name_range(source: &str, span: Span, name: &str) -> Option<Ra
         return None;
     }
     let text = &source[start_idx..end_idx];
-    let rel_offset = text.find(name)?;
-    let abs_start = start_idx + rel_offset;
-    let abs_end = abs_start + name.len();
-    Some(Range {
-        start: offset_to_position(source, abs_start),
-        end: offset_to_position(source, abs_end),
-    })
+    let len = name.len();
+    let is_ident_char = |c: char| c.is_alphanumeric() || c == '_';
+
+    let mut search_from = 0;
+    while let Some(found_idx) = text[search_from..].find(name) {
+        let rel_offset = search_from + found_idx;
+        let abs_start = start_idx + rel_offset;
+        let abs_end = abs_start + len;
+
+        let left_char = if abs_start > 0 {
+            source[..abs_start].chars().last()
+        } else {
+            None
+        };
+        let right_char = source[abs_end..].chars().next();
+
+        let left_ok = left_char.map_or(true, |c| !is_ident_char(c));
+        let right_ok = right_char.map_or(true, |c| !is_ident_char(c));
+
+        if left_ok && right_ok {
+            return Some(Range {
+                start: offset_to_position(source, abs_start),
+                end: offset_to_position(source, abs_end),
+            });
+        }
+        search_from = rel_offset + 1;
+    }
+    None
 }
 
 pub(crate) fn get_references(uri: &Url, state: Option<&DocumentState>, pos: Position) -> Vec<Location> {

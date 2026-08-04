@@ -112,12 +112,14 @@ pub(crate) fn collect_stmt_semantic_tokens(
     for stmt in stmts {
         match &stmt.kind {
             StmtKind::Fn { decl, .. } => {
-                let fn_sig_span = Span { start: stmt.span.start, end: decl.body.span.start };
                 // Function declaration (1), declaration modifier (1)
-                push_raw_token(source, fn_sig_span, &decl.name, 1, 1, raw_tokens);
+                push_raw_token(source, decl.name_span, &decl.name, 1, 1, raw_tokens);
                 for param in &decl.params {
+                    if param.receiver {
+                        continue;
+                    }
                     // Parameter (4), declaration modifier (1)
-                    push_raw_token(source, fn_sig_span, &param.name, 4, 1, raw_tokens);
+                    push_raw_token(source, param.span, &param.name, 4, 1, raw_tokens);
                     if let Some(param_ty) = &param.ty {
                         collect_type_expr_semantic_tokens(source, param_ty, raw_tokens);
                     }
@@ -135,18 +137,20 @@ pub(crate) fn collect_stmt_semantic_tokens(
                     push_raw_token(source, stmt.span, &p.name, 0, 0, raw_tokens);
                 }
                 for field in fields {
-                    push_raw_token(source, stmt.span, &field.name, 5, 1, raw_tokens);
+                    push_raw_token(source, field.name_span, &field.name, 5, 1, raw_tokens);
                     if let Some(field_ty) = &field.ty {
                         collect_type_expr_semantic_tokens(source, field_ty, raw_tokens);
                     }
                     collect_expr_semantic_tokens(source, &field.value, raw_tokens);
                 }
                 for m in methods {
-                    let m_sig_span = Span { start: m.body.span.start.saturating_sub(100), end: m.body.span.start };
                     // Method declaration (2), declaration modifier (1)
-                    push_raw_token(source, m_sig_span, &m.name, 2, 1, raw_tokens);
+                    push_raw_token(source, m.name_span, &m.name, 2, 1, raw_tokens);
                     for param in &m.params {
-                        push_raw_token(source, m_sig_span, &param.name, 4, 1, raw_tokens);
+                        if param.receiver {
+                            continue;
+                        }
+                        push_raw_token(source, param.span, &param.name, 4, 1, raw_tokens);
                         if let Some(param_ty) = &param.ty {
                             collect_type_expr_semantic_tokens(source, param_ty, raw_tokens);
                         }
@@ -157,25 +161,27 @@ pub(crate) fn collect_stmt_semantic_tokens(
                     collect_stmt_semantic_tokens(source, &m.body.stmts, raw_tokens);
                 }
             }
-            StmtKind::Let { name, value, ty, .. } => {
+            StmtKind::Let { name, name_span, value, ty, .. } => {
                 // Variable declaration (3), declaration modifier (1)
-                push_raw_token(source, stmt.span, name, 3, 1, raw_tokens);
+                push_raw_token(source, *name_span, name, 3, 1, raw_tokens);
                 if let Some(t) = ty {
                     collect_type_expr_semantic_tokens(source, t, raw_tokens);
                 }
                 collect_expr_semantic_tokens(source, value, raw_tokens);
             }
-            StmtKind::Alias { name, ty, .. } => {
-                push_raw_token(source, stmt.span, name, 6, 1, raw_tokens);
+            StmtKind::Alias { name, name_span, ty, .. } => {
+                push_raw_token(source, *name_span, name, 6, 1, raw_tokens);
                 collect_type_expr_semantic_tokens(source, ty, raw_tokens);
             }
             StmtKind::Extend { target, methods, .. } => {
                 push_raw_token(source, stmt.span, &target.name, 0, 0, raw_tokens);
                 for m in methods {
-                    let m_sig_span = Span { start: m.body.span.start.saturating_sub(100), end: m.body.span.start };
-                    push_raw_token(source, m_sig_span, &m.name, 2, 1, raw_tokens);
+                    push_raw_token(source, m.name_span, &m.name, 2, 1, raw_tokens);
                     for param in &m.params {
-                        push_raw_token(source, m_sig_span, &param.name, 4, 1, raw_tokens);
+                        if param.receiver {
+                            continue;
+                        }
+                        push_raw_token(source, param.span, &param.name, 4, 1, raw_tokens);
                         if let Some(param_ty) = &param.ty {
                             collect_type_expr_semantic_tokens(source, param_ty, raw_tokens);
                         }
@@ -228,8 +234,9 @@ pub(crate) fn collect_expr_semantic_tokens(
     match &expr.kind {
         ExprKind::Call { callee, args } => {
             if let ExprKind::Var(var) = &callee.kind {
-                // Call (Function / Class constructor)
-                push_raw_token(source, callee.span, &var.name, 1, 0, raw_tokens);
+                let is_class = var.name.chars().next().map_or(false, |c| c.is_ascii_uppercase());
+                let token_type = if is_class { 0 } else { 1 };
+                push_raw_token(source, callee.span, &var.name, token_type, 0, raw_tokens);
             } else {
                 collect_expr_semantic_tokens(source, callee, raw_tokens);
             }
@@ -245,6 +252,8 @@ pub(crate) fn collect_expr_semantic_tokens(
         ExprKind::Var(var) => {
             if var.name == "self" || var.name == "super" {
                 push_raw_token(source, expr.span, &var.name, 7, 0, raw_tokens); // Keyword (7)
+            } else if var.name.chars().next().map_or(false, |c| c.is_ascii_uppercase()) {
+                push_raw_token(source, expr.span, &var.name, 0, 0, raw_tokens); // Class reference (0)
             } else {
                 push_raw_token(source, expr.span, &var.name, 3, 0, raw_tokens); // Variable (3)
             }
@@ -253,7 +262,9 @@ pub(crate) fn collect_expr_semantic_tokens(
             collect_expr_semantic_tokens(source, value, raw_tokens);
             collect_type_expr_semantic_tokens(source, ty, raw_tokens);
         }
-        ExprKind::Binary { lhs, rhs, .. } => {
+        ExprKind::Binary { lhs, rhs, .. }
+        | ExprKind::Logical { lhs, rhs, .. }
+        | ExprKind::Coalesce { lhs, rhs } => {
             collect_expr_semantic_tokens(source, lhs, raw_tokens);
             collect_expr_semantic_tokens(source, rhs, raw_tokens);
         }
@@ -263,11 +274,31 @@ pub(crate) fn collect_expr_semantic_tokens(
                 collect_expr_semantic_tokens(source, item, raw_tokens);
             }
         }
+        ExprKind::Dict(pairs) => {
+            for (k, v) in pairs {
+                collect_expr_semantic_tokens(source, k, raw_tokens);
+                collect_expr_semantic_tokens(source, v, raw_tokens);
+            }
+        }
+        ExprKind::Index { target, index } => {
+            collect_expr_semantic_tokens(source, target, raw_tokens);
+            collect_expr_semantic_tokens(source, index, raw_tokens);
+        }
+        ExprKind::Slice { target, start, end } => {
+            collect_expr_semantic_tokens(source, target, raw_tokens);
+            if let Some(s) = start { collect_expr_semantic_tokens(source, s, raw_tokens); }
+            if let Some(e) = end { collect_expr_semantic_tokens(source, e, raw_tokens); }
+        }
+        ExprKind::Chain(inner) => collect_expr_semantic_tokens(source, inner, raw_tokens),
         ExprKind::Assign { target, value } => {
             collect_expr_semantic_tokens(source, target, raw_tokens);
             collect_expr_semantic_tokens(source, value, raw_tokens);
         }
-        _ => {}
+        ExprKind::Super { name, .. } => {
+            push_raw_token(source, expr.span, "super", 7, 0, raw_tokens); // Keyword (7)
+            push_raw_token(source, expr.span, name, 2, 0, raw_tokens); // Method (2)
+        }
+        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Nil => {}
     }
 }
 
@@ -302,5 +333,38 @@ mod tests {
             .filter(|t| t.token_type == 7)
             .count();
         assert_eq!(keyword_tokens_count, 1);
+    }
+
+    #[test]
+    fn parameter_matching_keyword_substring_does_not_override_fn_keyword() {
+        let code = "fn rebindable(n: int) {\n    n = n + 1\n}";
+        let state = DocumentState::new(code.to_string(), None);
+        let tokens = get_semantic_tokens(Some(&state));
+        // The first token should NOT be at col 1 (which would be 'n' in 'fn')
+        for token in &tokens.data {
+            if token.delta_line == 0 {
+                assert_ne!(token.delta_start, 1, "Should not emit semantic token at 'n' in 'fn'");
+            }
+        }
+    }
+
+    #[test]
+    fn class_constructors_emit_class_semantic_tokens() {
+        let code = "let p = Point(5, 8)";
+        let state = DocumentState::new(code.to_string(), None);
+        let tokens = get_semantic_tokens(Some(&state));
+        // Point in Point(5, 8) should emit a class token (0), not a function token (1)
+        let class_tokens = tokens.data.iter().filter(|t| t.token_type == 0).count();
+        assert_eq!(class_tokens, 1);
+    }
+
+    #[test]
+    fn super_keyword_emits_keyword_semantic_token() {
+        let code = "class Point3D extends Point { op init(x: int, y: int, z: int) { super.init(x, y) } }";
+        let state = DocumentState::new(code.to_string(), None);
+        let tokens = get_semantic_tokens(Some(&state));
+        // super should emit KEYWORD token (7)
+        let super_tokens = tokens.data.iter().filter(|t| t.token_type == 7).count();
+        assert!(super_tokens >= 1, "super keyword should receive a Keyword (7) semantic token");
     }
 }
