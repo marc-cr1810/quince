@@ -613,30 +613,27 @@ function activate(context) {
     .ast-block {
         margin-left: 0px;
     }
-    .ast-header {
+    .ast-header, .ast-leaf {
         display: flex;
         align-items: center;
         padding: 2px 6px;
         border-radius: 4px;
-        cursor: pointer;
-        user-select: none;
+        line-height: 1.5;
     }
     .ast-header:hover {
         background: rgba(255, 255, 255, 0.05);
-    }
-    .ast-leaf {
-        display: flex;
-        align-items: center;
-        padding: 2px 6px;
-        border-radius: 4px;
     }
     .ast-leaf:hover {
         background: rgba(255, 255, 255, 0.03);
     }
     .fold-icon {
-        display: inline-block;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
         width: 16px;
-        font-size: 10px;
+        height: 16px;
+        font-size: 9px;
+        line-height: 1;
         color: var(--accent);
         cursor: pointer;
         user-select: none;
@@ -647,6 +644,7 @@ function activate(context) {
     .fold-spacer {
         display: inline-block;
         width: 20px;
+        height: 16px;
         flex-shrink: 0;
     }
     .ast-children {
@@ -660,6 +658,8 @@ function activate(context) {
     }
     .line-code {
         white-space: pre;
+        line-height: 1.5;
+        display: inline-block;
     }
     .ast-type { color: var(--purple); font-weight: 600; }
     .ast-key { color: var(--yellow); font-weight: 500; }
