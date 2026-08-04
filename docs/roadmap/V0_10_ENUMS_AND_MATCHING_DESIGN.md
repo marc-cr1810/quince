@@ -393,9 +393,30 @@ if let Option.Some(user) = find_user(101) {
 - Patterns are §6.2's, so named and positional binding both work.
 - **No `while let` in this milestone.** It is small, and it belongs with the iteration work
   in §7.2 rather than here. §10.
-- `if let` does not replace v0.7's smart cast. `if x is string` narrows a type; `if let`
-  destructures a variant. Under §3 they overlap for exactly one case — `Option`/`T?` — and
-  both are allowed to handle it, because forbidding either would be a rule about spelling.
+### 6.6 Class & Dict Destructuring
+
+Beyond tuple destructuring (v0.9 §3.5) and enum pattern matching (§6.2), Quince supports class field and dictionary key destructuring in `let` bindings:
+
+```quince
+class User {
+    public let name: string
+    public let age: int
+    private let token: string
+}
+
+let user = User("Alice", 30, "secret_tok")
+
+# Destructure public fields:
+let User { name, age } = user
+
+# Dict key destructuring:
+let config = {"host": "localhost", "port": 8080}
+let {"host": server_host, "port": server_port} = config
+```
+
+Rules:
+- **Strict Member Visibility Enforcement.** Class destructuring can **only** extract `public` fields. Destructuring `private` or `protected` fields outside class scope is refused at resolution with a `VisibilityError`.
+- **Dict Destructuring.** Unpacks specific literal key values into new local variable bindings.
 
 ---
 

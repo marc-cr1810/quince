@@ -313,6 +313,26 @@ An alias is still a resolution-time substitution introducing no new type: `Pair[
 `tuple[float, float]` are the same type, and `is` cannot tell them apart. A cyclic alias —
 including one that cycles through its own parameter, `alias A[T] = A[T]` — is refused.
 
+### 3.8 First-class function type annotations (`function(...) -> ...`)
+
+Function signatures can be used as type annotations for variables, parameters, and return types:
+
+```quince
+# Higher-order function taking a typed callback:
+fn apply_transform(val: int, transform: function(int) -> int): int {
+    return transform(val)
+}
+
+# Variable typed as a function signature:
+let formatter: function(int, string) -> string = fn(code: int, msg: string): string {
+    return f"[{code}] {msg}"
+}
+```
+
+Rules:
+- **Syntax.** `function(Param1, Param2, ...) -> ReturnType`.
+- **Callable checking.** Parameter types and return type annotations are checked at function boundaries during resolution and call execution.
+
 ---
 
 ## 4. Worked examples

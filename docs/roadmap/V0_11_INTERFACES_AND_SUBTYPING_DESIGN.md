@@ -85,3 +85,23 @@ When calling an interface method (`OpCode::InvokeInterface`), the JIT compiler g
 
 - Any type implementing `Hashable` (defining `op hash(): int` and `op eq(other: any): bool`) can serve as keys in `dict[K, V]` and elements in `set[T]`.
 - Built-in types (`int`, `float`, `string`, `bool`, `bytes`, `tuple[...]`) provide default $O(1)$ hardware hashing implementations.
+
+---
+
+## 4. Nullability-Aware Generic & Container Subtyping Matrix
+
+Quince enforces non-nil safety guarantees across all compound types, generic classes, tuples, lists, and dicts:
+
+| Source Type | Target Type | Allowed? | Subtyping Rationale |
+| :--- | :--- | :--- | :--- |
+| `list[int]` | `list[any]` | ✅ **Yes** | `int` is non-nil, satisfying non-nil `any`. |
+| `list[int]` | `list[any?]` | ✅ **Yes** | `int` satisfies universal `any?`. |
+| `list[int?]` | `list[any?]` | ✅ **Yes** | Both admit `nil` elements. |
+| `list[int?]` | `list[any]` | ❌ **Refused** | `list[int?]` can yield `nil`, violating `list[any]`'s non-nil contract. |
+| `dict[string, int]` | `dict[string, any]` | ✅ **Yes** | `int` value is non-nil, satisfying `any`. |
+| `dict[string, int?]` | `dict[string, any]` | ❌ **Refused** | Dict values can be `nil`. |
+| `tuple[int, string]` | `tuple[any, any]` | ✅ **Yes** | Both tuple elements are non-nil. |
+| `tuple[int?, string]`| `tuple[any, any]` | ❌ **Refused** | Element 0 (`int?`) can be `nil`. |
+| `Stack[int]` | `Stack[any]` | ✅ **Yes** | `int` satisfies non-nil `any`. |
+| `Stack[int?]` | `Stack[any]` | ❌ **Refused** | `Stack[int?]` elements can be `nil`. |
+

@@ -52,4 +52,47 @@ let info = type_of(User)
 for let field in info.fields {
     print("Field: " + field.name + " of type " + field.type_name)
 }
+
+---
+
+## 4. Custom Infix Operator Registration (`public operator Symbol`)
+
+v0.12 introduces custom infix operator symbol registration to expand the language parser's grammar:
+
+```quince
+# Step 1: Register operator symbol, precedence, and associativity
+public operator |> {
+    associativity: left
+    precedence: 5
+}
+
+public operator <*> {
+    associativity: left
+    precedence: 11
+}
+```
+
+```quince
+# Step 2: Implement `op` method inside class or `extend` block
+extend string {
+    public op |>[U](func: function(string) -> U): U {
+        return func(self)
+    }
+}
+
+class Matrix {
+    public op <*>(other: Matrix): Matrix {
+        return self.matmul(other)
+    }
+}
+
+# Usage:
+let clean = "  quince  " |> trim |> upper
+let C = A <*> B
+```
+
+Rules:
+- **Symbol Registration:** Registers new infix operator symbols, precedence levels, and associativity in the parser.
+- **Class Encapsulation:** Execution dispatches directly to the left operand's `op` method table, preserving OOP encapsulation and modifiers (`final`, `complete`, `sealed`).
+
 ```

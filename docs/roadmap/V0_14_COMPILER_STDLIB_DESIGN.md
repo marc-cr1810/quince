@@ -25,3 +25,25 @@ Quince v0.14 delivers high-performance compiler data structures and binary buffe
 ## 3. The `binary` Module (`import binary`)
 
 * **`ByteBuffer`**: Low-level binary emitter supporting little-endian/big-endian byte writing (`buf.write_u8()`, `buf.write_u32_le()`, `buf.write_f64_le()`). Used for `.qnc` bytecode binary serialization and machine code codegen emission.
+
+---
+
+## 4. String Interpolation (`f"..."`)
+
+`v0.14` introduces `f"..."` format string interpolation:
+
+```quince
+let name = "Alice"
+let score = 95.5
+
+# Expressions inside `{}` are desugared at parse time:
+let summary = f"Player {name} achieved {score + 4.5} points!"
+
+# Nested formatting and conditionals:
+print(f"User: {user.name}, Status: {user.is_active ? 'Active' : 'Disabled'}")
+```
+
+Rules:
+- **Parser Desugaring:** Format string literals `f"..."` are converted into string concatenation expressions or `text.StringBuilder` calls.
+- **Embedded Expressions:** Braces `{}` contain arbitrary valid Quince expressions.
+

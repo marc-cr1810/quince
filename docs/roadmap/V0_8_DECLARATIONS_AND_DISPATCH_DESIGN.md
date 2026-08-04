@@ -325,6 +325,31 @@ Rules:
 through, and it is the only thing here whose cost is not bounded by the resolver. §5
 sequences it last for that reason.
 
+### 3.6 Default Parameters & Keyword Call Arguments
+
+Function and method declarations support **default parameter values**, and callers can pass arguments using **keyword argument syntax (`param_name: expr`)**:
+
+```quince
+fn connect(host: string, port: int = 8080, timeout: int = 3000): Connection {
+    return Connection(host, port, timeout)
+}
+
+# Positional call: uses port 8080, timeout 3000
+let c1 = connect("localhost")
+
+# Target specific defaulted parameters by keyword:
+let c2 = connect("127.0.0.1", timeout: 5000)
+
+# Pass all arguments by keyword in any order:
+let c3 = connect(timeout: 5000, host: "api.domain.com", port: 443)
+```
+
+Rules:
+- **Default Ordering.** Defaulted parameters must follow mandatory parameters in function signatures.
+- **Keyword Matching.** Keyword arguments match declared parameter names directly (`param_name: expr`).
+- **Call Synthesis.** Unsupplied parameters with default initializers are synthesized at the call site at resolution/runtime.
+- **Overloading Interaction.** A defaulted parameter does not create ambiguous overload signatures; exact positional matches take priority before default fallback.
+
 ---
 
 ## 4. Enforcement

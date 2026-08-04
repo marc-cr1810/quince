@@ -2994,14 +2994,40 @@ patterns match on), `const N: int` (which `array[T, N]` needs), and the paramete
 grammar (without which a *user* cannot write `enum Tree[T]`) — not for `Option[T]` itself,
 which is a built-in generic and needs only what `list[T]` needed.
 
+**v0.11 — interfaces, interface subtyping, and object hashing**
+- **Interface Contracts & Subtyping**: `interface`, `implements`, multiple interface implementation/inheritance, and dynamic interface tables (`itables`).
+- **Nullability-Aware Subtyping Matrix**: `int` satisfies non-nil `any`; `int?` satisfies `any?` but refuses non-nil `any`.
+- **`op hash(): int`**: standard hashing slot for `dict[K, V]` keys and `set[T]` elements.
+
+See `V0_11_INTERFACES_AND_SUBTYPING_DESIGN.md`.
+
+**v0.12 — metaprogramming, CTFE, and custom infix operators**
+- **Compile-Time Function Execution (`const fn`)** and **Hygienic Macros (`macro`)**.
+- **Custom Infix Operator Registration (`public operator Symbol`)**: registers precedence/associativity in parser, dispatching via `op` method tables on classes and `extend` blocks.
+
+See `V0_12_METAPROGRAMMING_AND_MACROS_DESIGN.md`.
+
+**v0.13 — system standard library modules**
+- `path`, `sys`, and `io` modules.
+
+See `V0_13_SYSTEM_MODULES_DESIGN.md`.
+
+**v0.14 — compiler utility stdlib modules & string interpolation**
+- `text` (`StringBuilder`), `collections` (`Interner`, `IndexMap`, `BitSet`), `binary` (`ByteBuffer`).
+- **String Interpolation (`f"..."`)**: format strings desugaring into string concatenation expressions.
+
+See `V0_14_COMPILER_STDLIB_DESIGN.md`.
+
+**v0.15 — generic functions, typed catch, and ternary conditionals**
+- **Generic Functions (`fn map[T, U]`)**: standalone generic function definitions with call-site type parameter inference.
+- **Typed `catch` Blocks**: multi-branch exception filtering (`catch err: Type`).
+- **Ternary Conditional Operator (`c ? t : f`)**: expression-level conditional evaluation.
+
+See `V0_15_GENERIC_FUNCTIONS_AND_TYPED_CATCH_DESIGN.md`.
+
 **Later**
 Bytecode VM, async/await, sized integer types — all things Zephyr has, deferred until the
-core is solid. The module system was on this list and came forward into v0.6; what is
-left of it is packages, a search path, and subdirectory imports, which want a language
-with modules already in use to decide them.
-
-Function expressions belong here now too, and they were not on any list before `map` and
-`filter` existed to want them.
+core is solid. What is left of modules is packages, search paths, and subdirectory imports.
 
 ## Testing
 
