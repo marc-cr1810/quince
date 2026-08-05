@@ -33,39 +33,39 @@ Quince source files must be encoded in UTF-8. Statements are primarily newline-t
 
 Quince reserves 31 keywords. Keywords cannot be used as variable, function, class, or parameter identifiers:
 
-| Reserved Keyword | Category | Description |
-| :--- | :--- | :--- |
-| `fn` | Declaration | Declares a named function or method |
-| `op` | Declaration | Declares a special language operator slot on a class |
-| `class` | Declaration | Declares a class type |
-| `extends` | Inheritance | Specifies the superclass in a class header |
-| `extend` | Declaration | Adds methods to an existing type |
-| `self` | Binding | Refers to the receiver instance inside a method |
-| `super` | Binding | Invokes a parent class method |
-| `let` | Binding | Binds a mutable local or class field |
-| `final` | Binding / Modifier | Single-assignment binding or final class modifier |
-| `complete` | Modifier | Prevents `extend` blocks on a class |
-| `sealed` | Modifier | Combines `final` and `complete` on a class |
-| `const` | Modifier | Freezes a binding or deep parameter/return boundary |
-| `public` | Visibility | Member/module export visible everywhere |
-| `private` | Visibility | Member visible only to declaring class; unexported top-level |
-| `protected` | Visibility | Member visible to declaring class and subclasses |
-| `any` | Type | Non-nil top type annotation |
-| `is` | Operator | Type check and block smart-casting operator |
-| `alias` | Declaration | Declares a type alias (`alias New = Existing`) |
-| `import` | Module | Imports a module or library |
-| `if` | Control Flow | Conditional branch |
-| `else` | Control Flow | Alternative branch for `if` |
-| `while` | Control Flow | Loop while condition is truthy |
-| `for` | Control Flow | Iterates over a collection or iterable object |
-| `in` | Operator / Keyword | Iteration target or membership query |
-| `return` | Control Flow | Returns a value from a function |
-| `try` | Exception | Begins a guarded exception block |
-| `catch` | Exception | Handles a raised exception |
-| `throw` | Exception | Raises an error instance |
-| `true` | Literal | Boolean true |
-| `false` | Literal | Boolean false |
-| `nil` | Literal | Absence of a value |
+| Reserved Keyword | Category           | Description                                                  |
+| :--------------- | :----------------- | :----------------------------------------------------------- |
+| `fn`             | Declaration        | Declares a named function or method                          |
+| `op`             | Declaration        | Declares a special language operator slot on a class         |
+| `class`          | Declaration        | Declares a class type                                        |
+| `extends`        | Inheritance        | Specifies the superclass in a class header                   |
+| `extend`         | Declaration        | Adds methods to an existing type                             |
+| `self`           | Binding            | Refers to the receiver instance inside a method              |
+| `super`          | Binding            | Invokes a parent class method                                |
+| `let`            | Binding            | Binds a mutable local or class field                         |
+| `final`          | Binding / Modifier | Single-assignment binding or final class modifier            |
+| `complete`       | Modifier           | Prevents `extend` blocks on a class                          |
+| `sealed`         | Modifier           | Combines `final` and `complete` on a class                   |
+| `const`          | Modifier           | Freezes a binding or deep parameter/return boundary          |
+| `public`         | Visibility         | Member/module export visible everywhere                      |
+| `private`        | Visibility         | Member visible only to declaring class; unexported top-level |
+| `protected`      | Visibility         | Member visible to declaring class and subclasses             |
+| `any`            | Type               | Non-nil top type annotation                                  |
+| `is`             | Operator           | Type check and block smart-casting operator                  |
+| `alias`          | Declaration        | Declares a type alias (`alias New = Existing`)               |
+| `import`         | Module             | Imports a module or library                                  |
+| `if`             | Control Flow       | Conditional branch                                           |
+| `else`           | Control Flow       | Alternative branch for `if`                                  |
+| `while`          | Control Flow       | Loop while condition is truthy                               |
+| `for`            | Control Flow       | Iterates over a collection or iterable object                |
+| `in`             | Operator / Keyword | Iteration target or membership query                         |
+| `return`         | Control Flow       | Returns a value from a function                              |
+| `try`            | Exception          | Begins a guarded exception block                             |
+| `catch`          | Exception          | Handles a raised exception                                   |
+| `throw`          | Exception          | Raises an error instance                                     |
+| `true`           | Literal            | Boolean true                                                 |
+| `false`          | Literal            | Boolean false                                                |
+| `nil`            | Literal            | Absence of a value                                           |
 
 *Note*: `from` is a contextual keyword used in `from module import item`. It acts as an identifier in all other contexts.
 
@@ -83,25 +83,25 @@ Quince reserves 31 keywords. Keywords cannot be used as variable, function, clas
 
 Operators are listed below in order of precedence from highest (tightest binding) to lowest (loosest binding):
 
-| Level | Operator | Description | Associativity |
-| :---: | :--- | :--- | :---: |
-| 1 (Highest) | `.`, `?.` | Primary member access & optional chaining | Left-to-right |
-| 2 | `()` | Function / method call | Left-to-right |
-| 3 | `[]` | Indexing & container type arguments | Left-to-right |
-| 4 | `-`, `!`, `~` | Unary minus, logical NOT, bitwise NOT | Right-to-left |
-| 5 | `*`, `/`, `//`, `%` | Multiplication, Division, Floor Div, Remainder | Left-to-right |
-| 6 | `+`, `-` | Addition, Subtraction | Left-to-right |
-| 7 | `<<`, `>>` | Bitwise shift left, Bitwise shift right | Left-to-right |
-| 8 | `&` | Bitwise AND | Left-to-right |
-| 9 | `^` | Bitwise XOR | Left-to-right |
-| 10 | `\|` | Bitwise OR | Left-to-right |
-| 11 | `is` | Runtime type check | Non-associative |
-| 12 | `<`, `<=`, `>`, `>=` | Relational comparison | Left-to-right |
-| 13 | `==`, `!=`, `in` | Equality, inequality, membership | Left-to-right |
-| 14 | `&&` | Short-circuit logical AND | Left-to-right |
-| 15 | `\|\|` | Short-circuit logical OR | Left-to-right |
-| 16 | `??` | Null coalescing operator | Right-to-left |
-| 17 (Lowest) | `=` | Assignment | Right-to-left |
+|    Level    | Operator             | Description                                    |  Associativity  |
+| :---------: | :------------------- | :--------------------------------------------- | :-------------: |
+| 1 (Highest) | `.`, `?.`            | Primary member access & optional chaining      |  Left-to-right  |
+|      2      | `()`                 | Function / method call                         |  Left-to-right  |
+|      3      | `[]`                 | Indexing & container type arguments            |  Left-to-right  |
+|      4      | `-`, `!`, `~`        | Unary minus, logical NOT, bitwise NOT          |  Right-to-left  |
+|      5      | `*`, `/`, `//`, `%`  | Multiplication, Division, Floor Div, Remainder |  Left-to-right  |
+|      6      | `+`, `-`             | Addition, Subtraction                          |  Left-to-right  |
+|      7      | `<<`, `>>`           | Bitwise shift left, Bitwise shift right        |  Left-to-right  |
+|      8      | `&`                  | Bitwise AND                                    |  Left-to-right  |
+|      9      | `^`                  | Bitwise XOR                                    |  Left-to-right  |
+|     10      | `\|`                 | Bitwise OR                                     |  Left-to-right  |
+|     11      | `is`                 | Runtime type check                             | Non-associative |
+|     12      | `<`, `<=`, `>`, `>=` | Relational comparison                          |  Left-to-right  |
+|     13      | `==`, `!=`, `in`     | Equality, inequality, membership               |  Left-to-right  |
+|     14      | `&&`                 | Short-circuit logical AND                      |  Left-to-right  |
+|     15      | `\|\|`               | Short-circuit logical OR                       |  Left-to-right  |
+|     16      | `??`                 | Null coalescing operator                       |  Right-to-left  |
+| 17 (Lowest) | `=`                  | Assignment                                     |  Right-to-left  |
 
 ---
 

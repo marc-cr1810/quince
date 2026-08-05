@@ -52,12 +52,12 @@ Attempting to assign `nil` to a non-nullable type raises a `TypeError` at the bo
 
 Quince provides explicit top types to express dynamic values in type position:
 
-| Annotation | Description | Admits `nil`? | Standard Usage Context |
-| :--- | :--- | :---: | :--- |
-| `any` | Non-nil top type | No | Whole binding or item constraint excluding `nil` |
-| `any?` | Universal top type | Yes | Universal value holder |
-| `_` | Wildcard symbol | No | Container argument shorthand (e.g., `list[_]`) |
-| `_?` | Nullable wildcard | Yes | Unconstrained container value (e.g., `dict[string, _?]`) |
+| Annotation | Description        | Admits `nil`? | Standard Usage Context                                   |
+| :--------- | :----------------- | :-----------: | :------------------------------------------------------- |
+| `any`      | Non-nil top type   |      No       | Whole binding or item constraint excluding `nil`         |
+| `any?`     | Universal top type |      Yes      | Universal value holder                                   |
+| `_`        | Wildcard symbol    |      No       | Container argument shorthand (e.g., `list[_]`)           |
+| `_?`       | Nullable wildcard  |      Yes      | Unconstrained container value (e.g., `dict[string, _?]`) |
 
 ```quince
 let unconstrained: any? = nil

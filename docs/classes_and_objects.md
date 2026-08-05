@@ -55,12 +55,12 @@ When a class instance is constructed:
 
 Class headers may be prefixed with an openness modifier to control subclassing and method table extension:
 
-| Modifier | Subclassing Allowed? (`extends`) | Extension Blocks Allowed? (`extend`) | Purpose / Description |
-| :--- | :---: | :---: | :--- |
-| *(Default)* | Yes | Yes | Fully open class |
-| `final` | **No** | Yes | Prevents other classes from extending this class |
-| `complete` | Yes | **No** | Freezes the method table; no `extend` block may add methods |
-| `sealed` | **No** | **No** | Combines `final` and `complete` (neither subclassing nor extension) |
+| Modifier    | Subclassing Allowed? (`extends`) | Extension Blocks Allowed? (`extend`) | Purpose / Description                                               |
+| :---------- | :------------------------------: | :----------------------------------: | :------------------------------------------------------------------ |
+| *(Default)* |               Yes                |                 Yes                  | Fully open class                                                    |
+| `final`     |              **No**              |                 Yes                  | Prevents other classes from extending this class                    |
+| `complete`  |               Yes                |                **No**                | Freezes the method table; no `extend` block may add methods         |
+| `sealed`    |              **No**              |                **No**                | Combines `final` and `complete` (neither subclassing nor extension) |
 
 ```quince
 final class LeafConfig {
@@ -82,11 +82,11 @@ sealed class ImmutableCore {
 
 Class fields and methods support explicit access control:
 
-| Modifier | Access Scope |
-| :--- | :--- |
-| `public` *(default)* | Reachable from anywhere inside or outside the class |
-| `private` | Reachable **only** inside methods of the declaring class |
-| `protected` | Reachable inside methods of the declaring class and its subclasses |
+| Modifier             | Access Scope                                                       |
+| :------------------- | :----------------------------------------------------------------- |
+| `public` *(default)* | Reachable from anywhere inside or outside the class                |
+| `private`            | Reachable **only** inside methods of the declaring class           |
+| `protected`          | Reachable inside methods of the declaring class and its subclasses |
 
 ```quince
 class BankAccount {
@@ -164,7 +164,7 @@ extend BankAccount {
 ```
 
 *Rules*:
-- `extend` blocks can add standard methods (`fn`), but **cannot add operator slots (`op`)**.
+- `extend` blocks can add standard methods (`fn`) and operator slots (`op`)
 - Extensions cannot be applied to classes declared with `complete` or `sealed`.
 
 ---
@@ -175,37 +175,37 @@ Operators in Quince are handled by dedicated static slots declared with `op`. Co
 
 ### 6.1 Complete List of Operator Slots (29 Slots)
 
-| Slot Name | Syntax Trigger | Parameter Arity | Return Contract | Description |
-| :--- | :--- | :---: | :---: | :--- |
-| `init` | `MyClass(...)` | Flexible | None | Constructor initializer |
-| `bool` | `if x`, `!x`, `bool(x)` | 0 | `bool` | Truthiness conversion |
-| `string` | `print(x)`, `string(x)` | 0 | `string` | String rendering |
-| `int` | `int(x)` | 0 | `int` | Integer conversion |
-| `float` | `float(x)` | 0 | `float` | Float conversion |
-| `list` | `list(x)` | 0 | `list` | List conversion |
-| `dict` | `dict(x)` | 0 | `dict` | Dict conversion |
-| `eq` | `a == b`, `a != b` | 1 | `bool` | Equality comparison |
-| `cmp` | `a <=> b` | 1 | `int` | Three-way ordering (-1, 0, 1) |
-| `lt` | `a < b` | 1 | `bool` | Less than comparison |
-| `gt` | `a > b` | 1 | `bool` | Greater than comparison |
-| `add` | `a + b` | 1 | Flexible | Addition |
-| `sub` | `a - b` | 1 | Flexible | Subtraction |
-| `mul` | `a * b` | 1 | Flexible | Multiplication |
-| `div` | `a / b` | 1 | Flexible | True division |
-| `floordiv` | `a // b` | 1 | Flexible | Floor division |
-| `rem` | `a % b` | 1 | Flexible | Remainder / Modulo |
-| `neg` | `-x` | 0 | Flexible | Unary negation |
-| `len` | `len(x)` | 0 | `int` | Collection length |
-| `get` | `x[i]` | 1 | Flexible | Index read |
-| `set` | `x[i] = v` | 2 | Flexible | Index write |
-| `contains` | `needle in x` | 1 | `bool` | Membership check |
-| `iter` | `for item in x` | 0 | `list` | Iteration target list |
-| `bit_and` | `a & b` | 1 | Flexible | Bitwise AND |
-| `bit_or` | `a \| b` | 1 | Flexible | Bitwise OR |
-| `bit_xor` | `a ^ b` | 1 | Flexible | Bitwise XOR |
-| `bit_not` | `~a` | 0 | Flexible | Bitwise NOT |
-| `bit_shl` | `a << b` | 1 | Flexible | Bitwise Shift Left |
-| `bit_shr` | `a >> b` | 1 | Flexible | Bitwise Shift Right |
+| Slot Name  | Syntax Trigger          | Parameter Arity | Return Contract | Description                   |
+| :--------- | :---------------------- | :-------------: | :-------------: | :---------------------------- |
+| `init`     | `MyClass(...)`          |    Flexible     |      None       | Constructor initializer       |
+| `bool`     | `if x`, `!x`, `bool(x)` |        0        |     `bool`      | Truthiness conversion         |
+| `string`   | `print(x)`, `string(x)` |        0        |    `string`     | String rendering              |
+| `int`      | `int(x)`                |        0        |      `int`      | Integer conversion            |
+| `float`    | `float(x)`              |        0        |     `float`     | Float conversion              |
+| `list`     | `list(x)`               |        0        |     `list`      | List conversion               |
+| `dict`     | `dict(x)`               |        0        |     `dict`      | Dict conversion               |
+| `eq`       | `a == b`, `a != b`      |        1        |     `bool`      | Equality comparison           |
+| `cmp`      | `a <=> b`               |        1        |      `int`      | Three-way ordering (-1, 0, 1) |
+| `lt`       | `a < b`                 |        1        |     `bool`      | Less than comparison          |
+| `gt`       | `a > b`                 |        1        |     `bool`      | Greater than comparison       |
+| `add`      | `a + b`                 |        1        |    Flexible     | Addition                      |
+| `sub`      | `a - b`                 |        1        |    Flexible     | Subtraction                   |
+| `mul`      | `a * b`                 |        1        |    Flexible     | Multiplication                |
+| `div`      | `a / b`                 |        1        |    Flexible     | True division                 |
+| `floordiv` | `a // b`                |        1        |    Flexible     | Floor division                |
+| `rem`      | `a % b`                 |        1        |    Flexible     | Remainder / Modulo            |
+| `neg`      | `-x`                    |        0        |    Flexible     | Unary negation                |
+| `len`      | `len(x)`                |        0        |      `int`      | Collection length             |
+| `get`      | `x[i]`                  |        1        |    Flexible     | Index read                    |
+| `set`      | `x[i] = v`              |        2        |    Flexible     | Index write                   |
+| `contains` | `needle in x`           |        1        |     `bool`      | Membership check              |
+| `iter`     | `for item in x`         |        0        |     `list`      | Iteration target list         |
+| `bit_and`  | `a & b`                 |        1        |    Flexible     | Bitwise AND                   |
+| `bit_or`   | `a \| b`                |        1        |    Flexible     | Bitwise OR                    |
+| `bit_xor`  | `a ^ b`                 |        1        |    Flexible     | Bitwise XOR                   |
+| `bit_not`  | `~a`                    |        0        |    Flexible     | Bitwise NOT                   |
+| `bit_shl`  | `a << b`                |        1        |    Flexible     | Bitwise Shift Left            |
+| `bit_shr`  | `a >> b`                |        1        |    Flexible     | Bitwise Shift Right           |
 
 ### 6.2 Return Type Contracts
 

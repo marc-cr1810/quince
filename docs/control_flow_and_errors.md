@@ -157,15 +157,15 @@ Throwing a non-`Error` instance raises an immediate `TypeError` at the `throw` s
 
 Errors in Quince carry a specific `ErrorKind`:
 
-| ErrorKind | Triggers & Description |
-| :--- | :--- |
-| `TypeError` | Value passed to an annotated boundary or operation does not match required type |
-| `ValueError` | Argument type is valid, but specific value is invalid (e.g. `sqrt(-1)`, `int("abc")`) |
-| `KeyError` | Explicitly attempting to `remove` a key that is missing from a dictionary |
-| `NameError` | Accessing an undefined variable or type annotation name |
-| `VisibilityError` | Accessing a `private` or `protected` field/method outside allowed scope |
-| `OverflowError` | Converting a float to int that exceeds 64-bit integer range |
-| `IoError` | Filesystem or input/output operation failed |
-| `ArityError` | Function or operator called with wrong number of arguments |
-| `DeclarationError` | Invalid class modifier, invalid `op` slot return contract, or duplicate name |
-| `FreezeError` | Mutating an object marked as `const` |
+| ErrorKind          | Triggers & Description                                                                |
+| :----------------- | :------------------------------------------------------------------------------------ |
+| `TypeError`        | Value passed to an annotated boundary or operation does not match required type       |
+| `ValueError`       | Argument type is valid, but specific value is invalid (e.g. `sqrt(-1)`, `int("abc")`) |
+| `KeyError`         | Explicitly attempting to `remove` a key that is missing from a dictionary             |
+| `NameError`        | Accessing an undefined variable or type annotation name                               |
+| `VisibilityError`  | Accessing a `private` or `protected` field/method outside allowed scope               |
+| `OverflowError`    | Converting a float to int that exceeds 64-bit integer range                           |
+| `IoError`          | Filesystem or input/output operation failed                                           |
+| `ArityError`       | Function or operator called with wrong number of arguments                            |
+| `DeclarationError` | Invalid class modifier, invalid `op` slot return contract, or duplicate name          |
+| `FreezeError`      | Mutating an object marked as `const`                                                  |

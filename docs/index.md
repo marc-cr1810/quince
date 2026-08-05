@@ -62,7 +62,7 @@ class Player {
     private let score: int = 0
     protected let alias_name: string?
 
-    op init(id: string, name: string? = nil) {
+    op init(id: string, name: string?) {
         self.id = id
         self.alias_name = name
     }
