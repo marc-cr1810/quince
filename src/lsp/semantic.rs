@@ -284,6 +284,12 @@ pub(crate) fn collect_expr_semantic_tokens(
             collect_expr_semantic_tokens(source, target, raw_tokens);
             collect_expr_semantic_tokens(source, index, raw_tokens);
         }
+        ExprKind::TypeArgs { target, args } => {
+            collect_expr_semantic_tokens(source, target, raw_tokens);
+            for arg in args {
+                collect_expr_semantic_tokens(source, arg, raw_tokens);
+            }
+        }
         ExprKind::Slice { target, start, end } => {
             collect_expr_semantic_tokens(source, target, raw_tokens);
             if let Some(s) = start { collect_expr_semantic_tokens(source, s, raw_tokens); }

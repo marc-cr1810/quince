@@ -1,0 +1,6 @@
+# §3.1 — constructing from a bare type parameter is refused. A field with no
+# initializer is a call to its annotated type, and `T()` is the one such call
+# that names no class.
+class Holder[T] {
+    public let held: T
+}

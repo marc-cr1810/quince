@@ -373,12 +373,39 @@ impl Parser {
                     };
 
                     if !self.eat(&TokenKind::Colon) {
-                        let close = self.expect(TokenKind::RBracket, "after the index")?;
+                        // A comma means a second argument, and nothing indexable
+                        // takes two — so this is a generic class being supplied
+                        // with its arguments, `Pair[int, string]`. The one-argument
+                        // form is not decided here and cannot be: `Stack[int]` and
+                        // `xs[i]` are the same three tokens. See `ExprKind::TypeArgs`.
+                        let mut args = vec![start.expect("a non-slice index has a value")];
+                        let mut many = false;
+                        while self.eat(&TokenKind::Comma) {
+                            many = true;
+                            // A trailing comma, as every other bracketed list allows.
+                            if self.check(&TokenKind::RBracket) {
+                                break;
+                            }
+                            args.push(self.expression()?);
+                        }
+                        let close = self.expect(
+                            TokenKind::RBracket,
+                            match many {
+                                true => "after the type arguments",
+                                false => "after the index",
+                            },
+                        )?;
                         Expr {
                             span: expr.span.to(close.span),
-                            kind: ExprKind::Index {
-                                target: Box::new(expr),
-                                index: Box::new(start.expect("a non-slice index has a value")),
+                            kind: match many {
+                                true => ExprKind::TypeArgs {
+                                    target: Box::new(expr),
+                                    args,
+                                },
+                                false => ExprKind::Index {
+                                    target: Box::new(expr),
+                                    index: Box::new(args.pop().expect("one argument")),
+                                },
                             },
                         }
                     } else {

@@ -1,0 +1,6 @@
+# §5 — a class declaring no parameters has nothing for `[…]` to bind.
+class Point {
+    public op init() {}
+}
+
+let p = Point[int]()

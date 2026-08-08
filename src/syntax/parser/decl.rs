@@ -8,11 +8,22 @@
 use crate::error::Result;
 use crate::syntax::ast::{
     self, BindKind, Expr, ExprKind, FieldDecl, FnDecl, ImportName, ImportNames, Op, Openness, Param,
-    Stmt, StmtKind, TypeExpr, TypeName, Var,
+    Stmt, StmtKind, TypeExpr, TypeName, TypeParam, Var,
 };
 use crate::syntax::doc::Doc;
 use crate::syntax::parser::{Modifiers, Parser, Site, declaration, is_member_modifier, syntax};
 use crate::syntax::token::{Span, Token, TokenKind};
+
+/// Whether the name is one of the language's own types.
+///
+/// `any` is in, though it is not a class: it is a type a program can write, and
+/// a parameter shadowing it would be no less confusing for the difference.
+fn names_a_builtin_type(name: &str) -> bool {
+    name == "any"
+        || crate::runtime::class::BUILTINS
+            .iter()
+            .any(|builtin| builtin.name() == name)
+}
 
 /// What the declaration starting at the current token turns out to be.
 ///
@@ -464,6 +475,78 @@ impl Parser {
         self.type_expr().map(Some)
     }
 
+    /// The `[T, U]` after a declaration's name, when one is written.
+    ///
+    /// Answers with an empty list without consuming anything when there is no
+    /// bracket, so every declaration form can call it unconditionally — the
+    /// same shape [`Self::annotation`] has, and for the same reason.
+    ///
+    /// `whose` names the declaration, because every refusal here is about a
+    /// parameter list and the reader needs to know which one.
+    pub(super) fn type_params(&mut self, whose: &str) -> Result<Vec<TypeParam>> {
+        if !self.eat(&TokenKind::LBracket) {
+            return Ok(Vec::new());
+        }
+        let mut params: Vec<TypeParam> = Vec::new();
+        loop {
+            // A parameter is a bare name and nothing else.
+            let (name, span) = match self.peek().kind.clone() {
+                TokenKind::Ident(word) => {
+                    self.advance();
+                    (word, self.tokens[self.pos - 1].span)
+                }
+                other => {
+                    return Err(declaration(
+                        format!("expected a type parameter, found {other}"),
+                        self.peek().span,
+                    )
+                    .with_help(
+                        "a parameter list declares names — `class Stack[T]` — and the types go \
+                         in where the class is used",
+                    ));
+                }
+            };
+            // `class Stack[int]` lexes as a declaration of a parameter *named*
+            // `int`, because a builtin type name is an ordinary identifier and
+            // not a keyword. Almost always it is a use written where a
+            // declaration goes — and where it is not, it makes `int` mean
+            // something else for the length of the body, which no reader is
+            // going to survive.
+            if names_a_builtin_type(&name) {
+                return Err(declaration(
+                    format!("`{name}` is a type, so it cannot name a type parameter"),
+                    span,
+                )
+                .with_help(format!(
+                    "a parameter list declares names to stand for types — write \
+                     `class {whose}[T]`, and `{name}` where `{whose}` is used"
+                )));
+            }
+            // Two parameters of one name make every mention of it ambiguous,
+            // and there is no reading of the second that is right.
+            if let Some(earlier) = params.iter().find(|seen| seen.name == name) {
+                return Err(declaration(
+                    format!("`{whose}` already declares a type parameter `{name}`"),
+                    span,
+                )
+                .with_label(earlier.span, "the first one")
+                .with_help(format!(
+                    "rename one of them — a mention of `{name}` cannot reach both"
+                )));
+            }
+            params.push(TypeParam { name, span });
+            if !self.eat(&TokenKind::Comma) {
+                break;
+            }
+            // A trailing comma, as every other bracketed list allows.
+            if self.check(&TokenKind::RBracket) {
+                break;
+            }
+        }
+        self.expect(TokenKind::RBracket, "after the type parameters")?;
+        Ok(params)
+    }
+
     /// A type: `int`, `int?`, `list[string]`, `any`, `_`, `const dict[string, int]`.
     ///
     /// Recursive through the argument list, which is what makes
@@ -617,6 +700,7 @@ impl Parser {
             }
         }
         let (name, _) = self.expect_ident("after `class`")?;
+        let params = self.type_params(&name)?;
 
         let (parent, parent_span) = if self.eat(&TokenKind::Extends) {
             let (parent, span) = self.expect_ident("after `extends`")?;
@@ -665,6 +749,7 @@ impl Parser {
         Ok(Stmt {
             kind: StmtKind::Class {
                 name,
+                params,
                 parent,
                 parent_span,
                 methods,

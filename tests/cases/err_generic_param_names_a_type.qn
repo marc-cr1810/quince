@@ -1,0 +1,5 @@
+# A use written where a declaration goes. It parses, because a builtin type
+# name is an ordinary identifier and not a keyword, so it is refused instead.
+class Stack[int] {
+    public op init() {}
+}

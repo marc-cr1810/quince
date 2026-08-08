@@ -127,6 +127,7 @@ impl Interp {
             StmtKind::Class {
                 doc: _,
                 name,
+                params,
                 parent,
                 parent_span,
                 methods,
@@ -286,6 +287,7 @@ impl Interp {
                     // method body would see, `super` included.
                     field_env: (!fields.is_empty()).then_some(enclosing),
                     visibility: *visibility,
+                    params: params.iter().map(|param| param.name.clone()).collect(),
                 };
 
                 // Inherited rather than searched for: a class that declares no

@@ -1,0 +1,7 @@
+# §5 — the same count, checked at resolution when it is written as an
+# annotation rather than as a construction.
+class Stack[T] {
+    public op init() {}
+}
+
+let s: Stack[int, string] = Stack()

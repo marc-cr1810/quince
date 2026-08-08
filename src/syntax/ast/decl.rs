@@ -193,6 +193,23 @@ impl BindKind {
     }
 }
 
+/// A type parameter a declaration introduces — `class Stack[T]`'s `T`.
+///
+/// A declaration's side of what [`TypeExpr`] is the use of. The name is in
+/// scope as a *type* through the body, and as nothing else: v0.9 §3.1 refuses
+/// `T()` because a parameter names a type and not a value, and there is no
+/// binding here for one to be found in.
+///
+/// The `bound` v0.9 §3.2 writes as `[T: Bound]` is tranche 3 and is not here
+/// yet. It is a field on this struct when it lands rather than a second
+/// parameter form, because a bound qualifies a parameter the way `?` qualifies
+/// a type — the thing is the same thing either way.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TypeParam {
+    pub name: String,
+    pub span: Span,
+}
+
 /// A type as the program wrote it.
 ///
 /// The *source* form, kept beside the declaration it annotates: a name, its
@@ -202,8 +219,8 @@ impl BindKind {
 /// the words the program typed, which needs spans this carries and that carries
 /// nothing of.
 ///
-/// v0.9 gives [`TypeExpr::args`] something more to hold; until then `list[int]`
-/// is the only shape that fills it.
+/// v0.9 gives [`TypeExpr::args`] something more to hold: a user class declares
+/// what fills it, so `Stack[int]` is written in the same shape `list[int]` is.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TypeExpr {
     pub name: TypeName,

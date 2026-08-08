@@ -111,6 +111,7 @@ impl Resolver {
 
             StmtKind::Class {
                 name,
+                params,
                 parent,
                 methods,
                 fields,
@@ -131,13 +132,25 @@ impl Resolver {
                 // name, which the arm below moves out of reach.
                 self.overriding(name, parent.as_ref().map(|p| p.name.as_str()), methods)?;
 
+                // The parameters are in scope for the fields and the methods and
+                // for nothing else — a class header is where `T` starts meaning
+                // something. Restored rather than cleared, so a class declared
+                // inside a method of another leaves the outer one's in place.
+                let enclosing_params = std::mem::replace(
+                    &mut self.type_params,
+                    params.iter().map(|param| param.name.clone()).collect(),
+                );
+
                 // Methods of a subclass are resolved inside a scope holding
                 // `super`, so a reference to it is an ordinary local lookup at
                 // whatever depth it appears — including from a closure nested
                 // in a method. The evaluator builds the matching scope.
                 let Some(parent) = parent else {
-                    self.field_values(fields)?;
-                    return self.methods(methods, name, None, span);
+                    let result = self
+                        .field_values(fields)
+                        .and_then(|()| self.methods(methods, name, None, span));
+                    self.type_params = enclosing_params;
+                    return result;
                 };
                 // Declaring no `op init` is fine and needs no check: the class
                 // inherits its base's conversion and construction runs it, so
@@ -152,6 +165,7 @@ impl Resolver {
                     .and_then(|()| self.field_values(fields))
                     .and_then(|()| self.methods(methods, name, base, span));
                 self.scopes.pop();
+                self.type_params = enclosing_params;
                 result
             }
 
@@ -310,6 +324,27 @@ impl Resolver {
         };
         let written = ty.written();
         let named = match &ty.name {
+            // A type parameter names a type and not a value, so there is nothing
+            // to call — v0.9 §3.1. Its own report, and before the
+            // default-constructor question, because "`T` has no default
+            // constructor" invites the reader to go and give it one.
+            //
+            // This is also what the *synthesised* initializer would hit: a field
+            // with no `= …` becomes a call to its annotated type, and `T()` is
+            // the one such call that names no class. Refused here, so the
+            // reader is told which rule they met rather than "undefined
+            // variable `T`" from a name the parser invented.
+            TypeName::Named(name) if self.type_params.iter().any(|param| param == name) => {
+                return Err(declaration(
+                    format!("`{name}` is a type parameter, so {what} cannot be built from it"),
+                    span,
+                )
+                .with_help(format!(
+                    "`{name}` stands for whatever type the class was given, and nothing \
+                     promises that has a constructor taking no arguments — write `= …`, or \
+                     annotate `{name}?`, which holds `nil` until something sets it"
+                )));
+            }
             TypeName::Named(name) if self.default_constructible(name) => return Ok(()),
             TypeName::Named(name) => name.clone(),
             // Not a class, so there is nothing to call. `any?` would admit
@@ -687,6 +722,18 @@ impl Resolver {
             ExprKind::Index { target, index } => {
                 self.expr(target)?;
                 self.expr(index)
+            }
+
+            // Every argument is a name that has to resolve to a class, so they
+            // resolve as the ordinary expressions they are. Which class each
+            // names — and whether the target takes arguments at all — is a run
+            // time question, for the reason `extend` puts the same one there.
+            ExprKind::TypeArgs { target, args } => {
+                self.expr(target)?;
+                for arg in args {
+                    self.expr(arg)?;
+                }
+                Ok(())
             }
 
             ExprKind::Slice { target, start, end } => {

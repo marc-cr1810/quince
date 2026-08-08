@@ -28,6 +28,25 @@ impl Interp {
         index: &Value,
         span: Span,
     ) -> Result<Value> {
+        // A class is not subscripted, it is *supplied*: `Stack[int]` binds a
+        // type parameter and `xs[i]` reads an element, and the two are the same
+        // three tokens. Which one it is, is decided by what the target holds —
+        // where `extend` already settles the same question, and for the same
+        // reason. v0.9 §3.1.
+        //
+        // Reaching here means the brackets were *not* in callee position, since
+        // that form is fused in `eval`. So this is a class with its arguments
+        // bound and nothing built from it, which is a type written where a value
+        // goes.
+        //
+        // Before the `op get` lookup below, because a class value has no
+        // subscript of its own: an `op get` on it is what its instances answer
+        // through, and reaching it here would call the getter with a class as
+        // the key.
+        if matches!(target, Value::Class(_)) {
+            return Err(self.not_a_value(target, span));
+        }
+
         // The class first, so a class extending `dict` whose `x[k]` answers with
         // a default is asked before the dict it carries raises a key error.
         // Whatever the op returns is the answer — a subscript has no type it has

@@ -24,6 +24,8 @@ use crate::syntax::token::Span;
 /// a function calling one further down the file — a rule that held for code and
 /// not for types would be arbitrary.
 pub(super) fn expand(program: &mut [Stmt]) -> Result<()> {
+    let mut arities = HashMap::new();
+    parameterised(program, &mut arities);
     let mut declared = HashMap::new();
     // In declaration order, kept beside the map. Which alias a cycle is
     // reported at has to be the same on every run, and a `HashMap`'s iteration
@@ -42,10 +44,64 @@ pub(super) fn expand(program: &mut [Stmt]) -> Result<()> {
         resolved.insert(name.clone(), expanded);
     }
 
+    let ctx = Expansion {
+        resolved: &resolved,
+        arities: &arities,
+    };
     for stmt in program {
-        substitute_stmt(stmt, &resolved)?;
+        substitute_stmt(stmt, &ctx)?;
     }
     Ok(())
+}
+
+/// How many type parameters each class in the program declares.
+///
+/// Only the ones that declare any: an absent entry means "takes none", which is
+/// every class written before v0.9 and most written after.
+///
+/// Collected from the whole tree rather than the top level, unlike the aliases
+/// above, because a class may be declared inside a function and its parameter
+/// list is no less real there. What that costs is that two classes of one name
+/// in two scopes share an entry — a pre-existing limit of every by-name table in
+/// this pass, and not one generics introduce.
+fn parameterised(stmts: &[Stmt], into: &mut HashMap<String, usize>) {
+    for stmt in stmts {
+        match &stmt.kind {
+            StmtKind::Class { name, params, .. } => {
+                if !params.is_empty() {
+                    into.insert(name.clone(), params.len());
+                }
+            }
+            StmtKind::Fn { decl, .. } => parameterised(&decl.body.stmts, into),
+            StmtKind::Block(body) | StmtKind::While { body, .. } | StmtKind::For { body, .. } => {
+                parameterised(&body.stmts, into)
+            }
+            StmtKind::If { then, otherwise, .. } => {
+                parameterised(&then.stmts, into);
+                if let Some(other) = otherwise {
+                    parameterised(std::slice::from_ref(other), into);
+                }
+            }
+            StmtKind::Try { body, handler, .. } => {
+                parameterised(&body.stmts, into);
+                parameterised(&handler.stmts, into);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// What a substitution needs to know, threaded as one value.
+///
+/// Two tables that travel together and are read at the same moment: the second
+/// is consulted by [`check_arguments`], which runs on the way out of every
+/// substitution, so a signature carrying one and not the other would be a lie
+/// about when the check happens.
+struct Expansion<'a> {
+    /// Each alias, expanded to a form naming no alias.
+    resolved: &'a HashMap<String, TypeExpr>,
+    /// How many arguments each generic class takes. See [`parameterised`].
+    arities: &'a HashMap<String, usize>,
 }
 
 /// Gathers every `alias` declaration, refusing a second one for a name.
@@ -165,11 +221,15 @@ fn cycles(path: &[String], span: Span) -> Raised {
 /// read until `UserID` is expanded. Anything deciding whether arguments fit has
 /// to see the type after substitution.
 ///
-/// Only the two containers the language has. A class the program declared takes
-/// no arguments until v0.9 gives it some, and saying so here would be a rule
-/// that has to be removed rather than extended, so an unknown head is left
-/// alone: the name is checked when the annotation is applied.
-pub(super) fn check_arguments(ty: &TypeExpr) -> Result<()> {
+/// v0.7 admitted only the two containers the language has, and said so in the
+/// help. v0.9 adds the classes the program declared, read off their parameter
+/// lists by [`parameterised`] — which is why the arity here is looked up rather
+/// than matched: a generic class is not a third case, it is the same case with
+/// its count written somewhere else.
+///
+/// A head that is neither is still left alone when it takes no arguments. It may
+/// not be a type at all, and *that* is checked where the annotation is applied.
+pub(super) fn check_arguments(ty: &TypeExpr, arities: &HashMap<String, usize>) -> Result<()> {
     let TypeName::Named(head) = &ty.name else {
         // `any` takes no arguments and the parser gives it none.
         return Ok(());
@@ -178,14 +238,20 @@ pub(super) fn check_arguments(ty: &TypeExpr) -> Result<()> {
     let arity = match head {
         "list" => 1..=1,
         "dict" => 1..=2,
-        // Not a container, so it takes no arguments — and a program that wrote
-        // some has said something the language cannot read.
+        _ if arities.contains_key(head) => {
+            let count = arities[head];
+            count..=count
+        }
+        // Not a container and not a class that declared parameters, so it takes
+        // no arguments — and a program that wrote some has said something the
+        // language cannot read.
         _ if !args.is_empty() => {
-            return Err(refused(
-                format!("`{head}` takes no type arguments"),
-                span,
-            )
-            .with_help("only `list` and `dict` are parameterised in this version"));
+            return Err(refused(format!("`{head}` takes no type arguments"), span).with_help(
+                format!(
+                    "`list` and `dict` are parameterised, and so is a class declaring a \
+                     parameter list — write `class {head}[T]` if that is what `{head}` should be"
+                ),
+            ));
         }
         _ => return Ok(()),
     };
@@ -202,9 +268,23 @@ pub(super) fn check_arguments(ty: &TypeExpr) -> Result<()> {
             span,
         )
         .with_help(match head {
-            "list" => "a list has one element type — `list[int]`",
-            _ => "a dict takes a key type and optionally a value type — `dict[string, int]`, \
-                  or `dict[string]` to leave the values unconstrained",
+            "list" => "a list has one element type — `list[int]`".to_string(),
+            "dict" => "a dict takes a key type and optionally a value type — \
+                       `dict[string, int]`, or `dict[string]` to leave the values \
+                       unconstrained"
+                .to_string(),
+            // A class says its own arity, so the help quotes the declaration
+            // back rather than describing it. Writing none at all is still
+            // allowed and is not this report — an unwritten argument is
+            // unconstrained, §3.1.
+            _ => format!(
+                "`{head}` declares {} type {}, and a use writes all of them or none",
+                arity.start(),
+                match arity.start() {
+                    1 => "parameter",
+                    _ => "parameters",
+                }
+            ),
         }));
     }
 
@@ -231,70 +311,70 @@ pub(super) fn check_arguments(ty: &TypeExpr) -> Result<()> {
 
 
 /// Walks a statement, rewriting every type it holds.
-fn substitute_stmt(stmt: &mut Stmt, resolved: &HashMap<String, TypeExpr>) -> Result<()> {
+fn substitute_stmt(stmt: &mut Stmt, ctx: &Expansion<'_>) -> Result<()> {
     match &mut stmt.kind {
-        StmtKind::Alias { ty, .. } => substitute(ty, resolved)?,
+        StmtKind::Alias { ty, .. } => substitute(ty, ctx)?,
         StmtKind::Let { ty, value, .. } => {
             if let Some(ty) = ty {
-                substitute(ty, resolved)?;
+                substitute(ty, ctx)?;
             }
-            substitute_expr(value, resolved)?;
+            substitute_expr(value, ctx)?;
         }
-        StmtKind::Fn { decl, .. } => substitute_fn(decl, resolved)?,
+        StmtKind::Fn { decl, .. } => substitute_fn(decl, ctx)?,
         StmtKind::Class { methods, fields, .. } => {
             for decl in methods {
-                substitute_fn(decl, resolved)?;
+                substitute_fn(decl, ctx)?;
             }
             for field in fields {
                 if let Some(ty) = &mut field.ty {
-                    substitute(ty, resolved)?;
+                    substitute(ty, ctx)?;
                 }
-                substitute_expr(&mut field.value, resolved)?;
+                substitute_expr(&mut field.value, ctx)?;
             }
         }
         StmtKind::Extend { methods, .. } => {
             for decl in methods {
-                substitute_fn(decl, resolved)?;
+                substitute_fn(decl, ctx)?;
             }
         }
-        StmtKind::Expr(expr) | StmtKind::Throw(expr) => substitute_expr(expr, resolved)?,
+        StmtKind::Expr(expr) | StmtKind::Throw(expr) => substitute_expr(expr, ctx)?,
         StmtKind::Return(value) => {
             if let Some(value) = value {
-                substitute_expr(value, resolved)?;
+                substitute_expr(value, ctx)?;
             }
         }
         StmtKind::If { cond, then, otherwise } => {
-            substitute_expr(cond, resolved)?;
+            substitute_expr(cond, ctx)?;
             for stmt in &mut then.stmts {
-                substitute_stmt(stmt, resolved)?;
+                substitute_stmt(stmt, ctx)?;
             }
             if let Some(other) = otherwise {
-                substitute_stmt(other, resolved)?;
+                substitute_stmt(other, ctx)?;
             }
         }
         StmtKind::While { cond, body } => {
-            substitute_expr(cond, resolved)?;
+            substitute_expr(cond, ctx)?;
             for stmt in &mut body.stmts {
-                substitute_stmt(stmt, resolved)?;
+                substitute_stmt(stmt, ctx)?;
             }
         }
         StmtKind::For { iter, body, .. } => {
-            substitute_expr(iter, resolved)?;
+            substitute_expr(iter, ctx)?;
             for stmt in &mut body.stmts {
-                substitute_stmt(stmt, resolved)?;
+                substitute_stmt(stmt, ctx)?;
             }
         }
         StmtKind::Try { body, handler, .. } => {
             for stmt in &mut body.stmts {
-                substitute_stmt(stmt, resolved)?;
+                substitute_stmt(stmt, ctx)?;
             }
             for stmt in &mut handler.stmts {
-                substitute_stmt(stmt, resolved)?;
+                substitute_stmt(stmt, ctx)?;
             }
         }
         StmtKind::Block(block) => {
             for stmt in &mut block.stmts {
-                substitute_stmt(stmt, resolved)?;
+                substitute_stmt(stmt, ctx)?;
             }
         }
         StmtKind::Import { .. } => {}
@@ -309,72 +389,78 @@ fn substitute_stmt(stmt: &mut Stmt, resolved: &HashMap<String, TypeExpr>) -> Res
 /// and at this point nothing else holds it, so the copy never happens.
 fn substitute_fn(
     decl: &mut std::rc::Rc<crate::syntax::ast::FnDecl>,
-    resolved: &HashMap<String, TypeExpr>,
+    ctx: &Expansion<'_>,
 ) -> Result<()> {
     let decl = std::rc::Rc::make_mut(decl);
     for param in &mut decl.params {
         if let Some(ty) = &mut param.ty {
-            substitute(ty, resolved)?;
+            substitute(ty, ctx)?;
         }
     }
     if let Some(ty) = &mut decl.returns {
-        substitute(ty, resolved)?;
+        substitute(ty, ctx)?;
     }
     for stmt in &mut decl.body.stmts {
-        substitute_stmt(stmt, resolved)?;
+        substitute_stmt(stmt, ctx)?;
     }
     Ok(())
 }
 
 /// `is` is the one expression holding a type.
-fn substitute_expr(expr: &mut Expr, resolved: &HashMap<String, TypeExpr>) -> Result<()> {
+fn substitute_expr(expr: &mut Expr, ctx: &Expansion<'_>) -> Result<()> {
     match &mut expr.kind {
         ExprKind::Is { value, ty } => {
-            substitute(ty, resolved)?;
-            substitute_expr(value, resolved)?;
+            substitute(ty, ctx)?;
+            substitute_expr(value, ctx)?;
         }
-        ExprKind::Chain(inner) => substitute_expr(inner, resolved)?,
+        ExprKind::Chain(inner) => substitute_expr(inner, ctx)?,
         ExprKind::Coalesce { lhs, rhs } => {
-            substitute_expr(lhs, resolved)?;
-            substitute_expr(rhs, resolved)?;
+            substitute_expr(lhs, ctx)?;
+            substitute_expr(rhs, ctx)?;
         }
-        ExprKind::Unary { rhs, .. } => substitute_expr(rhs, resolved)?,
+        ExprKind::Unary { rhs, .. } => substitute_expr(rhs, ctx)?,
         ExprKind::Binary { lhs, rhs, .. } | ExprKind::Logical { lhs, rhs, .. } => {
-            substitute_expr(lhs, resolved)?;
-            substitute_expr(rhs, resolved)?;
+            substitute_expr(lhs, ctx)?;
+            substitute_expr(rhs, ctx)?;
         }
         ExprKind::Call { callee, args } => {
-            substitute_expr(callee, resolved)?;
+            substitute_expr(callee, ctx)?;
             for arg in args {
-                substitute_expr(&mut arg.value, resolved)?;
+                substitute_expr(&mut arg.value, ctx)?;
             }
         }
         ExprKind::Index { target, index } => {
-            substitute_expr(target, resolved)?;
-            substitute_expr(index, resolved)?;
+            substitute_expr(target, ctx)?;
+            substitute_expr(index, ctx)?;
         }
-        ExprKind::Slice { target, start, end } => {
-            substitute_expr(target, resolved)?;
-            for bound in [start, end].into_iter().flatten() {
-                substitute_expr(bound, resolved)?;
+        ExprKind::TypeArgs { target, args } => {
+            substitute_expr(target, ctx)?;
+            for arg in args {
+                substitute_expr(arg, ctx)?;
             }
         }
-        ExprKind::Field { target, .. } => substitute_expr(target, resolved)?,
+        ExprKind::Slice { target, start, end } => {
+            substitute_expr(target, ctx)?;
+            for bound in [start, end].into_iter().flatten() {
+                substitute_expr(bound, ctx)?;
+            }
+        }
+        ExprKind::Field { target, .. } => substitute_expr(target, ctx)?,
         ExprKind::Assign { target, value }
         | ExprKind::AssignOp { target, value, .. }
         | ExprKind::AssignShort { target, value, .. } => {
-            substitute_expr(target, resolved)?;
-            substitute_expr(value, resolved)?;
+            substitute_expr(target, ctx)?;
+            substitute_expr(value, ctx)?;
         }
         ExprKind::List(items) => {
             for item in items {
-                substitute_expr(item, resolved)?;
+                substitute_expr(item, ctx)?;
             }
         }
         ExprKind::Dict(pairs) => {
             for (key, value) in pairs {
-                substitute_expr(key, resolved)?;
-                substitute_expr(value, resolved)?;
+                substitute_expr(key, ctx)?;
+                substitute_expr(value, ctx)?;
             }
         }
         ExprKind::Int(_)
@@ -395,12 +481,12 @@ fn substitute_expr(expr: &mut Expr, resolved: &HashMap<String, TypeExpr>) -> Res
 /// key type cannot be read until `UserID` has been expanded. Anything deciding
 /// whether the arguments fit has to run after substitution, so it runs on the
 /// way out of it.
-fn substitute(ty: &mut TypeExpr, resolved: &HashMap<String, TypeExpr>) -> Result<()> {
+fn substitute(ty: &mut TypeExpr, ctx: &Expansion<'_>) -> Result<()> {
     for arg in &mut ty.args {
-        substitute(arg, resolved)?;
+        substitute(arg, ctx)?;
     }
     if let TypeName::Named(name) = &ty.name
-        && let Some(target) = resolved.get(name.as_str())
+        && let Some(target) = ctx.resolved.get(name.as_str())
     {
         *ty = TypeExpr {
             name: target.name.clone(),
@@ -410,5 +496,5 @@ fn substitute(ty: &mut TypeExpr, resolved: &HashMap<String, TypeExpr>) -> Result
             span: ty.span,
         };
     }
-    check_arguments(ty)
+    check_arguments(ty, ctx.arities)
 }

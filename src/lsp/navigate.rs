@@ -632,6 +632,12 @@ fn visit_expr(source: &str, expr: &Expr, target: &str, ranges: &mut Vec<Range>) 
             visit_expr(source, recv, target, ranges);
             visit_expr(source, index, target, ranges);
         }
+        ExprKind::TypeArgs { target: recv, args } => {
+            visit_expr(source, recv, target, ranges);
+            for arg in args {
+                visit_expr(source, arg, target, ranges);
+            }
+        }
         ExprKind::Slice { target: recv, start, end } => {
             visit_expr(source, recv, target, ranges);
             if let Some(s) = start { visit_expr(source, s, target, ranges); }

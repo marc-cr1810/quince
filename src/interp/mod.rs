@@ -9,6 +9,7 @@
 //! | [`eval`] | evaluating an expression, reading and writing a name |
 //! | [`index`] | `x[i]`, `x[i] = v`, `x[a:b]` |
 //! | [`call`] | calling a function, a method, a native, a class |
+//! | [`generic`] | binding a class's type parameters, and reading one in a body |
 //! | [`object`] | finding a member on a value |
 //! | [`ops`] | the operators, and the questions the language asks without a call |
 //! | [`module`] | `import`, and the two kinds of module |
@@ -28,6 +29,7 @@ pub mod call;
 pub mod error;
 pub mod eval;
 pub mod exec;
+pub mod generic;
 pub mod index;
 pub mod module;
 pub mod object;
@@ -312,6 +314,36 @@ pub struct Interp {
     /// A root, because the functions in here are heap objects reachable from
     /// nowhere else — the class does not hold them, which is the entire point.
     extensions: HashMap<(ObjId, String), Value>,
+    /// The header the construction now in flight should stamp on the instance
+    /// it is about to allocate — v0.9 §3.1.
+    ///
+    /// Set by [`Interp::built_generic`] across exactly one call and restored
+    /// after, because the instance does not exist when the arguments are read
+    /// and there is nowhere else to put them. A field rather than a parameter
+    /// threaded through [`Interp::call`]: construction is reached from four
+    /// call forms and a conversion, and four of the five have nothing to say
+    /// about type arguments.
+    ///
+    /// `None` for every construction in a program that declares no generic
+    /// class, and taken rather than read, so a nested `Stack[int](Point())`
+    /// cannot stamp the inner `Point` with the outer's arguments.
+    ///
+    /// Not a root: a [`TypeExpr`](crate::syntax::ast::TypeExpr) holds no
+    /// handles.
+    pending: Option<Rc<crate::syntax::ast::TypeExpr>>,
+    /// What the type parameters of the method now running are bound to —
+    /// v0.9 §3.1.
+    ///
+    /// A stack, parallel to `reaching` and pushed beside it, because a `T` is
+    /// scoped exactly the way a receiver is: it means something inside one
+    /// method body and nothing outside. A method on a `Stack[int]` calling one
+    /// on a `Stack[string]` has to see each in its own frame, and a stack is
+    /// what makes that fall out rather than be arranged.
+    ///
+    /// Read through [`Interp::bindings`], which answers with an empty slice for
+    /// the overwhelming majority — every frame of every program that declares
+    /// no generic class.
+    type_bindings: Vec<Vec<(String, crate::syntax::ast::TypeExpr)>>,
     /// Every stdlib module built so far, keyed by its name.
     ///
     /// A cache, and the thing that makes a module *one* object: `import math` in
@@ -418,6 +450,8 @@ impl Interp {
             input,
             rng: stdlib::DEFAULT_SEED,
             extensions: HashMap::new(),
+            pending: None,
+            type_bindings: Vec::new(),
             stdlib_modules: HashMap::new(),
             files: HashMap::new(),
             loading: Vec::new(),

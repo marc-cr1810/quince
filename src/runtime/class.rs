@@ -18,7 +18,7 @@ use crate::builtins::types::{BOOL, CLASS, DICT, FLOAT, FUNCTION, INT, LIST, MODU
 use crate::runtime::dict::Dict;
 use crate::runtime::heap::{Heap, ObjId};
 use crate::runtime::value::{Native, Value};
-use crate::syntax::ast::{FieldDecl, OPS, Op, Openness, Visibility};
+use crate::syntax::ast::{FieldDecl, OPS, Op, Openness, TypeExpr, Visibility};
 
 /// A type built into the language.
 ///
@@ -305,6 +305,24 @@ pub struct Class {
     /// How far the class's own name reaches: whether an importing module sees
     /// it. Nothing to do with the visibility of its members.
     pub visibility: Visibility,
+    /// The type parameters the declaration wrote — `class Stack[T]`'s `T`, by
+    /// name and in order. Empty for a class taking none.
+    ///
+    /// Names and not [`TypeParam`](crate::syntax::ast::TypeParam)s: a span is a
+    /// fact about the source, and everything the run time does with a parameter
+    /// is match it against the argument in the same position.
+    ///
+    /// Not inherited. A subclass of a generic class declares its own list or
+    /// takes none, the same way it declares its own `openness`.
+    ///
+    /// **The arguments are not here, and deliberately.** `Stack[int]` is not a
+    /// second class object: `extensions` is keyed by class handle, so a class
+    /// with two objects would be a class whose `extend` block one of them could
+    /// not see, and DESIGN.md's *one class representation* is the rule that
+    /// stops. What an instance was built to hold is recorded on the *instance*,
+    /// in v0.7 §3.9's reified header, which is where every other "what does this
+    /// container hold" already lives.
+    pub params: Vec<String>,
 }
 
 impl Class {
@@ -330,6 +348,29 @@ impl Class {
             fields: Vec::new(),
             field_env: None,
             visibility: Visibility::Public,
+            // A builtin declares no parameters here even where it takes them.
+            // `list[int]` is checked by the argument rules in `sema::types`,
+            // which read the annotation and never this — the container was
+            // built before there was anywhere to write a parameter down, and
+            // giving `list` one now would be a second answer to a question that
+            // already has one.
+            params: Vec::new(),
+        }
+    }
+
+    /// This class, with `args`, as an annotation would write it.
+    ///
+    /// What a constructed instance is stamped with, and so what a later `is`
+    /// reads back. The span is empty because there is no source to point at: a
+    /// header records what a value *holds*, and the place that says so may be
+    /// an annotation, an explicit argument list, or neither.
+    pub fn reified(&self, args: Vec<TypeExpr>) -> TypeExpr {
+        TypeExpr {
+            name: crate::syntax::ast::TypeName::Named(self.name.clone()),
+            args,
+            nullable: false,
+            frozen: false,
+            span: crate::syntax::token::Span::new(0, 0),
         }
     }
 
@@ -554,6 +595,7 @@ mod tests {
                 slots: Class::empty_slots(),
                 builtin: None,
                 openness: Openness::Open,
+                params: Vec::new(),
             }))),
             Value::Module(heap.alloc(Object::Globals(Globals::module("m", None)))),
         ];

@@ -62,6 +62,9 @@ use crate::syntax::lexer::Lexer;
             ExprKind::Index { target, index } => {
                 format!("(index {} {})", sexpr(target), sexpr(index))
             }
+            ExprKind::TypeArgs { target, args } => {
+                format!("(type-args {} {})", sexpr(target), joined(args))
+            }
             ExprKind::Slice { target, start, end } => {
                 let bound = |b: &Option<Box<Expr>>| b.as_deref().map_or(String::new(), sexpr);
                 format!("(slice {} {} {})", sexpr(target), bound(start), bound(end))
@@ -851,4 +854,59 @@ use crate::syntax::lexer::Lexer;
         let stmts = parse_ok("let a = b\n++c");
         assert_eq!(stmts.len(), 2);
         assert!(matches!(stmts[0].kind, StmtKind::Let { .. }));
+    }
+
+    #[test]
+    fn a_class_header_takes_a_parameter_list() {
+        let stmts = parse_ok("class Stack[T] { }");
+        let StmtKind::Class { params, .. } = &stmts[0].kind else {
+            panic!("expected a class");
+        };
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "T");
+
+        let stmts = parse_ok("public final class Pair[A, B,] { }");
+        let StmtKind::Class { params, .. } = &stmts[0].kind else {
+            panic!("expected a class");
+        };
+        // The trailing comma every other bracketed list allows.
+        let names: Vec<&str> = params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["A", "B"]);
+
+        // And a class without one is unchanged.
+        let stmts = parse_ok("class Point { }");
+        let StmtKind::Class { params, .. } = &stmts[0].kind else {
+            panic!("expected a class");
+        };
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn a_parameter_list_declares_names_rather_than_writing_types() {
+        // The likeliest mistake is writing a *use* where a declaration goes.
+        // It parses — a builtin type name is an ordinary identifier — so it has
+        // to be refused rather than failing to lex.
+        let err = parse_err("class Stack[int] { }");
+        assert!(
+            err.message.contains("`int` is a type"),
+            "{}",
+            err.message
+        );
+
+        // And something that cannot be a name at all is the other report.
+        let err = parse_err("class Stack[3] { }");
+        assert!(
+            err.message.contains("expected a type parameter"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn a_comma_inside_brackets_supplies_type_arguments() {
+        // One argument cannot be told from a subscript and stays an `Index` —
+        // the target decides, at run time. Two can only be one thing.
+        assert_eq!(expr_of("Pair[int, string]"), "(type-args Pair int string)");
+        assert_eq!(expr_of("Stack[int]"), "(index Stack int)");
+        assert_eq!(expr_of("xs[i]"), "(index xs i)");
     }

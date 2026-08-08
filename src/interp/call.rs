@@ -19,6 +19,7 @@ use crate::runtime::dict::{Dict, Key};
 use crate::runtime::env::Env;
 use crate::runtime::heap::{ObjId, Object};
 use crate::runtime::value::{Native, Value};
+use crate::interp::generic::substituted;
 use crate::sema::types::{arguments_admit, holds};
 use crate::syntax::ast::{CallArg, Expr, ExprKind, FnDecl, Op, Param, TypeExpr, TypeName};
 use crate::syntax::token::Span;
@@ -714,28 +715,61 @@ impl Interp {
                     Some(func.env),
                     func.decl.body.slot_count,
                 )));
-                for (index, mut arg) in args.into_iter().enumerate() {
-                    let param = &func.decl.params[index];
-                    // Against the parameter's annotation, at the boundary the
-                    // value actually crosses. The span is the call's, because
-                    // that is where the wrong value was written — the
-                    // declaration is right and is somewhere else.
-                    let ty = param.ty.clone();
-                    if let Some(ty) = &ty {
-                        let named = format!("`{}`", param.name);
-                        arg = self.coerced(ty, arg, &named, span)?;
+                // What this body's type parameters are bound to, if it is a
+                // method of a generic class. Read off the receiver, which is
+                // `args[0]` for a method and is why this can be asked once
+                // rather than per parameter: every `T` in one signature means
+                // the same `T`, and the receiver is what says which.
+                //
+                // Pushed before the parameters are checked and popped after the
+                // return is, because both mention `T` — and so does every `let`
+                // in between, which is why it is a frame on the interpreter
+                // rather than a local. Empty for every function in a program
+                // that declares no generic class. v0.9 §3.1.
+                self.type_bindings.push(match func.decl.params.first() {
+                    Some(first) if first.receiver => self.bindings_of(&args[0]),
+                    _ => Vec::new(),
+                });
+
+                // Every path from here to the matching `pop` has to reach it,
+                // so the parameter loop hands back a `Result` rather than using
+                // `?` — a refusal against an annotation is the ordinary case,
+                // not the exceptional one.
+                let bound = (|interp: &mut Interp| -> Result<()> {
+                    for (index, mut arg) in args.into_iter().enumerate() {
+                        let param = &func.decl.params[index];
+                        // Against the parameter's annotation, at the boundary
+                        // the value actually crosses. The span is the call's,
+                        // because that is where the wrong value was written —
+                        // the declaration is right and is somewhere else.
+                        //
+                        // `coerced` substitutes, so `push(item: T)` on a
+                        // `Stack[int]` is checked as `push(item: int)` by the
+                        // rules that were already here. What is substituted
+                        // again below is the annotation the scope *keeps*, for
+                        // the assignment checks that read it later.
+                        let ty = param.ty.clone();
+                        if let Some(ty) = &ty {
+                            let named = format!("`{}`", param.name);
+                            arg = interp.coerced(ty, arg, &named, span)?;
+                        }
+                        // `const p` freezes what the caller passed, which is the
+                        // guarantee §3.3 wants from a `const` parameter: the
+                        // callee cannot mutate caller data through it. `final p`
+                        // binds the name once and leaves the object alone — the
+                        // other axis, and the same pair `let`/`final`/`const`
+                        // mean anywhere.
+                        if param.bind.freezes() {
+                            interp.heap.freeze(&arg);
+                        }
+                        let ty = ty.map(|ty| Rc::new(substituted(&ty, interp.bindings())));
+                        interp.heap.env_mut(scope).declare(index as u16, arg, ty, param.bind);
                     }
-                    // `const p` freezes what the caller passed, which is the
-                    // guarantee §3.3 wants from a `const` parameter: the callee
-                    // cannot mutate caller data through it. `final p` binds the
-                    // name once and leaves the object alone — the other axis,
-                    // and the same pair `let`/`final`/`const` mean anywhere.
-                    if param.bind.freezes() {
-                        self.heap.freeze(&arg);
-                    }
-                    self.heap
-                        .env_mut(scope)
-                        .declare(index as u16, arg, ty.map(Rc::new), param.bind);
+                    Ok(())
+                })(self);
+                if let Err(err) = bound {
+                    self.type_bindings.pop();
+                    return Err(err);
                 }
 
                 self.depth += 1;
@@ -754,18 +788,30 @@ impl Interp {
                     None => err,
                 });
 
-                let mut produced = match result? {
-                    Flow::Return(value) => value,
-                    Flow::Normal => Value::Nil,
+                let produced = match result {
+                    Ok(Flow::Return(value)) => value,
+                    Ok(Flow::Normal) => Value::Nil,
+                    Err(err) => {
+                        self.type_bindings.pop();
+                        return Err(err);
+                    }
                 };
                 // A declared return is checked on the way out, which catches the
                 // implicit `nil` a function that falls off its end produces —
                 // the case an annotation most often exists to rule out.
-                if let Some(ty) = func.decl.returns.clone() {
-                    let named = format!("`{}`\u{2019}s return", func.decl.name);
-                    produced = self.coerced(&ty, produced, &named, span)?;
-                }
-                Ok(produced)
+                //
+                // Still inside the frame, because `pop(): T?` on a `Stack[int]`
+                // returns an `int?` and `coerced` is what turns the one into the
+                // other.
+                let checked = match func.decl.returns.clone() {
+                    Some(ty) => {
+                        let named = format!("`{}`\u{2019}s return", func.decl.name);
+                        self.coerced(&ty, produced, &named, span)
+                    }
+                    None => Ok(produced),
+                };
+                self.type_bindings.pop();
+                checked
             }
 
             Value::BoundMethod(id) => {
@@ -795,6 +841,16 @@ impl Interp {
                     payload: None,
                 }));
                 let instance = Value::Instance(instance_id);
+                // Before the fields, because a field annotated `list[T]` is
+                // checked on the way in and the answer to what `T` is comes
+                // from here. v0.9 §3.1's "binding is reified".
+                //
+                // Taken, not read: a `Stack[int](Point())` evaluates its
+                // argument inside this call, and the `Point` it builds must not
+                // inherit the header meant for the `Stack`.
+                if let Some(header) = self.pending.take() {
+                    self.heap.describe(instance_id, header);
+                }
 
                 // Declared fields, before `op init` — so an `init` assigning one
                 // overwrites a value that is already there, which is what makes
@@ -1010,6 +1066,16 @@ impl Interp {
         // wherever the caller knew where that was. A statement-wide underline is
         // what is left when nobody did.
         let span = written.caret(span);
+        // Every annotation checked at run time passes through here, which is
+        // why substitution is here and not at each of the callers: a `T` is a
+        // type not yet written down, and this is the one place that has both the
+        // annotation and the frame that says what it stands for. A caller that
+        // forgot would silently accept anything. v0.9 §3.1.
+        //
+        // A clone and nothing else outside a generic method — see
+        // [`crate::interp::generic::substituted`].
+        let substituted = substituted(ty, self.bindings());
+        let ty = &substituted;
         // A name that is not a type at all is a different mistake from a value
         // that does not hold, and reporting it as the second blames the value
         // for the annotation being wrong. Checked here rather than at
@@ -1514,9 +1580,20 @@ impl Interp {
             let Some(env) = self.heap.class(id).field_env else {
                 continue;
             };
+            // The instance's own class only. A generic *parent* would need
+            // `class B[T] extends A[T]` to say what its argument is, and there
+            // is no syntax for that yet — so an ancestor's `T` binds to nothing
+            // here rather than to whatever the subclass happens to call its
+            // first, which is the answer that would be wrong rather than
+            // merely absent.
+            let bindings = match id == class {
+                true => self.bindings_for(instance),
+                false => Vec::new(),
+            };
             for field in declared {
                 let mut value = self.eval(&field.value, env)?;
                 if let Some(ty) = field.ty.clone() {
+                    let ty = substituted(&ty, &bindings);
                     let named = format!("`{}`", field.name);
                     value = self.coerced_from(
                         &ty,
@@ -1613,6 +1690,37 @@ impl Interp {
     /// Takes the callee whole rather than its pieces: the receiver, the name,
     /// and whether the dot was optional all come off the same node, and passing
     /// them apart was five arguments describing one thing.
+    /// A call whose callee is already a value: evaluate the arguments, arrange
+    /// them, and go.
+    ///
+    /// The tail of every call form that is not fused. Named arguments and
+    /// defaults are settled here, where the callee's declaration is in hand and
+    /// the values already are, so [`Interp::call`] stays a function of a
+    /// positional vector.
+    pub(super) fn call_evaluated(
+        &mut self,
+        target: Value,
+        args: &[CallArg],
+        env: ObjId,
+        span: Span,
+    ) -> Result<Value> {
+        // The callee is held across every argument, any of which can reach a
+        // safe point, and a closure built by an expression is reachable from
+        // nowhere else. Kept out of `eval_seq` so the argument vector stays
+        // exactly as long as the call needs.
+        let mark = self.temps.len();
+        if target.handle().is_some() {
+            self.temps.push(target.clone());
+        }
+        let values = self.eval_seq(args.iter().map(|arg| &arg.value), env);
+        self.temps.truncate(mark);
+        let values = values?;
+        let shape = self.shape_for(&target, args, &values, span)?;
+        let named = self.called_name(&target);
+        let values = self.arranged(shape, args, values, &named, span)?;
+        self.call(target, values, span)
+    }
+
     pub(super) fn eval_method_call(
         &mut self,
         callee: &Expr,

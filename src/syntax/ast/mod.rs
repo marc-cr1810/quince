@@ -14,7 +14,7 @@ pub mod op;
 
 pub use decl::{
     BindKind, FieldDecl, FnDecl, ImportName, ImportNames, Openness, Param, SELF, SUPER, TypeExpr,
-    TypeName, Visibility,
+    TypeName, TypeParam, Visibility,
 };
 pub use op::{BinaryOp, LogicalOp, OPS, Op, Reflect, ShortAssignOp, UnaryOp};
 
@@ -93,6 +93,22 @@ pub enum ExprKind {
     Index {
         target: Box<Expr>,
         index: Box<Expr>,
+    },
+    /// `Pair[int, string]` — a generic class supplied with its arguments.
+    ///
+    /// Only the two-or-more case. `Stack[int]` is an [`ExprKind::Index`] and
+    /// stays one, because nothing in the grammar can tell it from `xs[i]`:
+    /// both are a name, a bracket, and one expression. Which of the two it
+    /// means is decided by what the target turns out to hold, at run time,
+    /// where `extend` already settles the same question — see [`StmtKind::Extend`].
+    ///
+    /// So this node is not "type application" and the single-argument one
+    /// "indexing". They are one operation, and this variant exists only because
+    /// a comma inside brackets had no meaning until now and the parser had
+    /// nowhere to put a second expression.
+    TypeArgs {
+        target: Box<Expr>,
+        args: Vec<Expr>,
     },
     /// `xs[a:b]`, with either bound omissible: `xs[:b]`, `xs[a:]`, `xs[:]`.
     ///
@@ -298,6 +314,14 @@ pub enum StmtKind {
     /// parameter is the receiver, so nothing about calling one is special.
     Class {
         name: String,
+        /// The type parameters the header declared — `class Stack[T]`'s `T`,
+        /// in the order written. Empty for a class taking none, which is every
+        /// class written before v0.9.
+        ///
+        /// On the statement rather than inside the body, because they qualify
+        /// the *name*: `Stack` alone is not a type once this is non-empty, and
+        /// what a use of it has to supply is read off here.
+        params: Vec<TypeParam>,
         /// The class this one extends, resolved in the enclosing scope like any
         /// other name — a superclass is an ordinary value, not a static label.
         parent: Option<Var>,

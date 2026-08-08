@@ -270,6 +270,20 @@ pub(super) struct Resolver {
     /// The class whose body is being resolved, for the one question a method's
     /// own class is the answer to: whether `self.m(…)` reaches a `const` method.
     pub(super) in_class: Option<String>,
+    /// The type parameters of the class whose body is being resolved — v0.9
+    /// §3.1's "`T` in scope in the body".
+    ///
+    /// Saved and restored around a body rather than pushed onto a stack, the
+    /// way [`Resolver::in_class`] is, and for the same reason: a class declared
+    /// inside a method of another must leave the outer one's parameters in
+    /// place when it is done.
+    ///
+    /// Not folded into [`Resolver::types`], which is flat and never popped. A
+    /// type parameter is the one type name in the language with a *scope*, and
+    /// reserving `T` for the rest of the program because one class used it is
+    /// exactly the over-broadness that field admits to and this one cannot
+    /// afford.
+    pub(super) type_params: Vec<String>,
     /// How many parameters each class's own `op init` requires, for the classes
     /// that declare one. Flat and never popped, as [`Resolver::parents`] is.
     ///

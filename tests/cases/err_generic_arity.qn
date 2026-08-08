@@ -1,0 +1,6 @@
+# §5 — the wrong number of type arguments, refused where they were written.
+class Stack[T] {
+    public op init() {}
+}
+
+let s = Stack[int, string]()

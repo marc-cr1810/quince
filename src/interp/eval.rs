@@ -22,6 +22,21 @@ use crate::syntax::ast::{
 };
 use crate::syntax::token::Span;
 
+/// The target and contents of a bracket, whichever of the two nodes wrote it.
+///
+/// `xs[i]` is an [`ExprKind::Index`] and `Pair[int, string]` is an
+/// [`ExprKind::TypeArgs`], and in callee position the two have to be handled
+/// together — a subscript and a type argument list are told apart by what the
+/// target holds, not by how many commas are inside. This is the one place that
+/// flattens the distinction the parser was forced to make.
+fn brackets(expr: &Expr) -> Option<(&Expr, &[Expr])> {
+    match &expr.kind {
+        ExprKind::Index { target, index } => Some((target, std::slice::from_ref(index.as_ref()))),
+        ExprKind::TypeArgs { target, args } => Some((target, args.as_slice())),
+        _ => None,
+    }
+}
+
 /// Which compound assignment `assign_op` is carrying out.
 ///
 /// The two families reach it together because they agree about the part that is
@@ -264,30 +279,60 @@ impl Interp {
                     return self.call_method(receiver, method, values, expr.span);
                 }
 
-                let target = self.eval(callee, env)?;
-                // The callee is held across every argument, any of which can
-                // reach a safe point, and a closure built by an expression is
-                // reachable from nowhere else. Kept out of `eval_seq` so the
-                // argument vector stays exactly as long as the call needs.
-                let mark = self.temps.len();
-                if target.handle().is_some() {
-                    self.temps.push(target.clone());
+                // Brackets in callee position are two different calls sharing a
+                // spelling: `Stack[int]()` builds a generic class, and
+                // `handlers[i]()` calls what a list holds. Nothing in the
+                // grammar separates them, so the bracketed target is evaluated
+                // once — here, rather than by each branch — and what it turns
+                // out to hold decides. v0.9 §3.1.
+                if let Some((bracketed, inside)) = brackets(callee) {
+                    let target = self.eval(bracketed, env)?;
+                    if let Value::Class(id) = target {
+                        return self.built_generic(id, inside, args, env, expr.span);
+                    }
+                    // Not a class, so the brackets were a subscript. Held across
+                    // the index expressions for the reason the callee is held
+                    // below.
+                    let mark = self.temps.len();
+                    if target.handle().is_some() {
+                        self.temps.push(target.clone());
+                    }
+                    let inside = self.eval_seq(inside, env);
+                    self.temps.truncate(mark);
+                    let inside = inside?;
+                    let [index] = inside.as_slice() else {
+                        return Err(QuinceError::new(
+                            format!(
+                                "{} does not take type arguments",
+                                target.type_name(&self.heap)
+                            ),
+                            callee.span,
+                        )
+                        .with_kind(ErrorKind::Type)
+                        .with_help(
+                            "a comma inside `[…]` supplies a generic class with its arguments, \
+                             and only a class takes any — a subscript reads one element",
+                        ));
+                    };
+                    let callee = self.index_get(&target, index, callee.span)?;
+                    return self.call_evaluated(callee, args, env, expr.span);
                 }
-                let values = self.eval_seq(args.iter().map(|arg| &arg.value), env);
-                self.temps.truncate(mark);
-                // Named arguments and defaults are settled here, where the
-                // callee's declaration is in hand and the values already are.
-                // `call` stays a function of a positional vector.
-                let values = values?;
-                let shape = self.shape_for(&target, args, &values, expr.span)?;
-                let named = self.called_name(&target);
-                let values = self.arranged(shape, args, values, &named, expr.span)?;
-                self.call(target, values, expr.span)
+
+                let target = self.eval(callee, env)?;
+                self.call_evaluated(target, args, env, expr.span)
             }
 
             ExprKind::Index { target, index } => {
                 let (target, index) = self.eval_pair(target, index, env)?;
                 self.index_get(&target, &index, expr.span)
+            }
+
+            // `Pair[int, string]` outside a call, which is a type written where
+            // a value goes. Reached only from here: the call position is fused
+            // above, where the brackets mean something.
+            ExprKind::TypeArgs { target, .. } => {
+                let target = self.eval(target, env)?;
+                Err(self.not_a_value(&target, expr.span))
             }
 
             ExprKind::Slice { target, start, end } => {

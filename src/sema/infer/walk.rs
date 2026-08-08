@@ -889,6 +889,12 @@ impl<'a> Infer<'a> {
                 self.call(callee)
             }
 
+            // `Pair[int, string]` on its own, not called: a class value, and
+            // the same written type its instances have. Which of the two a
+            // reader wants is not a distinction this pass makes anywhere —
+            // `Point` alone has answered `Point` since v0.6.
+            ExprKind::TypeArgs { target, args } => self.type_application(expr, target, args),
+
             // Indexing a string gives a string. A list holds whatever was put
             // in it and a dict holds whatever was mapped to, so neither says.
             ExprKind::Index { target, index } => {
@@ -1058,6 +1064,47 @@ impl<'a> Infer<'a> {
     }
 
     /// What calling `callee` produces.
+    /// `Stack[int]` in call position: the class, with what the brackets said.
+    ///
+    /// Every sub-expression is still walked, so the arguments get their own
+    /// recorded types and an editor can hover `int` inside the brackets — the
+    /// answer this returns is about the whole node and does not replace theirs.
+    ///
+    /// Not a class name in the target, or not a class name in an argument, and
+    /// the answer degrades rather than disappears: an argument nothing is known
+    /// about becomes `Unknown`, which is what the matching table already reads
+    /// as "unconstrained".
+    fn type_application(&mut self, callee: &Expr, target: &Expr, args: &[Expr]) -> Type {
+        let bound: Vec<Type> = args
+            .iter()
+            .map(|arg| {
+                self.expr(arg);
+                match &arg.kind {
+                    ExprKind::Var(var)
+                        if self.classes.contains_key(&var.name) || names_a_builtin(&var.name) =>
+                    {
+                        Type::class(var.name.clone())
+                    }
+                    _ => Type::Unknown,
+                }
+            })
+            .collect();
+        self.expr(target);
+        let ExprKind::Var(var) = &target.kind else {
+            return Type::Unknown;
+        };
+        if !self.classes.contains_key(&var.name) {
+            return Type::Unknown;
+        }
+        let applied = Type::generic(var.name.clone(), bound);
+        // The callee is the *class*, and the call is the instance. Both are the
+        // same written type here, which is a coincidence of generics rather
+        // than a rule — a class value and its instances are different things
+        // and this pass has never had a way to say so.
+        self.exprs.insert(callee.span, applied.clone());
+        applied
+    }
+
     fn call(&mut self, callee: &Expr) -> Type {
         match &callee.kind {
             ExprKind::Var(var) => {
@@ -1116,12 +1163,35 @@ impl<'a> Infer<'a> {
                 None => Type::Unknown,
             },
 
+            // `Stack[int]()` — a class supplied with its arguments, then built.
+            // The arguments are names of classes and so are read as *types*
+            // here, which is the one place this pass looks at an expression and
+            // answers about the type it denotes rather than the value it
+            // produces. Anything that is not a plain class name gives up the
+            // argument rather than the whole answer: `Stack[…]()` is a `Stack`
+            // however little is known about what is in it.
+            ExprKind::Index { target, index } => {
+                self.type_application(callee, target, std::slice::from_ref(index.as_ref()))
+            }
+            ExprKind::TypeArgs { target, args } => self.type_application(callee, target, args),
+
             _ => {
                 self.expr(callee);
                 Type::Unknown
             }
         }
     }
+}
+
+/// Whether the name is one of the language's own types.
+///
+/// [`builtin_constructor`] is the near neighbour and answers a different
+/// question: it asks whether a name can be *called* to convert, which `list`
+/// can and `nil` cannot. A type argument only has to name a type.
+fn names_a_builtin(name: &str) -> bool {
+    crate::runtime::class::BUILTINS
+        .iter()
+        .any(|builtin| builtin.name() == name)
 }
 
 /// Every expression written inside this one.
@@ -1196,6 +1266,9 @@ fn children(expr: &Expr) -> Vec<&Expr> {
             .chain(args.iter().map(|arg| &arg.value))
             .collect(),
         ExprKind::Index { target, index } => vec![target, index],
+        ExprKind::TypeArgs { target, args } => {
+            std::iter::once(target.as_ref()).chain(args.iter()).collect()
+        }
         ExprKind::Slice { target, start, end } => std::iter::once(target.as_ref())
             .chain([start, end].into_iter().flatten().map(|bound| bound.as_ref()))
             .collect(),

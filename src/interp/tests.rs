@@ -1799,3 +1799,128 @@ fn two_declarations_that_only_an_empty_container_confuses() {
     let err = interp.run(&program).expect_err("nothing says which");
     assert_eq!(err.message, "more than one `total` takes (list)");
 }
+
+#[test]
+fn a_type_parameter_is_checked_against_what_the_instance_was_built_with() {
+    // The whole of v0.9 §3.1 in one assertion: `T` is not a new kind of type,
+    // it is a type not yet written down, and the boundary a value crosses is
+    // the ordinary one once it has been.
+    let interp = run(
+        "class Box[T] {\n\
+         \x20   public let value: T? = nil\n\
+         \x20   public fn set(v: T) { self.value = v }\n\
+         }\n\
+         let b = Box[int]()\n\
+         b.set(7)\n\
+         let held = b.value\n",
+    );
+    assert_eq!(global(&interp, "held"), Some(Value::Int(7)));
+
+    let program = crate::compile(
+        "class Box[T] {\n\
+         \x20   public let value: T? = nil\n\
+         \x20   public fn set(v: T) { self.value = v }\n\
+         }\n\
+         let b = Box[int]()\n\
+         b.set(\"no\")\n",
+    )
+    .expect("the program parses");
+    let mut interp = Interp::with_output(Box::new(Vec::new()));
+    let err = interp.run(&program).expect_err("`T` is `int` on this one");
+    // Reported as the type it stands for, not as `T`. A message naming the
+    // parameter would be true and useless — the reader has to know what to pass.
+    assert_eq!(err.message, "`v` is `int`, but this is a string");
+}
+
+#[test]
+fn each_instance_carries_its_own_arguments() {
+    // Two instances of one class, and the class object is the same object for
+    // both — the arguments are on the *instance*, which is what lets `extend`
+    // stay keyed by class handle. See `interp::generic`.
+    let interp = run(
+        "class Box[T] {\n\
+         \x20   public let value: T? = nil\n\
+         \x20   public fn set(v: T) { self.value = v }\n\
+         }\n\
+         let ints = Box[int]()\n\
+         let words = Box[string]()\n\
+         ints.set(1)\n\
+         words.set(\"a\")\n\
+         let a = ints is Box[int]\n\
+         let b = ints is Box[string]\n\
+         let c = words is Box[string]\n",
+    );
+    assert_eq!(global(&interp, "a"), Some(Value::Bool(true)));
+    assert_eq!(global(&interp, "b"), Some(Value::Bool(false)));
+    assert_eq!(global(&interp, "c"), Some(Value::Bool(true)));
+}
+
+#[test]
+fn an_unsupplied_parameter_is_unconstrained_rather_than_absent() {
+    // §3.1's defaulting. A bare `Box()` binds `T` to the top type, which is
+    // gradual typing behaving as it does everywhere else — not an error, and
+    // not `nil`.
+    let interp = run(
+        "class Box[T] {\n\
+         \x20   public let value: T? = nil\n\
+         \x20   public fn set(v: T) { self.value = v }\n\
+         }\n\
+         let loose = Box()\n\
+         loose.set(1)\n\
+         loose.set(\"a\")\n\
+         let held = loose.value\n",
+    );
+    assert_eq!(global(&interp, "held"), Some(Value::from("a")));
+}
+
+#[test]
+fn a_parameter_reaches_inside_a_container_annotation() {
+    // `list[T]` on a `Stack[int]` is a `list[int]`, and the list is stamped
+    // with that when the field crosses its annotation — so a later write is
+    // refused by the header rather than by anything generics added.
+    let program = crate::compile(
+        "class Stack[T] {\n\
+         \x20   private let items: list[T] = []\n\
+         \x20   public fn sneak() { self.items.push(\"s\") }\n\
+         }\n\
+         let s = Stack[int]()\n\
+         s.sneak()\n",
+    )
+    .expect("the program parses");
+    let mut interp = Interp::with_output(Box::new(Vec::new()));
+    let err = interp.run(&program).expect_err("the field holds ints");
+    assert!(err.message.contains("`int`"), "{}", err.message);
+}
+
+#[test]
+fn a_nested_construction_does_not_inherit_the_outer_header() {
+    // `pending` is taken and not read: the `Box` built as an argument must not
+    // be stamped with the `Stack`'s arguments, which is the bug a field rather
+    // than a parameter invites.
+    let interp = run(
+        "class Box[T] { public op init() {} }\n\
+         class Holder[T] {\n\
+         \x20   public let held: any? = nil\n\
+         \x20   public op init(held: any) { self.held = held }\n\
+         }\n\
+         let h = Holder[int](Box[string]())\n\
+         let inner = h.held\n\
+         let a = inner is Box[string]\n\
+         let b = inner is Box[int]\n",
+    );
+    assert_eq!(global(&interp, "a"), Some(Value::Bool(true)));
+    assert_eq!(global(&interp, "b"), Some(Value::Bool(false)));
+}
+
+#[test]
+fn brackets_before_a_call_are_a_subscript_when_the_target_is_not_a_class() {
+    // `Stack[int]()` and `handlers[i]()` are the same three tokens either side
+    // of a bracket, and only the target says which. Nothing about generics may
+    // cost the second form.
+    let interp = run(
+        "fn one(): int { return 1 }\n\
+         let fns = [one]\n\
+         let n = fns[0]()\n",
+    );
+    assert_eq!(global(&interp, "n"), Some(Value::Int(1)));
+}

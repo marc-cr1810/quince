@@ -1,0 +1,4 @@
+# Two parameters of one name make every mention of it ambiguous.
+class Pair[T, T] {
+    public op init() {}
+}

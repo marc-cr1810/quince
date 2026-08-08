@@ -1,0 +1,93 @@
+# v0.9 §3.1 — user-defined generic classes.
+#
+# A class declares type parameters, a use supplies them, and the instance
+# carries what it was built to hold. `is` reads that back in O(1), which is the
+# same reified header `list[int]` has had since v0.7 §3.9 — the milestone opens
+# it to user code rather than building anything.
+
+class Stack[T] {
+    private let items: list[T] = []
+
+    public fn push(item: T) {
+        self.items.push(item)
+    }
+
+    # `list` has no `pop` — slicing is how a list gives its last element up.
+    public fn pop(): T? {
+        let n: int = len(self.items)
+        if n == 0 {
+            return nil
+        }
+        let last: T = self.items[n - 1]
+        self.items = self.items[:n - 1]
+        return last
+    }
+
+    public const fn size(): int {
+        return len(self.items)
+    }
+}
+
+let ints = Stack[int]()
+ints.push(42)
+ints.push(7)
+print(ints.size())
+print(ints.pop())
+print(ints.pop())
+print(ints.pop())
+
+# The binding is reified, so both questions are answered from the header rather
+# than from what happens to be inside.
+let empty = Stack[string]()
+print(empty is Stack[string])
+print(empty is Stack[int])
+
+# More than one parameter, bound positionally.
+class Pair[A, B] {
+    public final first: A? = nil
+    public final second: B? = nil
+
+    public op init(first: A, second: B) {
+        self.first = first
+        self.second = second
+    }
+
+    public const op string(): string {
+        return "(" + string(self.first) + ", " + string(self.second) + ")"
+    }
+}
+
+let p = Pair[int, string](101, "Alice")
+print(p)
+print(p.first)
+print(p is Pair[int, string])
+# Arity is part of the type, and so is the order.
+print(p is Pair[string, int])
+
+# A parameter nobody supplied an argument for is unconstrained — §3.1's
+# defaulting, which is gradual typing behaving as it does everywhere else.
+class Box[T] {
+    public let value: T? = nil
+
+    public fn set(v: T) {
+        self.value = v
+    }
+}
+
+let loose = Box()
+loose.set(42)
+print(loose.value)
+loose.set("anything")
+print(loose.value)
+
+# And a bound one is not.
+let tight = Box[int]()
+tight.set(7)
+print(tight.value)
+
+# A type parameter reaches into a container in the annotation, not just to it:
+# `list[T]` on a `Stack[int]` is a `list[int]`, and the list refuses a string on
+# the strength of the header the field crossed.
+let words = Stack[string]()
+words.push("ok")
+print(words.pop())

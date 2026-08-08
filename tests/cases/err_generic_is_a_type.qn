@@ -1,0 +1,7 @@
+# §3.1 — a class with its parameters bound names a type, and there is no value
+# for it to be. Construction is the only thing the brackets are part of.
+class Stack[T] {
+    public op init() {}
+}
+
+let make = Stack[int]
