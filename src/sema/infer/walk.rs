@@ -141,6 +141,7 @@ impl<'a> Infer<'a> {
                         // reason a `fn` is: there is no one declaration to
                         // answer about.
                         methods: overloading(methods),
+                        overloaded: overloaded_names(methods),
                         fields: fields
                             .iter()
                             .map(|field| (field.name.clone(), field.visibility))
@@ -167,6 +168,7 @@ impl<'a> Infer<'a> {
                         .or_insert_with(|| ClassInfo {
                             parent: None,
                             methods: HashMap::new(),
+                            overloaded: HashSet::new(),
                             fields: HashMap::new(),
                             openness: crate::syntax::ast::Openness::Open,
                             span: stmt.span,
@@ -1152,6 +1154,23 @@ fn overloading(methods: &[Rc<FnDecl>]) -> HashMap<String, Rc<FnDecl>> {
     }
     found.retain(|name, _| !shared.contains(name.as_str()));
     found
+}
+
+/// The names [`overloading`] drops, kept so that "declared twice" stays
+/// distinguishable from "not declared".
+///
+/// Nothing here says which declaration a name means — that is the question
+/// [`overloading`] refuses to answer, and this does not reopen it. It records
+/// only that the name exists, for a caller whose question is that much weaker.
+fn overloaded_names(methods: &[Rc<FnDecl>]) -> HashSet<String> {
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut shared: HashSet<String> = HashSet::new();
+    for decl in methods {
+        if !seen.insert(decl.name.as_str()) {
+            shared.insert(decl.name.clone());
+        }
+    }
+    shared
 }
 
 /// One level, so a caller that wants the whole tree recurses. A `Vec` of borrows

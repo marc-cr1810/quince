@@ -59,6 +59,14 @@ pub struct ClassInfo {
     /// or not at all.
     pub parent: Option<String>,
     pub methods: HashMap<String, Rc<FnDecl>>,
+    /// The names [`overloading`] left out of `methods` because the class
+    /// declared them more than once.
+    ///
+    /// `methods` answers "which declaration does this name mean", and for an
+    /// overloaded name there is no answer. This answers the weaker question —
+    /// "is this name declared at all" — which is the one an operator check
+    /// wants, and which an absent `methods` entry otherwise reads as "no".
+    pub overloaded: HashSet<String>,
     /// The fields the body declared, by name, and how far each reaches.
     ///
     /// Only the declared ones. A field an `op init` assigned into existence is
@@ -305,6 +313,35 @@ impl Types {
                 return None;
             }
             current = info.parent.as_deref()?;
+        }
+    }
+
+    /// Whether `class` or an ancestor declares `name` at all, overloads
+    /// included.
+    ///
+    /// [`Self::method_of`] cannot answer this: it returns the one declaration a
+    /// name means, and deliberately has none for an overloaded name. A caller
+    /// asking "is this implemented" rather than "what does it do" — an operator
+    /// check, say — must ask here, or it reads two `op sub` declarations as
+    /// zero.
+    pub fn declares_method(&self, class: &str, name: &str) -> bool {
+        let mut current = class;
+        let mut seen = 0;
+        loop {
+            let Some(info) = self.class_info(current) else {
+                return false;
+            };
+            if info.methods.contains_key(name) || info.overloaded.contains(name) {
+                return true;
+            }
+            seen += 1;
+            if seen > 64 {
+                return false;
+            }
+            match info.parent.as_deref() {
+                Some(parent) => current = parent,
+                None => return false,
+            }
         }
     }
 

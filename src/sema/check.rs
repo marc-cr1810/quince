@@ -554,9 +554,9 @@ fn expression(expr: &Expr, types: &Types, bound: &Bindings, found: &mut Vec<Rais
 
             if let Some(cname) = lhs_type.class_name() {
                 if types.declares_class(cname) {
-                    let has_cmp = types.method_of(cname, "cmp").is_some();
-                    let has_lt = types.method_of(cname, "lt").is_some();
-                    let has_gt = types.method_of(cname, "gt").is_some();
+                    let has_cmp = types.declares_method(cname, "cmp");
+                    let has_lt = types.declares_method(cname, "lt");
+                    let has_gt = types.declares_method(cname, "gt");
 
                     if matches!(op, crate::syntax::ast::BinaryOp::Le | crate::syntax::ast::BinaryOp::Ge) && !has_cmp && (has_lt || has_gt) {
                         found.push(refusal(
@@ -572,9 +572,9 @@ fn expression(expr: &Expr, types: &Types, bound: &Bindings, found: &mut Vec<Rais
                 if is_builtin_type(lname) {
                     if let Some(rcname) = rhs_type.class_name() {
                         if types.declares_class(rcname) {
-                            let has_cmp = types.method_of(rcname, "cmp").is_some();
-                            let has_lt = types.method_of(rcname, "lt").is_some();
-                            let has_gt = types.method_of(rcname, "gt").is_some();
+                            let has_cmp = types.declares_method(rcname, "cmp");
+                            let has_lt = types.declares_method(rcname, "lt");
+                            let has_gt = types.declares_method(rcname, "gt");
                             if !has_cmp && (has_lt || has_gt) {
                                 found.push(refusal(
                                     format!("`{}` is not supported between {} and `{rcname}`", binary_op_symbol(*op), an(lname)),
@@ -616,8 +616,8 @@ fn expression(expr: &Expr, types: &Types, bound: &Bindings, found: &mut Vec<Rais
                 crate::syntax::ast::BinaryOp::Shr => "shr",
                 _ => unreachable!(),
             };
-            let l_has_op = ltype.class_name().is_some_and(|c| types.method_of(c, method_name).is_some());
-            let r_has_op = rtype.class_name().is_some_and(|c| types.method_of(c, method_name).is_some());
+            let l_has_op = ltype.class_name().is_some_and(|c| types.declares_method(c, method_name));
+            let r_has_op = rtype.class_name().is_some_and(|c| types.declares_method(c, method_name));
 
             if !l_has_op && !r_has_op {
                 if ltype.class_name() == Some("float") || rtype.class_name() == Some("float") {
@@ -663,7 +663,7 @@ fn expression(expr: &Expr, types: &Types, bound: &Bindings, found: &mut Vec<Rais
                     _ => None,
                 };
                 if let Some(method_name) = op_method {
-                    if types.method_of(lname, method_name).is_none() {
+                    if !types.declares_method(lname, method_name) {
                         found.push(refusal(
                             format!("`{}` is not supported for `{lname}`", binary_op_symbol(*op)),
                             format!("class `{lname}` does not implement `op {}`", method_name),
@@ -695,7 +695,7 @@ fn expression(expr: &Expr, types: &Types, bound: &Bindings, found: &mut Vec<Rais
     if let ExprKind::Unary { op: crate::syntax::ast::UnaryOp::BitNot, rhs } = &expr.kind {
         let rtype = receiver_type(rhs, types);
         if let Some(cname) = rtype.class_name() {
-            if cname == "float" && types.method_of(cname, "bit_not").is_none() {
+            if cname == "float" && !types.declares_method(cname, "bit_not") {
                 found.push(refusal(
                     "bitwise operators are not supported on float".to_string(),
                     "bitwise NOT requires integer operand".to_string(),
@@ -1350,7 +1350,12 @@ fn check_builtin_binary_op(
         _ => return,
     };
 
-    if types.method_of(lname, op_method).is_some() || types.method_of(rname, op_method).is_some() {
+    // Both operands are builtins here, and every op in the list above is one a
+    // builtin natively supports — so an extension declaring it is refused
+    // before this runs, and there is no overloaded name to miss today. Asked
+    // the same way as everywhere else regardless, so that stops being a thing
+    // to re-derive if the native-override rule ever loosens.
+    if types.declares_method(lname, op_method) || types.declares_method(rname, op_method) {
         return;
     }
 

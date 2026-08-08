@@ -1121,3 +1121,19 @@ fn custom_module_dot_import_resolution() {
 }
 
 
+
+#[test]
+fn overloaded_op_is_not_reported_missing() {
+    let src = "class V { op init() {}\nconst op sub(other: V): V { return self }\nconst op sub(scalar: float): V { return self } }\nlet a = V()\nlet d = a - a\n";
+    assert_eq!(all_errors(src), Vec::<String>::new());
+}
+
+#[test]
+fn overloaded_cmp_still_permits_le() {
+    let src = "class C { op init() {}\nconst op cmp(other: C): int { return 0 }\nconst op cmp(other: float): int { return 0 }\nconst op lt(other: C): bool { return false } }\nlet a = C()\nlet b = C()\nlet r = a <= b\n";
+    assert_eq!(all_errors(src), Vec::<String>::new());
+}
+
+
+
+

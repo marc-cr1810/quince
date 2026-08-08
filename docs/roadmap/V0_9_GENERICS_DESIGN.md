@@ -358,12 +358,16 @@ Rules:
 - **A function literal is `fn(params): R { … }`** — an ordinary `fn` declaration with the
   name left out, in expression position. It closes over its enclosing scope like any nested
   function, because below the parser it *is* one.
-- **The return type is spelled `:` in a declaration and `->` in a type.** They are different
-  positions and the parser can tell them apart trivially, but they are also different
-  questions: `fn f(): int` declares what this body produces, and `function(int) -> int`
-  describes a value. Reusing `:` in the type would put a third meaning on the token v0.10
-  §7.1.1 removes slice syntax to protect, and `->` inside a declaration would leave the
-  language with two spellings for one thing — the objection v0.7 §9 records against `pub`.
+- **The return type is spelled `:` in a declaration and `->` in a type.** Not because they
+  ask different questions — both name the type produced — but because `:` does not survive
+  nesting. Respell the example above with it and the signature reads
+  `fn apply_transform(val: int, transform: function(int): int): int`, where two return types
+  at different depths are told apart only by counting parentheses; `->` separates them at a
+  glance. The reverse swap costs more: `->` in a declaration would make a return type the
+  one type annotation in the language not introduced by `:`, and leave two spellings for one
+  idea — the objection v0.7 §9 records against `pub`. Neither spelling is *ambiguous*,
+  unlike the `{1: 10}` collision that costs `:` its slice syntax in v0.10 §7.1.1. This one
+  is settled by what reads.
 - **Matching is by arity, then parameter types, then return type**, and it is **invariant**
   in both, following v0.7 §4.1 rather than defining a second rule. A
   `function(int) -> int` does not hold as `function(int) -> any`. Contravariant parameters
@@ -680,6 +684,8 @@ effect of tuples landing.
 - **Function types are invariant**, like every other type in the language, rather than
   contravariant in their parameters. The sound relation is deferred with the rest of
   variance, because invariance is the direction that can be relaxed later. §3.8.
-- **A return type is `:` in a declaration and `->` in a function type.** Two positions, two
-  questions, and neither spelling is available to the other without cost. §3.8.
+- **A return type is `:` in a declaration and `->` in a function type.** Not two questions —
+  one question in two positions, where `:` is the spelling that stops reading under nesting
+  and `->` is the one that would strand a declaration's return type as the language's only
+  type annotation not introduced by `:`. §3.8.
 - **Dict iteration is not changed here**, though this is what unblocks it. §8.
