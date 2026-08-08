@@ -16,7 +16,7 @@ pub use decl::{
     BindKind, FieldDecl, FnDecl, ImportName, ImportNames, Openness, Param, SELF, SUPER, TypeExpr,
     TypeName, Visibility,
 };
-pub use op::{BinaryOp, LogicalOp, OPS, Op, Reflect, UnaryOp};
+pub use op::{BinaryOp, LogicalOp, OPS, Op, Reflect, ShortAssignOp, UnaryOp};
 
 use std::rc::Rc;
 
@@ -88,7 +88,7 @@ pub enum ExprKind {
     },
     Call {
         callee: Box<Expr>,
-        args: Vec<Expr>,
+        args: Vec<CallArg>,
     },
     Index {
         target: Box<Expr>,
@@ -160,6 +160,65 @@ pub enum ExprKind {
         target: Box<Expr>,
         value: Box<Expr>,
     },
+    /// `target op= value` — v0.8 §3.7.
+    ///
+    /// A node rather than a desugaring into [`ExprKind::Assign`] over an
+    /// [`ExprKind::Binary`], because the rule is `a = a op b` *with the target
+    /// evaluated once*: `d[f()] += 1` calls `f` a single time, and a rewrite
+    /// that mentioned the target twice would call it twice. Evaluating once is
+    /// the whole reason the form exists, so it is the thing the tree records.
+    ///
+    /// There is no separate in-place operator slot. `op` is the binary
+    /// operator's own, so a class defining `op add` gets `+=` for free — see
+    /// §3.7's decision.
+    AssignOp {
+        target: Box<Expr>,
+        op: BinaryOp,
+        value: Box<Expr>,
+    },
+    /// `target and= value`, `target or= value`, and `target ??= value`.
+    ///
+    /// Separate from [`ExprKind::AssignOp`] rather than a fourteenth operator in
+    /// it, because the rule is a different rule. A compound assignment always
+    /// computes `a op b`; these three look at what the target already holds and
+    /// may answer with it, leaving `value` unevaluated and the target unwritten.
+    /// `count ??= expensive()` not calling `expensive` is the whole point, and a
+    /// node shared with `+=` would make eager evaluation the natural way to
+    /// implement it. The same reason [`ExprKind::Coalesce`] is not a
+    /// [`BinaryOp`].
+    ///
+    /// The target is still evaluated exactly once, as for [`ExprKind::AssignOp`]:
+    /// `d[f()] ??= 0` calls `f` a single time whether or not it assigns.
+    AssignShort {
+        target: Box<Expr>,
+        op: ShortAssignOp,
+        value: Box<Expr>,
+    },
+}
+
+/// One argument at a call site, positional or named.
+///
+/// A struct rather than a bare [`Expr`] because v0.8 §3.6 lets a caller target a
+/// parameter by name — `connect("host", timeout: 5000)` — and which parameter an
+/// argument fills is a property of the *call*, not of the value it computes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CallArg {
+    /// The parameter this argument names, and where the name was written.
+    ///
+    /// `None` is the ordinary positional argument, which is every argument
+    /// written before v0.8. The span is carried because every refusal this form
+    /// has — a name no parameter answers to, a parameter filled twice — is about
+    /// the name rather than about the value after it.
+    pub name: Option<(String, Span)>,
+    pub value: Expr,
+}
+
+impl CallArg {
+    /// An argument written without a name, which is what every call site
+    /// building one by hand produces.
+    pub fn positional(value: Expr) -> CallArg {
+        CallArg { name: None, value }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -199,6 +258,14 @@ pub enum StmtKind {
         /// An inlay hint goes immediately after it.
         name_span: Span,
         value: Expr,
+        /// Whether the declaration wrote no `= value` and this is the one the
+        /// language supplied — `nil` for an unannotated binding, and a call to
+        /// the annotated type's zero-argument constructor for the rest.
+        ///
+        /// Synthesized at the parser so that nothing downstream has an
+        /// `Option<Expr>` to unwrap, and marked so that the resolver can refuse
+        /// a type with no default to supply. v0.8 §3.4.
+        defaulted: bool,
         bind: BindKind,
         /// What the name holds, if the declaration said.
         ty: Option<TypeExpr>,
@@ -218,6 +285,14 @@ pub enum StmtKind {
         decl: Rc<FnDecl>,
         /// Where the function's own name is bound, as for `Let`.
         slot: Option<Slot>,
+        /// Whether this declaration *joins* what is already bound under the
+        /// name rather than replacing it — v0.8 §3.5.
+        ///
+        /// Set by the resolver for the second and later `fn` of a name in one
+        /// scope, and only there. Deciding it statically is what keeps the REPL
+        /// honest: a second entry redefining `f` is a fresh compilation and a
+        /// fresh scope, so it replaces, where two `fn f` in one file overload.
+        overload: bool,
     },
     /// A class declaration. The methods are ordinary functions whose first
     /// parameter is the receiver, so nothing about calling one is special.

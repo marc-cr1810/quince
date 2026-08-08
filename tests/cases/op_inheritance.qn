@@ -14,14 +14,14 @@ print(Kid(1) == Kid(1))
 
 # A declaration beats the copy it inherited.
 class Loud extends Base {
-    op string() { return "LOUD " + string(self.n) }
+    override op string() { return "LOUD " + string(self.n) }
 }
 print(Loud(2))
 
 # And the parent's is still reachable by name, the same way an ordinary
 # overridden method is.
 class Quiet extends Base {
-    op string() { return "(" + super.string() + ")" }
+    override op string() { return "(" + super.string() + ")" }
 }
 print(Quiet(3))
 

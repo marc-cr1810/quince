@@ -241,7 +241,7 @@ pub(crate) fn collect_expr_semantic_tokens(
                 collect_expr_semantic_tokens(source, callee, raw_tokens);
             }
             for arg in args {
-                collect_expr_semantic_tokens(source, arg, raw_tokens);
+                collect_expr_semantic_tokens(source, &arg.value, raw_tokens);
             }
         }
         ExprKind::Field { target, name, .. } => {
@@ -290,7 +290,9 @@ pub(crate) fn collect_expr_semantic_tokens(
             if let Some(e) = end { collect_expr_semantic_tokens(source, e, raw_tokens); }
         }
         ExprKind::Chain(inner) => collect_expr_semantic_tokens(source, inner, raw_tokens),
-        ExprKind::Assign { target, value } => {
+        ExprKind::Assign { target, value }
+        | ExprKind::AssignOp { target, value, .. }
+        | ExprKind::AssignShort { target, value, .. } => {
             collect_expr_semantic_tokens(source, target, raw_tokens);
             collect_expr_semantic_tokens(source, value, raw_tokens);
         }

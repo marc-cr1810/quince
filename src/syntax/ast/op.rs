@@ -25,6 +25,8 @@ pub enum BinaryOp {
     Mul,
     /// True division: always produces a float, as in Python 3.
     Div,
+    /// `a ** b`. Right-associative, and tighter than unary minus — v0.8 §3.7.
+    Pow,
     /// Floor division: `int // int` stays an int.
     FloorDiv,
     Rem,
@@ -38,6 +40,39 @@ pub enum BinaryOp {
     In,
 }
 
+impl BinaryOp {
+    /// How the operator is written.
+    ///
+    /// Here rather than in the lexer because the compound-assignment tokens read
+    /// it back — `+=` prints as this plus an `=` — and a second table would be a
+    /// second place for `//` to be spelled `/`.
+    ///
+    /// Exhaustive, so an operator cannot be added without being spellable.
+    pub fn symbol(self) -> &'static str {
+        match self {
+            BinaryOp::BitAnd => "&",
+            BinaryOp::BitOr => "|",
+            BinaryOp::BitXor => "^",
+            BinaryOp::Shl => "<<",
+            BinaryOp::Shr => ">>",
+            BinaryOp::Add => "+",
+            BinaryOp::Sub => "-",
+            BinaryOp::Mul => "*",
+            BinaryOp::Div => "/",
+            BinaryOp::FloorDiv => "//",
+            BinaryOp::Rem => "%",
+            BinaryOp::Pow => "**",
+            BinaryOp::Eq => "==",
+            BinaryOp::Ne => "!=",
+            BinaryOp::Lt => "<",
+            BinaryOp::Le => "<=",
+            BinaryOp::Gt => ">",
+            BinaryOp::Ge => ">=",
+            BinaryOp::In => "in",
+        }
+    }
+}
+
 /// Kept apart from `BinaryOp` because these short-circuit: the evaluator must
 /// not eagerly evaluate the right operand, and a shared variant would make that
 /// easy to get wrong.
@@ -45,6 +80,53 @@ pub enum BinaryOp {
 pub enum LogicalOp {
     And,
     Or,
+}
+
+impl LogicalOp {
+    /// How the operator is written. Words rather than `&&` and `||` as of v0.8.1 —
+    /// see [`crate::syntax::token::TokenKind::And`].
+    pub fn word(self) -> &'static str {
+        match self {
+            LogicalOp::And => "and",
+            LogicalOp::Or => "or",
+        }
+    }
+}
+
+/// The assignments whose right side may not run at all.
+///
+/// `a and= b`, `a or= b`, and `a ??= b`. Kept apart from [`BinaryOp`] for
+/// exactly the reason [`LogicalOp`] is: a compound assignment built from a
+/// `BinaryOp` always evaluates its right side, and sharing one representation
+/// would make evaluating these three eagerly the easy mistake rather than the
+/// impossible one.
+///
+/// All three read the target, decide from what they found whether the right
+/// side is even an answer, and assign only if it is — one rule, three tests,
+/// which is why they are one type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShortAssignOp {
+    /// Assigns when the target is falsy — the value it already held is the
+    /// answer otherwise.
+    And,
+    /// Assigns when the target is truthy.
+    Or,
+    /// Assigns when the target is `nil`, which is the one of the three that
+    /// cares about `nil` specifically rather than about truthiness.
+    Coalesce,
+}
+
+impl ShortAssignOp {
+    /// How the operator is written, without its trailing `=`. Read back by
+    /// [`crate::syntax::token::TokenKind`]'s `Display`, for the same reason
+    /// [`BinaryOp::symbol`] is.
+    pub fn symbol(self) -> &'static str {
+        match self {
+            ShortAssignOp::And => "and",
+            ShortAssignOp::Or => "or",
+            ShortAssignOp::Coalesce => "??",
+        }
+    }
 }
 
 /// Where the resolver decided a name lives.
@@ -58,7 +140,7 @@ pub enum Op {
     // language already spells them — `string` and `bool` are globals bound to
     // classes, and calling a class runs its `init` — so `string(x)` and
     // `print(x)` reach one op rather than needing two names for one question.
-    /// `if x`, `!x`, `&&`, `||`, and `bool(x)`.
+    /// `if x`, `not x`, `and`, `or`, `and=`, `or=`, and `bool(x)`.
     Bool,
     /// `print(x)`, `string(x)`, and `x` printed inside a collection.
     Str,
@@ -141,6 +223,12 @@ pub enum Op {
     BitNot,
     BitShl,
     BitShr,
+    /// `a ** b`.
+    ///
+    /// Appended for the reason the bitwise slots were: the discriminant indexes
+    /// `Class::slots`, so a new op goes at the end however well it would read
+    /// beside `mul`.
+    Pow,
 }
 
 /// Every [`Op`], for validating a declaration, for listing them in the error
@@ -177,6 +265,7 @@ pub static OPS: &[Op] = &[
     Op::BitNot,
     Op::BitShl,
     Op::BitShr,
+    Op::Pow,
 ];
 
 /// What happens when a binary operator's *right* operand is the one whose class
@@ -243,6 +332,7 @@ impl Op {
             Op::BitNot => "bit_not",
             Op::BitShl => "bit_shl",
             Op::BitShr => "bit_shr",
+            Op::Pow => "pow",
         }
     }
 
@@ -295,7 +385,8 @@ impl Op {
             | Op::BitXor
             | Op::BitNot
             | Op::BitShl
-            | Op::BitShr => Reflect::Never,
+            | Op::BitShr
+            | Op::Pow => Reflect::Never,
         }
     }
 
@@ -351,7 +442,8 @@ impl Op {
             | Op::BitXor
             | Op::BitNot
             | Op::BitShl
-            | Op::BitShr => None,
+            | Op::BitShr
+            | Op::Pow => None,
         }
     }
 
@@ -391,7 +483,8 @@ impl Op {
             | Op::BitOr
             | Op::BitXor
             | Op::BitShl
-            | Op::BitShr => Some(1),
+            | Op::BitShr
+            | Op::Pow => Some(1),
 
             // `x[i] = v` is the only one with two.
             Op::Set => Some(2),
@@ -496,7 +589,7 @@ mod tests {
                 Op::Set => Some(2),
                 // `~a` asks about the receiver alone, as `-a` does.
                 Op::BitNot => Some(0),
-                Op::BitAnd | Op::BitOr | Op::BitXor | Op::BitShl | Op::BitShr => Some(1),
+                Op::BitAnd | Op::BitOr | Op::BitXor | Op::BitShl | Op::BitShr | Op::Pow => Some(1),
                 Op::Eq
                 | Op::Cmp
                 | Op::Lt

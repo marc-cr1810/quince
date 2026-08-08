@@ -302,7 +302,7 @@ fn a_subclass_inherits_the_slots_it_does_not_declare() {
                       op bool() { return false }\n\
                       }\n\
                       class Child extends Base {\n\
-                      op string() { return \"child\" }\n\
+                      override op string() { return \"child\" }\n\
                       }\n");
     let base = interp.heap.class(class_of(&interp, "Base")).clone();
     let child = interp.heap.class(class_of(&interp, "Child"));
@@ -916,7 +916,7 @@ fn the_scope_holding_super_survives_with_the_methods_that_close_over_it() {
     let interp = run(&format!(
         "fn build() {{\n\
          class Base {{ fn speak() {{ return 1 }} }}\n\
-         class Sub extends Base {{ fn speak() {{ return super.speak() + 1 }} }}\n\
+         class Sub extends Base {{ override fn speak() {{ return super.speak() + 1 }} }}\n\
          return Sub()\n\
          }}\n\
          let obj = build()\n\
@@ -1100,4 +1100,649 @@ fn an_unreachable_recursive_function_is_collected() {
         "heap grew to {} objects",
         interp.heap.live()
     );
+}
+
+#[test]
+fn a_default_is_a_fresh_value_at_every_call() {
+    // The one place Python's answer is refused outright. A default evaluated
+    // once at the declaration shares one list between every call that omits it,
+    // which is the single most reported footgun in that language — so this is
+    // the property, not an implementation detail.
+    let interp = run(
+        "fn collect(item, into: list = []): list {\n\
+         into.push(item)\n\
+         return into\n\
+         }\n\
+         let a = collect(1)\n\
+         let b = collect(2)\n",
+    );
+    for (name, expected) in [("a", 1), ("b", 2)] {
+        let Some(Value::List(id)) = global(&interp, name) else {
+            panic!("`{name}` should hold a list");
+        };
+        assert_eq!(interp.heap.list(id), &[Value::Int(expected)]);
+    }
+}
+
+#[test]
+fn a_default_is_evaluated_in_the_declaration_scope() {
+    // Not the caller's. A default is part of the declaration and reads the
+    // names the declaration could see, which is what makes it readable at all —
+    // whichever scope a call happens to be in.
+    let interp = run(
+        "fn build() {\n\
+         let hidden = 9\n\
+         fn f(n, from = hidden) { return n + from }\n\
+         return f\n\
+         }\n\
+         let f = build()\n\
+         let hidden = 100\n\
+         let answer = f(1)\n",
+    );
+    assert_eq!(global(&interp, "answer"), Some(Value::Int(10)));
+}
+
+#[test]
+fn a_named_argument_reaches_the_parameter_it_names() {
+    let interp = run(
+        "fn f(a: int, b: int = 2, c: int = 3): int { return a * 100 + b * 10 + c }\n\
+         let all = f(1, 2, 3)\n\
+         let middle = f(1, c: 9)\n\
+         let shuffled = f(c: 9, b: 8, a: 7)\n",
+    );
+    assert_eq!(global(&interp, "all"), Some(Value::Int(123)));
+    assert_eq!(global(&interp, "middle"), Some(Value::Int(129)));
+    assert_eq!(global(&interp, "shuffled"), Some(Value::Int(789)));
+}
+
+#[test]
+fn a_compound_assignment_evaluates_its_target_once() {
+    // The whole reason `d[f()] += 1` is a language form rather than something
+    // a program writes out. Deleting the single-evaluation shape in `assign_op`
+    // makes `calls` two.
+    let interp = run(
+        "let calls = 0\n\
+         fn key(): string {\n\
+         calls += 1\n\
+         return \"k\"\n\
+         }\n\
+         let counts = {\"k\": 10}\n\
+         counts[key()] += 1\n",
+    );
+    assert_eq!(global(&interp, "calls"), Some(Value::Int(1)));
+    let Some(Value::Dict(id)) = global(&interp, "counts") else {
+        panic!("`counts` should hold a dict");
+    };
+    assert_eq!(
+        interp.heap.dict(id).get(&Key::Str("k".into())),
+        Some(&Value::Int(11))
+    );
+}
+
+#[test]
+fn dispatch_prefers_an_exact_type_to_a_widened_one() {
+    // v0.7 §4.1's widening, read as a *preference* rather than as a yes/no: an
+    // `int` holds as a `float`, and it holds as an `int` better.
+    let interp = run(
+        "fn width(n: int): string { return \"int\" }\n\
+         fn width(n: float): string { return \"float\" }\n\
+         let a = width(1)\n\
+         let b = width(1.0)\n",
+    );
+    assert_eq!(global(&interp, "a"), Some(Value::from("int")));
+    assert_eq!(global(&interp, "b"), Some(Value::from("float")));
+}
+
+#[test]
+fn dispatch_prefers_an_exact_container_to_a_widened_one() {
+    // The same preference one argument deeper, and it is what makes `any`
+    // widening survivable at a call. Once `list[any]` admits a `list[int]`, the
+    // class name alone cannot tell the two declarations apart — both would score
+    // the same, both would match, and a program declaring both could call
+    // neither.
+    let interp = run(
+        "fn pick(xs: list[int]): string { return \"ints\" }\n\
+         fn pick(xs: list[any]): string { return \"anything\" }\n\
+         let ints: list[int] = [1, 2]\n\
+         let words: list[string] = [\"a\"]\n\
+         let a = pick(ints)\n\
+         let b = pick(words)\n",
+    );
+    assert_eq!(global(&interp, "a"), Some(Value::from("ints")));
+    assert_eq!(global(&interp, "b"), Some(Value::from("anything")));
+
+    // A bare `list` is a widening too — its argument is elided, which is to say
+    // `any?` — so an exact one still wins.
+    let interp = run(
+        "fn pick(xs: list[int]): string { return \"ints\" }\n\
+         fn pick(xs: list): string { return \"some list\" }\n\
+         let ints: list[int] = [1, 2]\n\
+         let a = pick(ints)\n\
+         let b = pick([\"a\"])\n",
+    );
+    assert_eq!(global(&interp, "a"), Some(Value::from("ints")));
+    assert_eq!(global(&interp, "b"), Some(Value::from("some list")));
+}
+
+#[test]
+fn an_unannotated_overload_is_tried_last() {
+    let interp = run(
+        "fn take(n: int): string { return \"int\" }\n\
+         fn take(anything): string { return \"other\" }\n\
+         let a = take(1)\n\
+         let b = take(\"s\")\n",
+    );
+    assert_eq!(global(&interp, "a"), Some(Value::from("int")));
+    assert_eq!(global(&interp, "b"), Some(Value::from("other")));
+}
+
+#[test]
+fn an_override_replaces_one_signature_and_not_the_set() {
+    // §3.5's last rule. The subclass's table entry has to be merged with the
+    // parent's, because `Class::method` answers with the first table holding
+    // the name and cannot see past it.
+    let interp = run(
+        "class Base {\n\
+         fn hello(n: int): string { return \"base int\" }\n\
+         fn hello(s: string): string { return \"base string\" }\n\
+         }\n\
+         class Kid extends Base {\n\
+         override fn hello(n: int): string { return \"kid int\" }\n\
+         }\n\
+         let a = Kid().hello(1)\n\
+         let b = Kid().hello(\"s\")\n",
+    );
+    assert_eq!(global(&interp, "a"), Some(Value::from("kid int")));
+    assert_eq!(global(&interp, "b"), Some(Value::from("base string")));
+}
+
+#[test]
+fn a_constructor_is_replaced_rather_than_overloaded_across_a_subclass() {
+    // The exception the merge above has to make. Every constructor in a
+    // hierarchy replaces its parent's — that is what `super.init` is for — so
+    // folding them into one set would make `Kid(1)` reach `Base`'s constructor
+    // on a `Kid`.
+    let interp = run(
+        "class Base {\n\
+         op init(n: int) { self.n = n }\n\
+         }\n\
+         class Kid extends Base {\n\
+         op init(n: int, m: int) { super.init(n)\n self.m = m }\n\
+         }\n\
+         let built = Kid(1, 2)\n",
+    );
+    assert!(global(&interp, "built").is_some());
+    let program = crate::compile("class Base {\n op init(n: int) { self.n = n }\n}\nclass Kid extends Base {\n op init(n: int, m: int) { super.init(n)\n self.m = m }\n}\nKid(1)\n")
+        .expect("the program parses");
+    let mut interp = Interp::with_output(Box::new(Vec::new()));
+    let err = interp.run(&program).expect_err("`Kid` needs both arguments");
+    assert!(err.message.contains("takes 2 arguments"), "{}", err.message);
+}
+
+#[test]
+fn an_overloaded_name_is_still_one_function_value() {
+    // Nothing a program can do tells a set apart from a function: it has the
+    // same type, it is truthy, and it is called the same way.
+    let interp = run(
+        "fn f(n: int): int { return 1 }\n\
+         fn f(s: string): int { return 2 }\n\
+         let held = f\n\
+         let kind = type(f)\n\
+         let answer = held(\"s\")\n",
+    );
+    assert_eq!(global(&interp, "kind"), Some(Value::from("function")));
+    assert_eq!(global(&interp, "answer"), Some(Value::Int(2)));
+}
+
+#[test]
+fn a_class_may_declare_several_constructors() {
+    // Told apart the same way any other overloaded name is, and reachable
+    // through every path that builds one: a call, a keyword call, default
+    // construction, and the implicit coercion of §3.3.
+    let interp = run(
+        "class Money {\n\
+         op init() { self.cents = 0 }\n\
+         op init(cents: int) { self.cents = cents }\n\
+         op init(text: string) { self.cents = int(text) }\n\
+         op init(whole: int, part: int) { self.cents = whole * 100 + part }\n\
+         }\n\
+         let a = Money().cents\n\
+         let b = Money(5).cents\n\
+         let c = Money(\"700\").cents\n\
+         let d = Money(part: 5, whole: 2).cents\n\
+         let e: Money\n\
+         let f = e.cents\n\
+         let coerced: Money = 12\n\
+         let g = coerced.cents\n",
+    );
+    for (name, expected) in [("a", 0), ("b", 5), ("c", 700), ("d", 205), ("f", 0), ("g", 12)] {
+        assert_eq!(
+            global(&interp, name),
+            Some(Value::Int(expected)),
+            "`{name}` is wrong"
+        );
+    }
+}
+
+#[test]
+fn coercion_picks_the_constructor_the_value_fits() {
+    // The offer §3.3 describes is made by whichever single-parameter
+    // constructor takes this value. A class that also declares others still
+    // makes it — the payload is what decides, not how many there are.
+    let interp = run(
+        "class Money {\n\
+         op init(cents: int) { self.cents = cents }\n\
+         op init(text: string) { self.cents = int(text) }\n\
+         }\n\
+         let a: Money = 5\n\
+         let b: Money = \"700\"\n\
+         let x = a.cents\n\
+         let y = b.cents\n",
+    );
+    assert_eq!(global(&interp, "x"), Some(Value::Int(5)));
+    assert_eq!(global(&interp, "y"), Some(Value::Int(700)));
+
+    // And a value no constructor takes is still reported against the
+    // annotation, rather than blamed on the constructor.
+    let program = crate::compile(
+        "class Money {\n op init(cents: int) { self.cents = cents }\n}\nlet a: Money = 1.5\n",
+    )
+    .expect("the program parses");
+    let mut interp = Interp::with_output(Box::new(Vec::new()));
+    let err = interp.run(&program).expect_err("a float is not a `Money`");
+    assert!(err.message.contains("`a` is `Money`"), "{}", err.message);
+}
+
+#[test]
+fn an_operator_reports_against_the_expression_that_wrote_it() {
+    // A class declaring `op mul` has said what `*` means to it, so an operand it
+    // does not take is a refusal. The report is the point: an ordinary call
+    // reports a wrong argument against the parameter that refused it, which
+    // here would underline a parameter nobody wrote, in a declaration somewhere
+    // else entirely.
+    let program = crate::compile(
+        "extend list {\n\
+         op mul(factor: int): list { return self }\n\
+         }\n\
+         let doubled = [1, 2] * 2.4\n",
+    )
+    .expect("the program parses");
+    let mut interp = Interp::with_output(Box::new(Vec::new()));
+    let err = interp.run(&program).expect_err("a float is not an int");
+    // The sentence every binary type error uses, so a reader cannot tell from
+    // the shape of the report whether the class declared the slot and refused
+    // the operand or never declared it at all. What the class *does* take is
+    // the help line, which is the one thing the ordinary report cannot say.
+    assert_eq!(err.message, "cannot multiply list and float");
+    assert_eq!(err.labels.len(), 3, "both operands and the operator: {:?}", err.labels);
+    assert!(
+        err.help.iter().any(|line| line.contains("`op mul` for: (int)")),
+        "the report says what the class does declare: {:?}",
+        err.help
+    );
+
+    // The same sentence whether the name has one declaration or several, which
+    // is what makes it a rule rather than a special case.
+    let program = crate::compile(
+        "extend list {\n\
+         op mul(factor: int): list { return self }\n\
+         op mul(factor: string): list { return self }\n\
+         }\n\
+         let doubled = [1, 2] * 2.4\n",
+    )
+    .expect("the program parses");
+    let mut interp = Interp::with_output(Box::new(Vec::new()));
+    let err = interp.run(&program).expect_err("a float is neither");
+    assert_eq!(err.message, "cannot multiply list and float");
+    assert!(
+        err.help.iter().any(|line| line.contains("(int), (string)")),
+        "both are listed: {:?}",
+        err.help
+    );
+
+    // And a class that declares nothing at all reaches the same sentence
+    // through the path that was always there.
+    let program = crate::compile("let n = [1, 2] * 2.4\n").expect("the program parses");
+    let mut interp = Interp::with_output(Box::new(Vec::new()));
+    let err = interp.run(&program).expect_err("a list does not multiply");
+    assert_eq!(err.message, "cannot multiply list and float");
+}
+
+#[test]
+fn every_operator_that_takes_an_operand_reports_the_same_way() {
+    // The three that are not binary operators. `x[i]` and `needle in x` have no
+    // pair of operand spans to label, so they keep a report of their own — but
+    // it is one report and not three, and it says the same two things: which
+    // operator refused, and what it does take.
+    for (source, expected) in [
+        (
+            "class G {\n op get(i: int) { return i }\n}\nlet x = G()[\"a\"]\n",
+            "`op get` on a G does not take (string)",
+        ),
+        (
+            "class G {\n op init() { self.n = 0 }\n op set(i: int, v: int) { self.n = v }\n}\n\
+             let g = G()\ng[\"a\"] = 1\n",
+            "`op set` on a G does not take (string, int)",
+        ),
+        (
+            "class G {\n op contains(needle: int): bool { return true }\n}\n\
+             let found = \"a\" in G()\n",
+            "`op contains` on a G does not take (string)",
+        ),
+    ] {
+        let program = crate::compile(source).expect("the program parses");
+        let mut interp = Interp::with_output(Box::new(Vec::new()));
+        let err = interp.run(&program).expect_err("the operand does not fit");
+        assert_eq!(err.message, expected);
+    }
+}
+
+#[test]
+fn a_binary_operator_reads_the_same_whether_the_class_declared_it() {
+    // The property the report is for. Two programs, one where `list` declares
+    // `op mul` and refuses the operand and one where it declares nothing, and a
+    // reader cannot tell them apart from the sentence or the shape.
+    let refused = |source: &str| {
+        let program = crate::compile(source).expect("the program parses");
+        let mut interp = Interp::with_output(Box::new(Vec::new()));
+        interp.run(&program).expect_err("the operands do not fit")
+    };
+    let declared = refused(
+        "extend list {\n op mul(factor: int): list { return self }\n}\nlet n = [1] * 2.4\n",
+    );
+    let bare = refused("let n = [1] * 2.4\n");
+    assert_eq!(declared.message, bare.message);
+    assert_eq!(declared.labels.len(), bare.labels.len());
+    // The one difference, and it is an addition rather than a change.
+    assert_ne!(declared.help, bare.help);
+}
+
+#[test]
+fn a_refused_value_is_underlined_and_not_the_name_it_was_written_to() {
+    // The report used to mark the *target* of a write, so `xs = ["hello"]`
+    // under a `list[int]` said "item 0 is `int`" with the caret two characters
+    // wide under `xs`. The sentence already names the boundary that refused the
+    // value; the caret's job is the other half of the question, which is which
+    // value.
+    fn refused(source: &str) -> (String, &str) {
+        let program = crate::compile(source).expect("the program parses");
+        let mut interp = Interp::with_output(Box::new(Vec::new()));
+        let err = interp.run(&program).expect_err("the value does not hold");
+        (err.message.clone(), &source[err.span.start as usize..err.span.end as usize])
+    }
+
+    for (source, message, underlined) in [
+        // The reported case: a write to a name declared with an annotation,
+        // where the element is what is wrong and the element is what is marked.
+        (
+            "let xs: list[int] = []\nxs = [\"hello\", \"world\"]\n",
+            "item 0 is `int`, but this is a string",
+            "\"hello\"",
+        ),
+        // A local, which travels a different path to the same check.
+        (
+            "fn probe() {\n let xs: list[int] = []\n xs = [1, \"two\"]\n}\nprobe()\n",
+            "item 1 is `int`, but this is a string",
+            "\"two\"",
+        ),
+        // Nothing to do with containers: the value is still the subject.
+        (
+            "let n: int = 1\nn = \"s\"\n",
+            "`n` is `int`, but this is a string",
+            "\"s\"",
+        ),
+        // A subscripted write has two values it can be refused for, and the
+        // caret has to agree with which one the message named.
+        (
+            "let d: dict[string, int] = {}\nd[\"k\"] = \"v\"\n",
+            "the value is `int`, but this is a string",
+            "\"v\"",
+        ),
+        (
+            "let d: dict[string, int] = {}\nd[1] = 2\n",
+            "the key is `string`, but this is an int",
+            "1",
+        ),
+        (
+            "let xs: list[int] = [0]\nxs[0] = \"a\"\n",
+            "the item is `int`, but this is a string",
+            "\"a\"",
+        ),
+        // `a += b` produces a value that is neither operand, so the whole
+        // expression is what made it and the whole expression is marked.
+        ("let n: int = 1\nn += 1.5\n", "`n` is `int`, but this is a float", "n += 1.5"),
+    ] {
+        assert_eq!(refused(source), (message.to_string(), underlined), "for {source:?}");
+    }
+}
+
+#[test]
+fn a_nested_annotation_is_refused_at_the_depth_it_disagrees() {
+    // "item 1 is `list[int]`, but this is a list" is true and useless. The
+    // wording and the caret both come from the innermost element that actually
+    // disagrees — which is what `sema::check` reports for the same program.
+    let source = "let xs: list[list[int]] = []\nxs = [[1], [\"a\"]]\n";
+    let program = crate::compile(source).expect("the program parses");
+    let mut interp = Interp::with_output(Box::new(Vec::new()));
+    let err = interp.run(&program).expect_err("the nested element does not hold");
+    assert_eq!(err.message, "item 0 is `int`, but this is a string");
+    assert_eq!(&source[err.span.start as usize..err.span.end as usize], "\"a\"");
+}
+
+#[test]
+fn a_declaration_still_points_at_the_annotation_that_refused_the_value() {
+    // The second label is only meaningful while the annotation's span and the
+    // value's index the same text. A declaration holds both, so it keeps it —
+    // and a write to a name declared elsewhere, which is every REPL entry after
+    // the first, must not draw one.
+    let refused = |source: &str| {
+        let program = crate::compile(source).expect("the program parses");
+        let mut interp = Interp::with_output(Box::new(Vec::new()));
+        interp.run(&program).expect_err("the value does not hold")
+    };
+    let declaration = refused("let xs: list[int] = [\"a\"]\n");
+    assert_eq!(declaration.labels.len(), 2, "{:?}", declaration.labels);
+
+    let write = refused("let xs: list[int] = []\nxs = [\"a\"]\n");
+    assert_eq!(write.message, declaration.message);
+    assert!(write.labels.is_empty(), "{:?}", write.labels);
+}
+
+#[test]
+fn a_described_container_is_what_its_annotation_said() {
+    // `holds` used to walk the elements and nothing else, so an empty
+    // `list[int]` was equally a `list[string]` — the annotation next to it said
+    // otherwise and was not consulted. The header is the answer now.
+    let interp = run(
+        "fn ints(xs: list[int]): string { return \"ints\" }\n\
+         let empty: list[int] = []\n\
+         let a = ints(empty)\n",
+    );
+    assert_eq!(global(&interp, "a"), Some(Value::from("ints")));
+
+    for (source, expected) in [
+        (
+            "fn strings(xs: list[string]): int { return 0 }\n\
+             let empty: list[int] = []\nlet n = strings(empty)\n",
+            "`xs` is `list[string]`, but this is `list[int]`",
+        ),
+        // Nullability is part of what it holds: a `nil` written through the
+        // second is a `nil` read out of the first.
+        (
+            "fn strict(xs: list[int]): int { return 0 }\n\
+             let loose: list[int?] = []\nlet n = strict(loose)\n",
+            "`xs` is `list[int]`, but this is `list[int?]`",
+        ),
+        (
+            "fn flags(d: dict[string, bool]): int { return 0 }\n\
+             let scores: dict[string, int] = {}\nlet n = flags(scores)\n",
+            "`d` is `dict[string, bool]`, but this is `dict[string, int]`",
+        ),
+    ] {
+        let program = crate::compile(source).expect("the program parses");
+        let mut interp = Interp::with_output(Box::new(Vec::new()));
+        let err = interp.run(&program).expect_err("the header says otherwise");
+        assert_eq!(err.message, expected);
+    }
+}
+
+#[test]
+fn the_top_type_still_takes_any_container() {
+    // The one thing that widens, and it is safe because a *write* is checked
+    // against the header rather than against the annotation it arrived through
+    // — `xs.push("s")` inside `fn f(xs: list[any])` is refused on the strength
+    // of the `list[int]` the caller passed. Without this, "a list of anything"
+    // would have no spelling but the bare `list`.
+    let interp = run(
+        "fn anything(xs: list[any]): int { return len(xs) }\n\
+         fn bare(xs: list): int { return len(xs) }\n\
+         let ints: list[int] = [1, 2]\n\
+         let a = anything(ints)\n\
+         let b = bare(ints)\n",
+    );
+    assert_eq!(global(&interp, "a"), Some(Value::Int(2)));
+    assert_eq!(global(&interp, "b"), Some(Value::Int(2)));
+
+    let program = crate::compile(
+        "fn grow(xs: list[any]) { xs.push(\"s\") }\n\
+         let ints: list[int] = [1, 2]\ngrow(ints)\n",
+    )
+    .expect("the program parses");
+    let mut interp = Interp::with_output(Box::new(Vec::new()));
+    let err = interp.run(&program).expect_err("the header guards the write");
+    assert!(err.message.contains("the item is `int`"), "{}", err.message);
+}
+
+#[test]
+fn is_reads_an_elided_argument_as_the_any_it_stands_for() {
+    // §3.10 says an argument nobody wrote is `any?`, and v0.9 §3.1 says the same
+    // of an unbounded `[T]`. That was being decided at seven sites, each
+    // slightly differently, and the two that mattered most disagreed: `is`
+    // compared arguments by identity where an annotation compared them by
+    // admission. One rule now, shared by both.
+    let prelude = "let ints: list[int] = [1, 2]\n\
+                   let maybe: list[int?] = [1, nil]\n\
+                   let table: dict[string, int] = {\"a\": 1}\n\
+                   let keyed: dict[string] = {\"a\": 1}\n";
+    for (test, expected) in [
+        // The property that was broken: `list` and `list[any?]` are one type
+        // written two ways, so they cannot answer differently.
+        ("ints is list", true),
+        ("ints is list[any?]", true),
+        ("maybe is list", true),
+        ("maybe is list[any?]", true),
+        // `any` is the top type and widens — but does not admit `nil`, so it
+        // does not admit a container that may hold one.
+        ("ints is list[any]", true),
+        ("maybe is list[any]", false),
+        // Nothing else widens. §4.1's invariance is intact.
+        ("ints is list[int]", true),
+        ("ints is list[int?]", false),
+        ("ints is list[string]", false),
+        // `dict[K]` is `dict[K, any?]`, and that decides both directions: a
+        // `dict[string, int]` is one, and one is not a `dict[string, int]`.
+        ("table is dict", true),
+        ("table is dict[string]", true),
+        ("table is dict[string, any]", true),
+        ("keyed is dict[string]", true),
+        ("keyed is dict[string, int]", false),
+        ("keyed is dict[string, any]", false),
+        // A container nothing described is every argument elided.
+        ("[1, 2] is list", true),
+        ("[1, 2] is list[any?]", true),
+        ("[1, 2] is list[int]", false),
+        // The one rule `is` keeps that an annotation does not.
+        ("1 is float", false),
+    ] {
+        let interp = run(&format!("{prelude}let answer = {test}\n"));
+        assert_eq!(
+            global(&interp, "answer"),
+            Some(Value::Bool(expected)),
+            "for `{test}`"
+        );
+    }
+}
+
+#[test]
+fn an_unstamped_container_is_whatever_an_annotation_decides_it_is() {
+    // The one place `is` and an annotation part company, and they are answering
+    // different questions rather than disagreeing. `is` reports what a value
+    // already is, so an undescribed `[1, 2]` is a `list[any?]` — it has no
+    // element type because nothing has given it one. A `let` is the thing that
+    // gives it one, and is free to give it a narrower one than `any?`.
+    let interp = run(
+        "let raw = [1, 2]\n\
+         let before = raw is list[int]\n\
+         let ints: list[int] = raw\n\
+         let after = raw is list[int]\n",
+    );
+    assert_eq!(global(&interp, "before"), Some(Value::Bool(false)));
+    assert_eq!(global(&interp, "after"), Some(Value::Bool(true)));
+}
+
+#[test]
+fn a_shorthand_header_is_a_claim_that_the_rest_is_unconstrained() {
+    // `dict[K]` says "I only care about the keys" — and §3.10 spells out what
+    // that means, which is that it is shorthand for `dict[K, _?]`. So it *is* a
+    // claim about the values: the claim that they are anything at all. A
+    // `dict[string]` is therefore not a `dict[string, int]`, for the same reason
+    // a `list[any?]` is not a `list[int]`.
+    //
+    // This used to be accepted, on the reasoning that the shorthand said nothing
+    // about values and so the values had to be walked. That was a hole and not a
+    // convenience: `admitted` finds no argument at the value slot of a
+    // `dict[string]` header and waves every write through, so the program below
+    // used to finish with `{"a": 1, "x": "not an int"}` under an annotation
+    // reading `dict[string, int]`.
+    let program = crate::compile(
+        "fn takes(d: dict[string, int]) { d[\"x\"] = \"not an int\" }\n\
+         let loose: dict[string] = {\"a\": 1}\ntakes(loose)\n",
+    )
+    .expect("the program parses");
+    let mut interp = Interp::with_output(Box::new(Vec::new()));
+    let err = interp
+        .run(&program)
+        .expect_err("the shorthand is not a `dict[string, int]`");
+    assert_eq!(
+        err.message,
+        "`d` is `dict[string, int]`, but this is `dict[string]`"
+    );
+
+    // The other direction still holds, and by the same rule: a `dict[string,
+    // int]` is a `dict[string]`, because `int` is one of the things the elided
+    // `any?` admits.
+    let interp = run(
+        "fn keyed(d: dict[string]): int { return len(d) }\n\
+         let scores: dict[string, int] = {\"a\": 1}\n\
+         let n = keyed(scores)\n",
+    );
+    assert_eq!(global(&interp, "n"), Some(Value::Int(1)));
+}
+
+#[test]
+fn two_declarations_that_only_an_empty_container_confuses() {
+    // The pair is legal, because a container that says what it holds tells them
+    // apart. What is refused is the *call* that does not say — which is a
+    // property of the argument and so cannot be decided where they are declared.
+    let interp = run(
+        "fn total(xs: list[int]): string { return \"ints\" }\n\
+         fn total(xs: list[string]): string { return \"strings\" }\n\
+         let a = total([1, 2])\n\
+         let b = total([\"x\"])\n\
+         let described: list[string] = []\n\
+         let c = total(described)\n",
+    );
+    assert_eq!(global(&interp, "a"), Some(Value::from("ints")));
+    assert_eq!(global(&interp, "b"), Some(Value::from("strings")));
+    assert_eq!(global(&interp, "c"), Some(Value::from("strings")));
+
+    let program = crate::compile(
+        "fn total(xs: list[int]): string { return \"ints\" }\n\
+         fn total(xs: list[string]): string { return \"strings\" }\n\
+         let a = total([])\n",
+    )
+    .expect("the program parses");
+    let mut interp = Interp::with_output(Box::new(Vec::new()));
+    let err = interp.run(&program).expect_err("nothing says which");
+    assert_eq!(err.message, "more than one `total` takes (list)");
 }

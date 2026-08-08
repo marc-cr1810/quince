@@ -1,0 +1,7 @@
+# `override` is a claim about a superclass member, so it can only be written
+# where there is a superclass to make the claim about.
+override fn total(xs) {
+    return len(xs)
+}
+
+print(total([1, 2]))

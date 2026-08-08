@@ -1,0 +1,71 @@
+# Default parameters and keyword arguments. They are in this milestone rather
+# than a later one because they cannot be decided *after* overloading: a
+# defaulted parameter changes what "the signatures a name has" means.
+class Connection {
+    op init(host: string, port: int, timeout: int) {
+        self.host = host
+        self.port = port
+        self.timeout = timeout
+    }
+
+    const op string(): string {
+        return self.host + ":" + string(self.port) + " after " + string(self.timeout) + "ms"
+    }
+}
+
+fn connect(host: string, port: int = 8080, timeout: int = 3000): Connection {
+    return Connection(host, port, timeout)
+}
+
+# Positional, taking both defaults.
+print(connect("localhost"))
+# Targeting one defaulted parameter by name and leaving the other.
+print(connect("127.0.0.1", timeout: 5000))
+# Every argument by name, in any order.
+print(connect(timeout: 5000, host: "api.domain.com", port: 443))
+# And all three positionally, which is what every call before v0.8 looked like.
+print(connect("example.org", 443, 1000))
+
+# A default is evaluated at the call, in the callee's declaration scope, every
+# time — so an expression default builds a fresh value per call and carries no
+# mutation between them. This is the one place Python's answer is refused.
+fn collect(item: int, into: list = []): list {
+    into.push(item)
+    return into
+}
+print(collect(1), collect(2), collect(3))
+
+# The scope is the declaration's, so a default may read what the declaration
+# could see.
+let fallback = 7
+fn offset(n: int, from: int = fallback): int {
+    return n + from
+}
+print(offset(1), offset(1, from: 100))
+
+# Constructors and methods take names too — the receiver is not a parameter
+# anyone writes, so it is not one anyone can name.
+class Box {
+    op init(width: int = 1, height: int = 2) {
+        self.width = width
+        self.height = height
+    }
+    const fn area(scaled: int = 1): int {
+        return self.width * self.height * scaled
+    }
+}
+let unit = Box()
+let tall = Box(height: 10)
+print(unit.area(), tall.area(), tall.area(scaled: 3))
+print(Box(3, 4).area())
+
+# `?` on the type does not imply a default; only `= nil` makes one optional.
+fn label(name: string, note: string? = nil): string {
+    return name + (note ?? "")
+}
+print(label("a"), label("a", note: "!"))
+
+# A class whose constructor defaults everything is default-constructible, which
+# is what makes `let b: Box` legal beside a `let b = Box()`.
+let implied: Box
+print(implied.area())

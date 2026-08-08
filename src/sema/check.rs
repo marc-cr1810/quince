@@ -48,7 +48,7 @@ use crate::sema::types::{Type, builtin_ancestor, stated};
 use crate::runtime::value::Native;
 use crate::sema::types::builtin_method;
 use crate::syntax::ast::{
-    BindKind, Block, Expr, ExprKind, FieldDecl, Param, Stmt, StmtKind, TypeExpr, TypeName,
+    BindKind, Block, CallArg, Expr, ExprKind, FieldDecl, Param, Stmt, StmtKind, TypeExpr, TypeName,
 };
 
 /// Every type mistake decidable from the source, in source order.
@@ -470,26 +470,7 @@ fn check_op_body_returns(stmts: &[Stmt], op_name: &str, required_type: &str, typ
 }
 
 fn binary_op_symbol(op: crate::syntax::ast::BinaryOp) -> &'static str {
-    match op {
-        crate::syntax::ast::BinaryOp::Add => "+",
-        crate::syntax::ast::BinaryOp::Sub => "-",
-        crate::syntax::ast::BinaryOp::Mul => "*",
-        crate::syntax::ast::BinaryOp::Div => "/",
-        crate::syntax::ast::BinaryOp::FloorDiv => "//",
-        crate::syntax::ast::BinaryOp::Rem => "%",
-        crate::syntax::ast::BinaryOp::Eq => "==",
-        crate::syntax::ast::BinaryOp::Ne => "!=",
-        crate::syntax::ast::BinaryOp::Lt => "<",
-        crate::syntax::ast::BinaryOp::Le => "<=",
-        crate::syntax::ast::BinaryOp::Gt => ">",
-        crate::syntax::ast::BinaryOp::Ge => ">=",
-        crate::syntax::ast::BinaryOp::In => "in",
-        crate::syntax::ast::BinaryOp::BitAnd => "&",
-        crate::syntax::ast::BinaryOp::BitOr => "|",
-        crate::syntax::ast::BinaryOp::BitXor => "^",
-        crate::syntax::ast::BinaryOp::Shl => "<<",
-        crate::syntax::ast::BinaryOp::Shr => ">>",
-    }
+    op.symbol()
 }
 
 fn body(decl: &std::rc::Rc<crate::syntax::ast::FnDecl>, types: &Types, bound: &mut Bindings, found: &mut Vec<Raised>) {
@@ -896,16 +877,31 @@ fn expression(expr: &Expr, types: &Types, bound: &Bindings, found: &mut Vec<Rais
     // The mutating methods, by the argument each puts into the container.
     // One today; `insert` and the rest arrive with the collections v0.10 adds.
     let held = receiver_type(target, types);
-    if let ("push", Some(item)) = (name.as_str(), args.first()) {
+    if let ("push", Some(item)) = (name.as_str(), args.first().map(|arg| &arg.value)) {
         check_element(&held, "list", 0, item, "the item", types, found);
     }
 }
 
 /// Refuses each argument the declaration has an annotation for.
-fn arguments(params: &[Param], args: &[Expr], span: crate::syntax::token::Span, types: &Types, found: &mut Vec<Raised>) {
-    if params.len() != args.len() {
+///
+/// A call using named arguments is left alone. Matching them up is what the
+/// evaluator does with the declaration in hand, and doing it a second time here
+/// would be a second implementation of §3.6's rules for a pass whose whole job
+/// is to agree with the first one.
+fn arguments(params: &[Param], args: &[CallArg], span: crate::syntax::token::Span, types: &Types, found: &mut Vec<Raised>) {
+    if args.iter().any(|arg| arg.name.is_some()) {
+        return;
+    }
+    // A defaulted parameter makes the count a range rather than a number, so
+    // the report says so — and says nothing at all while the call is inside it.
+    let required = params.iter().filter(|param| param.default.is_none()).count();
+    if args.len() < required || args.len() > params.len() {
+        let takes = match required == params.len() {
+            true => format!("{required}"),
+            false => format!("{required} to {}", params.len()),
+        };
         found.push(refusal(
-            format!("expected {} arguments, got {}", params.len(), args.len()),
+            format!("expected {takes} arguments, got {}", args.len()),
             format!("function declared with {} parameters", params.len()),
             span,
         ));
@@ -913,13 +909,18 @@ fn arguments(params: &[Param], args: &[Expr], span: crate::syntax::token::Span, 
     }
     for (param, arg) in params.iter().zip(args) {
         if let Some(ty) = &param.ty {
-            against(ty, arg, &format!("`{}`", param.name), types, found);
+            against(ty, &arg.value, &format!("`{}`", param.name), types, found);
         }
     }
 }
 
 /// The same for a builtin, whose parameters name a *set* of types.
-fn native_arguments(native: &Native, args: &[Expr], span: crate::syntax::token::Span, types: &Types, found: &mut Vec<Raised>) {
+fn native_arguments(native: &Native, args: &[CallArg], span: crate::syntax::token::Span, types: &Types, found: &mut Vec<Raised>) {
+    // A builtin takes its arguments positionally; the evaluator refuses a named
+    // one, and this pass has nothing to add to that.
+    if args.iter().any(|arg| arg.name.is_some()) {
+        return;
+    }
     if native.params.len() != args.len() {
         found.push(refusal(
             format!("`{}` expected {} arguments, got {}", native.name, native.params.len(), args.len()),
@@ -932,6 +933,7 @@ fn native_arguments(native: &Native, args: &[Expr], span: crate::syntax::token::
         if param.accepts.is_empty() {
             continue;
         }
+        let arg = &arg.value;
         let held = types.of_expr(arg.span);
         let Some(actual) = held.class_name() else {
             continue;
@@ -1068,13 +1070,15 @@ fn parts(expr: &Expr) -> Vec<&Expr> {
         | ExprKind::Coalesce { lhs, rhs } => vec![lhs, rhs],
         ExprKind::Call { callee, args } => {
             let mut parts = vec![callee.as_ref()];
-            parts.extend(args);
+            parts.extend(args.iter().map(|arg| &arg.value));
             parts
         }
         ExprKind::Index { target, index } => vec![target, index],
         ExprKind::Field { target, .. } | ExprKind::Chain(target) => vec![target],
         ExprKind::Is { value, .. } => vec![value],
-        ExprKind::Assign { target, value } => vec![target, value],
+        ExprKind::Assign { target, value }
+        | ExprKind::AssignOp { target, value, .. }
+        | ExprKind::AssignShort { target, value, .. } => vec![target, value],
         ExprKind::List(items) => items.iter().collect(),
         ExprKind::Dict(pairs) => pairs.iter().flat_map(|(k, v)| [k, v]).collect(),
         ExprKind::Slice { target, start, end } => {

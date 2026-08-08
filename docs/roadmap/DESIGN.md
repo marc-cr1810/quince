@@ -2932,6 +2932,10 @@ runs long.
 
 **v0.7 — gradual type annotations (`T?`), container generics (`list[T]`), visibility (`public`, `private`, `protected`), and LSP tooling**
 
+**Done.** `docs/` is the reference manual for what shipped — grammar, type system, classes,
+control flow, the library, and the tooling — and is written against the language as it is
+rather than as it was planned.
+
 This began as one document and is four milestones. It reached twenty-two features while
 still being called "annotations and visibility", and the split was made on one test: is a
 feature *about* types, or does it merely *read* them? What stayed is the first kind.
@@ -2953,17 +2957,106 @@ how `T?` relates to v0.10's `Option[T]`.
 
 **v0.8 — declaration modifiers and typed dispatch**
 
-Everything that reads v0.7's parameter types without being part of the type system. Uniform
-in shape: a modifier a declaration may carry, and a rule the resolver enforces about it.
+**Done**, all seven tranches, overloading included — the cut line after tranche 6 was not
+needed. Everything that reads v0.7's parameter types without being part of the type system.
+Uniform in shape: a modifier a declaration may carry, and a rule the resolver enforces
+about it.
 
 - **`const fn` / `const op`**: purity enforced by the resolver — no field assignment, no index mutation, no non-const call on `self`, no global reassignment. `print`, `throw`, and early `return` stay legal, because the restriction is on state, not effects.
 - **`override` and `final` on members**: overriding must be declared, and may be forbidden. `override` where nothing is overridden is refused too.
 - **Implicit constructor coercion, and `explicit` to refuse it**: `let i: CustomInt = 10` reaches a single-parameter `op init`. One step only — coercion does not chain.
 - **Default constructor auto-initialization**: `let logger: Logger`, with an implicit `op init()` synthesized for a class that declares none.
 - **Typed `fn` and `op` overloading**: several definitions sharing a name, dispatched on run-time argument types, with ambiguity refused where it is declared rather than where it is called.
+- **Default parameters and keyword arguments**: a declaration contributes one signature per callable arity, and overload selection runs before defaults are filled in. They are here rather than deferred because that interaction cannot be decided after overloading ships.
+- **`**` and compound assignment** (`+=`, `//=`, `<<=`, …): the operator surface `BYTECODE_VM_DESIGN.md` already emits opcodes for and no milestone previously claimed. `**` is the one binary operator in the language that associates right.
 
-See `V0_8_DECLARATIONS_AND_DISPATCH_DESIGN.md`. Overloading is the risky item and is
-sequenced last, being the only one that changes dispatch.
+See `V0_8_DECLARATIONS_AND_DISPATCH_DESIGN.md`, whose §8 records where the code and the
+plan differ. Overloading was the risky item and was sequenced last, being the only one that
+changes dispatch. The last two items are not declaration modifiers and the document says so
+rather than pretending they fit the theme — they are here for sequencing, which is the
+honest reason.
+
+Four things are worth keeping from the build.
+
+**Overloading was cheaper than the plan feared and dearer than it looked.** The dispatch
+itself is one function — score each candidate against the argument values, take the lowest —
+and it is small because `holds` already existed. What it cost instead was *representation*:
+an overloaded name is a value, so `Value::Overload` had to be a variant, and every place
+that matched a callee had to answer for it. The plan said "a change to this file and to
+almost nothing else"; it was a change to eleven files, and none of the eleven was the hard
+part.
+
+**Defaults are what make double dispatch safe.** Selection happens twice for a construction
+— once at the expression, to know which declaration's defaults to fill in, and once inside
+`call_method`, on the arguments that filling produced. That is only sound because §3.6's
+arity rule refuses two declarations that share a callable arity, so the second selection
+cannot reach a different candidate from the first. The rule was written to settle an
+interaction with defaults and turned out to be load-bearing somewhere else.
+
+**Inheritance is where "an override replaces one signature" actually lives.** `Class::method`
+answers with the first table holding the name and cannot see past it, so a subclass
+declaring one `add` would hide its parent's other one. The merge is done when the class is
+built, per signature, and `op init` is excluded from it — every constructor in a hierarchy
+replaces its parent's outright, which is the same exemption `override` already makes.
+
+**The REPL had to be told what it already knows.** A prompt compiles one line at a time, so
+every rule in this milestone that reads a hierarchy was declining to answer: the class was
+declared on an earlier line and each entry was resolved against an empty world. The fix is
+not to accumulate source — a REPL is not a file being appended to, and a name may be
+redeclared — but to read the prior world off what is *bound*, which is the only thing the
+next line can actually reach. What is seeded is exactly the maps the declaration rules read,
+and deliberately not the set that refuses a name declared twice.
+
+**A bug the milestone found rather than caused.** A class field's initializer was never
+resolved: `class C { let n = base }` gave `base` no slot and panicked in `read`. Nothing had
+noticed because the corpus only ever initialized a field from a literal. Tranche 3 needed
+those expressions resolved — the synthesized `Logger()` is one — and walking them is what
+turned the latent panic into a fixed one.
+
+**v0.8.1 — word logical operators, increments, and short-circuiting assignment**
+
+**Done**, all five tranches; the cut line after tranche 4 was not needed. A point release
+rather than a milestone, and the distinction is the point: nothing here is a capability the
+language lacked. `a and b` computes what `a && b` computed and `i++` counts what `i += 1`
+counted. It earns a version because it breaks source, not because it adds power.
+
+- **`and`, `or`, `not` replace `&&`, `||`, `!`**: removed, not aliased. Two spellings of one
+  operator is the redundancy `extend`-not-`extends` and the spelled-out visibility words
+  already paid to avoid. `!` survives only inside `!=`.
+- **`not in` and `is not`**: the negations of `in` and `is`, desugared to a `Not` over the
+  node that already exists, so no pass after the parser had to learn about them.
+- **`not` binds looser than the comparisons**: the one change here that alters what a program
+  *means*. `!` sat with the unary operators, where C puts it; a word has to group the way it
+  reads.
+- **`++` and `--`, as statements**: no value, so prefix and postfix have nothing left to
+  differ about and `x = i++` is an error rather than a puzzle. Desugars to the compound
+  assignment, inheriting evaluate-once.
+- **`and=`, `or=`, `??=`**: the three assignments whose right side may not run, and which may
+  write nothing at all. A node of their own, for the reason `LogicalOp` is not a `BinaryOp`.
+
+See `V0_8_1_WORD_OPERATORS_DESIGN.md`. It is the one plan here written *after* its code,
+which its head states rather than hides — so its §8 is thin, since a prediction is worth most
+where it turned out wrong and there was none standing to be wrong.
+
+Three things are worth keeping from the build.
+
+**The guard that caught the real gap was one that already existed.**
+`the_editor_grammar_spells_every_keyword` failed the moment `and` was reserved, because the
+VS Code grammar is a copy of the keyword list that the language cannot read at run time. That
+test was written when `extend`, `complete`, and `sealed` had drifted out of the grammar
+unnoticed; it earned its keep a second time without being touched.
+
+**Removing an operator is a far smaller change than adding one.** Six `.qn` cases and three
+documents used `&&`, `||`, or prefix `!` between them. The blast radius people fear from a
+breaking syntax change is mostly in the corpus, and this corpus is small enough that the
+change was cheaper now than it will ever be again — which is the argument for doing it before
+v0.9 rather than after.
+
+**`not`'s precedence was discovered, not designed.** The request was to swap symbols for
+words. A parser test asserting `(! a) && b` was rewritten mechanically to `(not a) and b`,
+and reading it back made the grouping look wrong in a way the symbolic form never had. The
+placement change came out of that, not out of the plan — and it is the only part of this
+release that could break a working program silently rather than loudly.
 
 **v0.9 — user-defined generics, tuples, and parameter packs**
 
@@ -2977,6 +3070,7 @@ not bounds is the half-built mechanism v0.6's trade names.
 - **Variadic packs** (`Ts...`), one per list, in last position.
 - **`tuple[T1, …, TN]`**: immutable, arity in the type, with destructuring and tail unpacking. It ships here rather than with v0.7's containers because its checking *is* pack checking. This is also what finally unblocks a dict iterating as pairs.
 - **`extend list[int]`**, and **generic type aliases** (`alias Pair[T] = tuple[T, T]` — the keyword is `alias` and not `type`, since `type(x)` is a global the corpus calls 36 times).
+- **Function types and function literals**: `function(int) -> string`, and the `fn(x: int): string { … }` expression the language had no way to write. Invariant, like everything else. It is the milestone's one clean cut line, being the one item that is not part of the generic mechanism.
 
 See `V0_9_GENERICS_DESIGN.md`.
 
@@ -2988,46 +3082,96 @@ See `V0_9_GENERICS_DESIGN.md`.
 - **`range`**: the first value in the language meaning "a to b" — which is what `Op::Get` has been refusing to slice for want of. It **replaces `x[a:b]` with `x[a..b]`**, because `:` cannot survive a first-class range value once `{…}` spells both dicts and sets: `{1: 10}` would be a dict literal and a set of one range at the same time. `..` is left-associative and `range` overloads it, so the step is just the operator again: `0..10..2` is `(0..10)..2`, desugaring to `(0..10).step(2)`.
 - **A lazy iteration protocol (`op next`)**, which `range` forces and which reverses the eager `op iter` decision recorded above. `op iter`'s list contract is kept as a fallback, so nothing in the corpus breaks.
 - **`array[T, N]`, `bytes`, `set[T]`**: fixed-size storage, raw binary, and hashed uniqueness.
+- **Class and dict destructuring** in a binding — the same patterns reaching the one position that is not a `match`, and deliberately *only* a binding position, since a `Name { … }` in expression position would reintroduce the ambiguity §7.5 shows Quince does not have.
 
 See `V0_10_ENUMS_AND_MATCHING_DESIGN.md`. It comes after v0.9 for `tuple` (which §6.3's
 patterns match on), `const N: int` (which `array[T, N]` needs), and the parameter-list
 grammar (without which a *user* cannot write `enum Tree[T]`) — not for `Option[T]` itself,
 which is a built-in generic and needs only what `list[T]` needed.
 
-**v0.11 — interfaces, interface subtyping, and object hashing**
-- **Interface Contracts & Subtyping**: `interface`, `implements`, multiple interface implementation/inheritance, and dynamic interface tables (`itables`).
-- **Nullability-Aware Subtyping Matrix**: `int` satisfies non-nil `any`; `int?` satisfies `any?` but refuses non-nil `any`.
-- **`op hash(): int`**: standard hashing slot for `dict[K, V]` keys and `set[T]` elements.
+This is the largest milestone in the roadmap by feature count, and its cut line is after
+tranche 5: `set`, `array`, and `bytes` share no machinery with enums or matching and are
+severable. Tranche 1 is not — it is what removes `x[a:b]`, and shipping matching while
+leaving two slicing syntaxes takes the cost of that change without the benefit.
+
+**v0.11 — interfaces, object hashing, and generic functions**
+
+Three deferrals that turn out to be one piece of work: a bound that can *promise* something,
+a key that is not in `dict::Key`'s closed set, and a generic function — which is what a bound
+is for.
+
+- **`interface` and `implements`**: nominal contracts of `fn` and `op` signatures, one superclass and any number of interfaces, multiple interface inheritance. No fields and no default bodies, which is what keeps the diamond problem out.
+- **Bounds that add members**: `T: Comparable` lets a body call what the interface declares — the deferral v0.9 §3.2 records itself as unable to express.
+- **`op hash(): int`, and the `hash(x)` global**: the fourth global, because `op hash` is otherwise the only slot in the language a program cannot invoke, and a class hashes by combining its fields. It opens `dict::Key` to any `Hashable`, which is what `set[T]` shipped without.
+- **Generic functions** (`fn map[T, U]`), with call-site inference. Moved here from a later milestone: they are worth little until a bound can promise something, and that is this milestone.
+- **Containers stay invariant.** An earlier draft of this document asserted `list[int]` satisfies `list[any]` and `Stack[int]` satisfies `Stack[any]`. Both contradict v0.7 §4.1 and v0.9 §9, and both are unsound in a language where every container can be written through. §7 there records the mistake rather than deleting it.
 
 See `V0_11_INTERFACES_AND_SUBTYPING_DESIGN.md`.
 
-**v0.12 — metaprogramming, CTFE, and custom infix operators**
-- **Compile-Time Function Execution (`const fn`)** and **Hygienic Macros (`macro`)**.
-- **Custom Infix Operator Registration (`public operator Symbol`)**: registers precedence/associativity in parser, dispatching via `op` method tables on classes and `extend` blocks.
+**v0.12 — compile-time evaluation and custom infix operators**
+- **CTFE**: a `const fn` in a constant position — a `const` initializer, a const generic argument, or another compile-time call — evaluated at resolution. It needs no new keyword, because v0.8 §3.1 already promises purity and the resolver already holds you to it. A step budget rather than a timeout, so builds are reproducible.
+- **Custom infix operators** (`public operator |>`): a symbol, a precedence, an associativity, and an `op` named by the symbol itself. Registration is **per-module and travels by `import`** — unscoped registration would mean a parse error in a file that never mentions the operator.
 
-See `V0_12_METAPROGRAMMING_AND_MACROS_DESIGN.md`.
+See `V0_12_CTFE_AND_CUSTOM_OPERATORS_DESIGN.md`. Macros and reflection used to be in this
+document and are v0.15; see the head of that file for why a page was not enough for them.
 
-**v0.13 — system standard library modules**
-- `path`, `sys`, and `io` modules.
+**v0.13 — the standard library a compiler needs**
+- `path`, `sys` (including `exec` and a declared `ProcessResult`), and `io` extensions.
+- `text` (`StringBuilder`, character classification as `string` methods — there is no `char` type and never has been), `collections` (`Interner`, `IndexMap`, `BitSet`), `binary` (`ByteBuffer`).
+- **Import aliasing** (`import x as y`, `from x import a as b`): the one language change here, and it is here because `BYTECODE_VM_DESIGN.md` §8.2 already assumes it.
 
-See `V0_13_SYSTEM_MODULES_DESIGN.md`.
+See `V0_13_STANDARD_LIBRARY_DESIGN.md`. This was two milestones and is one, because both
+were library work for the same consumer — Phase 5's bootstrap — and neither filled a
+milestone alone.
 
-**v0.14 — compiler utility stdlib modules & string interpolation**
-- `text` (`StringBuilder`), `collections` (`Interner`, `IndexMap`, `BitSet`), `binary` (`ByteBuffer`).
-- **String Interpolation (`f"..."`)**: format strings desugaring into string concatenation expressions.
+**v0.14 — string interpolation and typed `catch`**
+- **`f"…{expr}…"`**: holes rendered through `op string`, `{{` for a literal brace, desugaring to concatenation or to `text.StringBuilder`. Prefixed rather than bare, because bare interpolation would change the meaning of every string containing a brace.
+- **Typed `catch` branches** (`catch err: ParseError`): selection by `is`, so subclasses and interfaces both work with no new rule; unreachable branches refused as `match` arms are.
+- **The ternary conditional is refused, not deferred.** `?` already sits in three places and `:` is the token v0.10 removed slice syntax to protect. `if` as an expression is the named alternative and costs no token at all.
 
-See `V0_14_COMPILER_STDLIB_DESIGN.md`.
+See `V0_14_INTERPOLATION_AND_TYPED_CATCH_DESIGN.md`.
 
-**v0.15 — generic functions, typed catch, and ternary conditionals**
-- **Generic Functions (`fn map[T, U]`)**: standalone generic function definitions with call-site type parameter inference.
-- **Typed `catch` Blocks**: multi-branch exception filtering (`catch err: Type`).
-- **Ternary Conditional Operator (`c ? t : f`)**: expression-level conditional evaluation.
+**v0.15 — hygienic macros and type reflection**
+- **`macro`**, with `quote`/`unquote`, called as `name!(…)` so a reader can see that arguments may not be evaluated. Expansion runs between parsing and resolution, so a macro's output is checked like any other code and a macro cannot ask what type an argument has.
+- **Hygiene**, as a syntax context on `Ident`, with globals deliberately exempt.
+- **Diagnostics through an expansion**, which is its own tranche because a macro system with unreadable errors is one people stop using.
+- **`type_of(T)`**: compile-time reflection over fields, variants, and signatures — what a macro is written to consume, which is why the two share a milestone.
 
-See `V0_15_GENERIC_FUNCTIONS_AND_TYPED_CATCH_DESIGN.md`.
+See `V0_15_MACROS_AND_REFLECTION_DESIGN.md`. It is last among the language milestones
+because a macro system is the hardest thing to change once programs depend on it, and every
+milestone before it is still moving the syntax macros would generate.
+
+### The execution engine
+
+Everything above is the language. What follows is how it runs, and it is a separate
+sequence with its own documents: `BYTECODE_VM_DESIGN.md` is the architecture, and each phase
+below has a document of its own.
+
+| Phase | Milestone | Document |
+| --- | --- | --- |
+| 1A | Bytecode IR emitter, `.qnc`, disassembler, caching | `PHASE_1A_BYTECODE_IR_EMITTER_DESIGN.md` |
+| 1B | Cranelift JIT core | `PHASE_1B_CRANELIFT_JIT_CORE_DESIGN.md` |
+| 2 | NaN-tagging and the GC rework | `PHASE_2_NAN_TAGGING_AND_GC_DESIGN.md` |
+| 3 | Inline caching and executable bundling | `PHASE_3_INLINE_CACHING_AND_BUNDLING_DESIGN.md` |
+| 4A | Cranelift AOT and `.qnx` native modules | `PHASE_4A_CRANELIFT_AOT_AND_QNX_DESIGN.md` |
+| 4B | C FFI and the CPython bridge | `PHASE_4B_C_FFI_AND_CPYTHON_BRIDGE_DESIGN.md` |
+| 5 | Self-hosting bootstrap | `PHASE_5_SELF_HOSTING_BOOTSTRAP_DESIGN.md` |
+| 6A | GIL-free concurrency | `PHASE_6A_GIL_FREE_CONCURRENCY_DESIGN.md` |
+| 6B | Hardware SIMD | `PHASE_6B_HARDWARE_SIMD_DESIGN.md` |
+
+**Several of those phases assume language features no milestone above schedules**, and that
+is tracked in `BYTECODE_VM_DESIGN.md` §12 rather than left to be discovered. Two have been
+scheduled by this revision — `**` and compound assignment into v0.8, import aliasing into
+v0.13. The rest are named there as prerequisites, so that a phase cannot quietly introduce
+syntax on its way past.
 
 **Later**
-Bytecode VM, async/await, sized integer types — all things Zephyr has, deferred until the
-core is solid. What is left of modules is packages, search paths, and subdirectory imports.
+Sized integer types (`u8`…`i64`) with promotion rules — Zephyr has them, and `bytes`
+indexing to `int` is what lets v0.10 not need them. Variance, which three milestones have now
+deferred and v0.11 §7 finally gives a stated cost. Packages, search paths, and subdirectory
+imports, which is what is left of modules. Async/await and structured concurrency arrive with
+Phase 6A rather than as a language milestone, and that is itself a decision worth revisiting:
+they are language surface, and the phase document is not the place to design them.
 
 ## Testing
 

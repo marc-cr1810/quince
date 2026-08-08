@@ -1,0 +1,1 @@
+`Money` has no default constructor, so `m` needs an initializer

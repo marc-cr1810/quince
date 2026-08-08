@@ -20,7 +20,8 @@ use crate::sema::types::{
     ClassType, Type, binary, builtin_ancestor, builtin_constructor, module_member, returned_by, stated,
 };
 use crate::syntax::ast::{
-    Block, Expr, ExprKind, FnDecl, ImportNames, LogicalOp, SELF, Stmt, StmtKind, UnaryOp,
+    Block, Expr, ExprKind, FnDecl, ImportNames, LogicalOp, SELF, ShortAssignOp, Stmt, StmtKind,
+    UnaryOp,
 };
 use crate::syntax::token::Span;
 
@@ -48,6 +49,9 @@ pub(crate) struct Infer<'a> {
     /// Classes whose fields are being worked out right now, for the same reason
     /// and against the same shape: `self.next = Node()` inside `Node`.
     pub(crate) computing_fields: HashSet<String>,
+    /// Top-level names carrying more than one declaration, so a later `fn` of
+    /// the same name cannot put one of them back.
+    pub(crate) overloaded: HashSet<String>,
     pub(crate) fields: HashMap<String, HashMap<String, Type>>,
     pub(crate) function_returns: HashMap<String, Type>,
     /// The declaration behind each of those, for anything wanting parameters.
@@ -81,6 +85,7 @@ impl<'a> Infer<'a> {
             returns: HashMap::new(),
             computing: HashSet::new(),
             computing_fields: HashSet::new(),
+            overloaded: HashSet::new(),
             fields: HashMap::new(),
             function_returns: HashMap::new(),
             fn_decls: HashMap::new(),
@@ -103,8 +108,23 @@ impl<'a> Infer<'a> {
     pub(crate) fn declare(&mut self, stmts: &[Stmt]) {
         for stmt in stmts {
             match &stmt.kind {
-                StmtKind::Fn { decl, .. } => {
-                    self.functions.insert(decl.name.clone(), Rc::clone(decl));
+                StmtKind::Fn { decl, overload, .. } => {
+                    // An overloaded name has no single declaration to answer
+                    // about — which parameters it takes and what it returns
+                    // depend on the call. `Unknown` is the honest answer, and
+                    // the alternative is worse than none: the editor would check
+                    // every call against whichever declaration came last and
+                    // refuse the ones that reach the others.
+                    match overload {
+                        true => {
+                            self.functions.remove(&decl.name);
+                            self.overloaded.insert(decl.name.clone());
+                        }
+                        false if !self.overloaded.contains(&decl.name) => {
+                            self.functions.insert(decl.name.clone(), Rc::clone(decl));
+                        }
+                        false => {}
+                    }
                     self.declare(&decl.body.stmts);
                 }
                 StmtKind::Class {
@@ -117,10 +137,10 @@ impl<'a> Infer<'a> {
                 } => {
                     let info = ClassInfo {
                         parent: parent.as_ref().map(|var| var.name.clone()),
-                        methods: methods
-                            .iter()
-                            .map(|decl| (decl.name.clone(), Rc::clone(decl)))
-                            .collect(),
+                        // A name several methods share is left out, for the
+                        // reason a `fn` is: there is no one declaration to
+                        // answer about.
+                        methods: overloading(methods),
                         fields: fields
                             .iter()
                             .map(|field| (field.name.clone(), field.visibility))
@@ -711,13 +731,18 @@ impl<'a> Infer<'a> {
     /// Records `name` in the innermost scope, visible from `from` onward.
     /// What a condition proves about a name, if it proves anything.
     ///
-    /// `val is string` narrows `val`, and so does the left of an `&&` — `if x is
-    /// string && len(x) > 0` is the form that makes the guard worth writing, and
+    /// `val is string` narrows `val`, and so does the left of an `and` — `if x is
+    /// string and len(x) > 0` is the form that makes the guard worth writing, and
     /// it would be a strange rule that narrowed the first and not the second.
     ///
     /// Only a bare name is narrowed. `user.name is string` proves something too,
     /// but a field is not a binding this pass can shadow — and a narrowing that
     /// survived an intervening assignment to `user` would be worse than none.
+    ///
+    /// And only a *positive* `is`. `val is not string` is a `Not` over the node
+    /// matched below, so it falls through to `None` — which is right: what it
+    /// proves is a fact about the other branch, and this pass narrows the block
+    /// a condition guards rather than the one it skips.
     fn narrowed(&mut self, cond: &Expr) -> Option<(String, Type)> {
         match &cond.kind {
             ExprKind::Is { value, ty } => match &value.kind {
@@ -857,7 +882,7 @@ impl<'a> Infer<'a> {
 
             ExprKind::Call { callee, args } => {
                 for arg in args {
-                    self.expr(arg);
+                    self.expr(&arg.value);
                 }
                 self.call(callee)
             }
@@ -904,6 +929,48 @@ impl<'a> Infer<'a> {
                 // A name assigned a second type holds neither from here on.
                 // Recorded against the binding rather than against this
                 // expression, because it is the *name* the answer changes for.
+                if let ExprKind::Var(var) = &target.kind {
+                    self.reassign(&var.name, target.span.start, &ty);
+                }
+                ty
+            }
+
+            // `a op= b` produces whatever `a op b` does, which for a class is
+            // whatever its `op add` chose to answer — so the honest answer is
+            // the one the binary operator gives, and the name is narrowed to it
+            // for the same reason a plain assignment narrows.
+            ExprKind::AssignOp { target, op, value } => {
+                let held = self.expr(target);
+                let operand = self.expr(value);
+                let ty = binary(*op, &held, &operand);
+                if let ExprKind::Var(var) = &target.kind {
+                    self.reassign(&var.name, target.span.start, &ty);
+                }
+                ty
+            }
+
+            // `a and= b` and its two siblings answer with one side or the
+            // other, and which one is a run-time question — so the type is the
+            // two joined, exactly as for `a ?? b`. `??=` is the one worth
+            // saying: the left arrives without its `nil`, because the whole
+            // point of the form is that the `nil` case is the one that assigns.
+            ExprKind::AssignShort { target, op, value } => {
+                let held = self.expr(target);
+                let operand = self.expr(value);
+                let ty = match (op, held) {
+                    // The left arrives without its `nil`: the whole point of
+                    // `??=` is that the `nil` case is the one that assigns, so
+                    // whichever side answers, the result is not `nil`. Same
+                    // reasoning as the `??` arm above, and the same `Unknown`,
+                    // which says nothing about what survives it.
+                    (ShortAssignOp::Coalesce, Type::Class(class)) => Type::Class(ClassType {
+                        nullable: false,
+                        ..class
+                    })
+                    .join(operand),
+                    (ShortAssignOp::Coalesce, _) => Type::Unknown,
+                    (_, held) => held.join(operand),
+                };
                 if let ExprKind::Var(var) = &target.kind {
                     self.reassign(&var.name, target.span.start, &ty);
                 }
@@ -1069,6 +1136,24 @@ fn joined(types: impl Iterator<Item = Type>) -> Option<Type> {
         .filter(Type::is_known)
 }
 
+/// A class's methods by name, dropping every name more than one of them shares.
+///
+/// The editor's view of an overloaded member: nothing. Which declaration a call
+/// reaches is decided from the argument *values*, so a pass working from the
+/// source has no single answer to give — and giving one of them would make it
+/// refuse the calls that reach the others.
+fn overloading(methods: &[Rc<FnDecl>]) -> HashMap<String, Rc<FnDecl>> {
+    let mut found: HashMap<String, Rc<FnDecl>> = HashMap::new();
+    let mut shared: HashSet<&str> = HashSet::new();
+    for decl in methods {
+        if found.insert(decl.name.clone(), Rc::clone(decl)).is_some() {
+            shared.insert(decl.name.as_str());
+        }
+    }
+    found.retain(|name, _| !shared.contains(name.as_str()));
+    found
+}
+
 /// One level, so a caller that wants the whole tree recurses. A `Vec` of borrows
 /// rather than an iterator because the shapes differ enough that an iterator
 /// would be a hand-written enum of six cases.
@@ -1088,12 +1173,16 @@ fn children(expr: &Expr) -> Vec<&Expr> {
         ExprKind::Dict(pairs) => pairs.iter().flat_map(|(k, v)| [k, v]).collect(),
         ExprKind::Unary { rhs, .. } => vec![rhs],
         ExprKind::Binary { lhs, rhs, .. } | ExprKind::Logical { lhs, rhs, .. } => vec![lhs, rhs],
-        ExprKind::Call { callee, args } => std::iter::once(callee.as_ref()).chain(args).collect(),
+        ExprKind::Call { callee, args } => std::iter::once(callee.as_ref())
+            .chain(args.iter().map(|arg| &arg.value))
+            .collect(),
         ExprKind::Index { target, index } => vec![target, index],
         ExprKind::Slice { target, start, end } => std::iter::once(target.as_ref())
             .chain([start, end].into_iter().flatten().map(|bound| bound.as_ref()))
             .collect(),
         ExprKind::Field { target, .. } => vec![target],
-        ExprKind::Assign { target, value } => vec![target, value],
+        ExprKind::Assign { target, value }
+        | ExprKind::AssignOp { target, value, .. }
+        | ExprKind::AssignShort { target, value, .. } => vec![target, value],
     }
 }

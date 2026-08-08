@@ -1,4 +1,5 @@
 use crate::error::{ErrorKind, QuinceError, Raised, Result};
+use crate::syntax::ast::{BinaryOp, ShortAssignOp};
 use crate::syntax::token::{DocBlock, Span, Token, TokenKind};
 
 /// An error for text that does not tokenise.
@@ -81,39 +82,59 @@ impl<'a> Lexer<'a> {
                 // type and a `??` rather than as two nullability marks, so the
                 // parser can refuse it as one mistake with both characters in
                 // hand.
-                '?' if self.eat('?') => TokenKind::QuestionQuestion,
+                '?' if self.eat('?') => match self.eat('=') {
+                    true => TokenKind::AssignShort(ShortAssignOp::Coalesce),
+                    false => TokenKind::QuestionQuestion,
+                },
                 '?' if self.eat('.') => TokenKind::QuestionDot,
                 '?' => TokenKind::Question,
                 ';' => TokenKind::Semi,
 
-                '+' => TokenKind::Plus,
-                '-' => TokenKind::Minus,
-                '*' => TokenKind::Star,
-                '/' if self.eat('/') => TokenKind::SlashSlash,
-                '/' => TokenKind::Slash,
-                '%' => TokenKind::Percent,
+                // The longest form first at every step, which is what makes
+                // `**=` a compound assignment rather than a `**` followed by an
+                // `=`, and `//=` a compound assignment rather than the start of
+                // a comment. `assign_op` is the second half of each of these.
+                //
+                // `++` and `--` come before the compound assignments for the
+                // same reason, so `i++` is one token rather than a `+` looking
+                // for an `=`. The cost is that `a - -b` needs its space:
+                // `a--b` munches the pair, exactly as it does in C.
+                '+' if self.eat('+') => TokenKind::PlusPlus,
+                '-' if self.eat('-') => TokenKind::MinusMinus,
+                '+' => self.assign_op(BinaryOp::Add, TokenKind::Plus),
+                '-' => self.assign_op(BinaryOp::Sub, TokenKind::Minus),
+                '*' if self.eat('*') => self.assign_op(BinaryOp::Pow, TokenKind::StarStar),
+                '*' => self.assign_op(BinaryOp::Mul, TokenKind::Star),
+                '/' if self.eat('/') => self.assign_op(BinaryOp::FloorDiv, TokenKind::SlashSlash),
+                '/' => self.assign_op(BinaryOp::Div, TokenKind::Slash),
+                '%' => self.assign_op(BinaryOp::Rem, TokenKind::Percent),
 
                 '=' if self.eat('=') => TokenKind::Eq,
                 '=' => TokenKind::Assign,
                 '!' if self.eat('=') => TokenKind::Ne,
-                '!' => TokenKind::Not,
+                // `!=` and nothing else. Negation is `not` as of v0.8.1, and
+                // leaving `!` here as a token nothing accepts would push the
+                // report from the character to whatever followed it.
+                '!' => {
+                    return Err(syntax("`!` is not an operator", Span::new(start, self.pos))
+                        .with_help("negation is written `not` — `not found`, `not (a and b)`"));
+                }
+                // `<<=` before `<=`, or `a <<= 1` would lex as `<` and `<=`.
+                // Three characters beat two, which beat one, everywhere here.
+                '<' if self.eat('<') => self.assign_op(BinaryOp::Shl, TokenKind::Shl),
                 '<' if self.eat('=') => TokenKind::Le,
-                // Before the bare `<`, so `a << b` is a shift and not two
-                // comparisons — maximal munch, as everywhere else here.
-                '<' if self.eat('<') => TokenKind::Shl,
                 '<' => TokenKind::Lt,
+                '>' if self.eat('>') => self.assign_op(BinaryOp::Shr, TokenKind::Shr),
                 '>' if self.eat('=') => TokenKind::Ge,
-                '>' if self.eat('>') => TokenKind::Shr,
                 '>' => TokenKind::Gt,
 
-                '&' if self.eat('&') => TokenKind::AndAnd,
-                '|' if self.eat('|') => TokenKind::OrOr,
-                // Single-character forms are the bitwise operators as of v0.7.
-                // They used to be refused with "did you mean `&&`?", which was
-                // right while they meant nothing and is wrong now.
-                '&' => TokenKind::Amp,
-                '|' => TokenKind::Pipe,
-                '^' => TokenKind::Caret,
+                // `&` and `|` are the bitwise operators and nothing else. They
+                // were the single-character forms of `&&` and `||` until v0.8.1
+                // spelled those `and` and `or`, and the whole point of the move
+                // is that there is no longer a pair to mistype one of.
+                '&' => self.assign_op(BinaryOp::BitAnd, TokenKind::Amp),
+                '|' => self.assign_op(BinaryOp::BitOr, TokenKind::Pipe),
+                '^' => self.assign_op(BinaryOp::BitXor, TokenKind::Caret),
                 '~' => TokenKind::Tilde,
                 '"' | '\'' => self.string(start, c)?,
                 c if c.is_ascii_digit() => self.number(start)?,
@@ -151,6 +172,18 @@ impl<'a> Lexer<'a> {
         let c = self.peek()?;
         self.pos += c.len_utf8();
         Some(c)
+    }
+
+    /// `op=` if an `=` follows, and `plain` otherwise.
+    ///
+    /// Every compound assignment is this one line, which is the point: `a op= b`
+    /// is one rule, and thirteen near-copies of the `if self.eat('=')` would be
+    /// thirteen chances to attach the wrong operator to one of them.
+    fn assign_op(&mut self, op: BinaryOp, plain: TokenKind) -> TokenKind {
+        match self.eat('=') {
+            true => TokenKind::AssignOp(op),
+            false => plain,
+        }
     }
 
     /// Consumes `expected` if it is next, reporting whether it did.
@@ -208,6 +241,26 @@ impl<'a> Lexer<'a> {
             self.advance();
         }
         let word = &self.src[start..self.pos];
+
+        // `and=` and `or=`, which are the two compound assignments spelled with
+        // letters and so are the two the symbol path above never sees. Munched
+        // here for the same reason `+=` is munched there, and with the same
+        // adjacency rule: `a and= b` is the assignment, `a and = b` is not.
+        // `and==` is `and` followed by a comparison, which is why the character
+        // after the `=` is checked as well.
+        let short = match word {
+            "and" => Some(ShortAssignOp::And),
+            "or" => Some(ShortAssignOp::Or),
+            _ => None,
+        };
+        if let Some(op) = short
+            && self.peek() == Some('=')
+            && self.peek_next() != Some('=')
+        {
+            self.advance();
+            return TokenKind::AssignShort(op);
+        }
+
         TokenKind::keyword(word).unwrap_or_else(|| TokenKind::Ident(word.to_string()))
     }
 
@@ -305,6 +358,7 @@ fn is_ident_continue(c: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::syntax::ast::{BinaryOp, ShortAssignOp};
 
     /// Tokenizes to kinds only, dropping the trailing `Eof`.
     fn kinds(src: &str) -> Vec<TokenKind> {
@@ -334,18 +388,114 @@ mod tests {
     #[test]
     fn two_char_operators_win_over_one() {
         assert_eq!(
-            kinds("== = != ! <= < >= > && ||"),
+            kinds("== = != <= < >= >"),
             vec![
                 TokenKind::Eq,
                 TokenKind::Assign,
                 TokenKind::Ne,
-                TokenKind::Not,
                 TokenKind::Le,
                 TokenKind::Lt,
                 TokenKind::Ge,
                 TokenKind::Gt,
-                TokenKind::AndAnd,
-                TokenKind::OrOr,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_bare_bang_says_to_write_not() {
+        // `!=` keeps the character; nothing else does. Refused here rather than
+        // lexed into a token the parser has no rule for, so the caret lands on
+        // the `!` instead of on whatever came after it.
+        let err = Lexer::new("if !found { }").tokenize().expect_err("`!` is gone");
+        assert!(err.message.contains("`!` is not an operator"), "{}", err.message);
+        assert_eq!(kinds("a != b").len(), 3);
+    }
+
+    #[test]
+    fn the_logical_operators_are_words() {
+        assert_eq!(
+            kinds("a and b or not c"),
+            vec![
+                TokenKind::Ident("a".into()),
+                TokenKind::And,
+                TokenKind::Ident("b".into()),
+                TokenKind::Or,
+                TokenKind::Not,
+                TokenKind::Ident("c".into()),
+            ]
+        );
+        // And are whole words, so a name that starts with one is still a name.
+        assert_eq!(
+            kinds("android ordinal nothing"),
+            vec![
+                TokenKind::Ident("android".into()),
+                TokenKind::Ident("ordinal".into()),
+                TokenKind::Ident("nothing".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_increments_win_over_the_compound_assignments() {
+        // `++` before `+=` for the same reason `<<=` is checked before `<=`:
+        // the longest form first at every step. The cost is that `a - -b` needs
+        // its space, which is the price C pays too.
+        assert_eq!(
+            kinds("i++ j-- k += 1"),
+            vec![
+                TokenKind::Ident("i".into()),
+                TokenKind::PlusPlus,
+                TokenKind::Ident("j".into()),
+                TokenKind::MinusMinus,
+                TokenKind::Ident("k".into()),
+                TokenKind::AssignOp(BinaryOp::Add),
+                TokenKind::Int(1),
+            ]
+        );
+        assert_eq!(
+            kinds("a--b"),
+            vec![
+                TokenKind::Ident("a".into()),
+                TokenKind::MinusMinus,
+                TokenKind::Ident("b".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_short_circuiting_assignments_munch_their_equals() {
+        // `and=` and `or=` are the two compound assignments spelled with
+        // letters, so they are munched in the identifier path rather than the
+        // symbol one — and the same adjacency rule applies: `and=` is the
+        // assignment and `and ==` is a word followed by a comparison.
+        assert_eq!(
+            kinds("a and= b or= c ??= d"),
+            vec![
+                TokenKind::Ident("a".into()),
+                TokenKind::AssignShort(ShortAssignOp::And),
+                TokenKind::Ident("b".into()),
+                TokenKind::AssignShort(ShortAssignOp::Or),
+                TokenKind::Ident("c".into()),
+                TokenKind::AssignShort(ShortAssignOp::Coalesce),
+                TokenKind::Ident("d".into()),
+            ]
+        );
+        assert_eq!(
+            kinds("a and== b"),
+            vec![
+                TokenKind::Ident("a".into()),
+                TokenKind::And,
+                TokenKind::Eq,
+                TokenKind::Ident("b".into()),
+            ]
+        );
+        // `??` still lexes on its own, and `?` before it still does too.
+        assert_eq!(
+            kinds("a ?? b"),
+            vec![
+                TokenKind::Ident("a".into()),
+                TokenKind::QuestionQuestion,
+                TokenKind::Ident("b".into()),
             ]
         );
     }
@@ -525,28 +675,28 @@ mod tests {
     }
 
     #[test]
-    fn a_single_ampersand_is_the_bitwise_operator() {
-        // It used to be refused with "did you mean `&&`?", which was the right
-        // answer while it meant nothing. v0.7 gives it a meaning, so the
-        // suggestion would now be wrong — and the pair still wins on munch.
+    fn an_ampersand_is_only_ever_the_bitwise_operator() {
+        // It was refused with "did you mean `&&`?" while it meant nothing, then
+        // shared the character with `&&` once v0.7 gave it one. Now `&&` is
+        // gone and the character is unambiguous — which is most of why the
+        // logical operators became words.
         assert_eq!(
-            kinds("a & b && c"),
+            kinds("a & b | c"),
             vec![
                 TokenKind::Ident("a".into()),
                 TokenKind::Amp,
                 TokenKind::Ident("b".into()),
-                TokenKind::AndAnd,
+                TokenKind::Pipe,
                 TokenKind::Ident("c".into()),
             ]
         );
         assert_eq!(
-            kinds("a | b || c"),
+            kinds("a && b"),
             vec![
                 TokenKind::Ident("a".into()),
-                TokenKind::Pipe,
+                TokenKind::Amp,
+                TokenKind::Amp,
                 TokenKind::Ident("b".into()),
-                TokenKind::OrOr,
-                TokenKind::Ident("c".into()),
             ]
         );
     }
@@ -567,6 +717,81 @@ mod tests {
                 TokenKind::Ident("d".into()),
             ]
         );
+    }
+
+    #[test]
+    fn the_longest_operator_wins_at_every_step() {
+        // Three characters beat two, which beat one. `<<=` is the case worth
+        // pinning: `<=` was already there and had to stop being checked first,
+        // or `a <<= 1` would lex as `<` followed by `<=`.
+        assert_eq!(
+            kinds("a <<= 1 >>= 2 <= 3 << 4"),
+            vec![
+                TokenKind::Ident("a".into()),
+                TokenKind::AssignOp(BinaryOp::Shl),
+                TokenKind::Int(1),
+                TokenKind::AssignOp(BinaryOp::Shr),
+                TokenKind::Int(2),
+                TokenKind::Le,
+                TokenKind::Int(3),
+                TokenKind::Shl,
+                TokenKind::Int(4),
+            ]
+        );
+        // And `**=` beats `**`, which beats `*=`, which beats `*`.
+        assert_eq!(
+            kinds("a **= b ** c *= d * e"),
+            vec![
+                TokenKind::Ident("a".into()),
+                TokenKind::AssignOp(BinaryOp::Pow),
+                TokenKind::Ident("b".into()),
+                TokenKind::StarStar,
+                TokenKind::Ident("c".into()),
+                TokenKind::AssignOp(BinaryOp::Mul),
+                TokenKind::Ident("d".into()),
+                TokenKind::Star,
+                TokenKind::Ident("e".into()),
+            ]
+        );
+        // `//=` is the floor-division one, not a comment: `#` opens those.
+        assert_eq!(
+            kinds("a //= 2"),
+            vec![
+                TokenKind::Ident("a".into()),
+                TokenKind::AssignOp(BinaryOp::FloorDiv),
+                TokenKind::Int(2),
+            ]
+        );
+    }
+
+    #[test]
+    fn every_compound_assignment_carries_its_own_operator() {
+        // The payload is what the desugaring reaches, so one attached to the
+        // wrong operator would make `a &= b` mean `a = a | b` with nothing
+        // anywhere raising a word about it.
+        let table = [
+            ("+=", BinaryOp::Add),
+            ("-=", BinaryOp::Sub),
+            ("*=", BinaryOp::Mul),
+            ("/=", BinaryOp::Div),
+            ("//=", BinaryOp::FloorDiv),
+            ("%=", BinaryOp::Rem),
+            ("**=", BinaryOp::Pow),
+            ("&=", BinaryOp::BitAnd),
+            ("|=", BinaryOp::BitOr),
+            ("^=", BinaryOp::BitXor),
+            ("<<=", BinaryOp::Shl),
+            (">>=", BinaryOp::Shr),
+        ];
+        for (written, op) in table {
+            assert_eq!(
+                kinds(&format!("a {written} 1"))[1],
+                TokenKind::AssignOp(op),
+                "`{written}` lexes wrongly"
+            );
+            // And reads back as it was written, which is what a report quotes.
+            assert_eq!(TokenKind::AssignOp(op).to_string(), written);
+        }
     }
 
     #[test]

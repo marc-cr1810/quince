@@ -164,7 +164,7 @@ fn the_operators_the_language_decides_are_decided() {
     assert_eq!(class_of("let a = \"x\" + \"y\"", "a").as_deref(), Some("string"));
     assert_eq!(class_of("let a = [1] + [2]", "a").as_deref(), Some("list"));
     assert_eq!(class_of("let a = 1 < 2", "a").as_deref(), Some("bool"));
-    assert_eq!(class_of("let a = !1", "a").as_deref(), Some("bool"));
+    assert_eq!(class_of("let a = not 1", "a").as_deref(), Some("bool"));
     assert_eq!(class_of("let a = -1", "a").as_deref(), Some("int"));
 }
 
@@ -307,7 +307,7 @@ fn a_class_extending_a_builtin_inherits_what_its_methods_return() {
 fn a_method_a_program_wrote_beats_the_table_it_inherited() {
     // Dispatch asks the class first, so inference has to as well — a
     // `sort` written here is not the builtin's `sort`.
-    let src = "class Odd extends list {\n  op init() { super.init() }\n  fn sort() { return \"nope\" }\n}\nlet o = Odd()\nlet a = o.sort()\n";
+    let src = "class Odd extends list {\n  op init() { super.init() }\n  override fn sort() { return \"nope\" }\n}\nlet o = Odd()\nlet a = o.sort()\n";
     assert_eq!(class_of(src, "a").as_deref(), Some("string"));
 }
 
@@ -497,10 +497,10 @@ fn an_is_guard_narrows_the_name_for_its_block() {
 
 #[test]
 fn a_guard_narrows_through_the_left_of_an_and() {
-    // `if x is string && len(x) > 0` is the form that makes a guard worth
+    // `if x is string and len(x) > 0` is the form that makes a guard worth
     // writing, so narrowing that and not a bare `is` would be a strange rule.
     let src = "fn probe(v: string?) {\n\
-                   if v is string && len(v) > 0 {\n\
+                   if v is string and len(v) > 0 {\n\
                        let inside = v\n\
                    }\n\
                }\n";

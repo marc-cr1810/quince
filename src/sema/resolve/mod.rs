@@ -20,10 +20,12 @@ mod walk;
 mod tests;
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use crate::error::{ErrorKind, QuinceError, Raised, Result};
 use crate::runtime::class::BUILTINS;
-use crate::syntax::ast::{ImportNames, Slot, Stmt, StmtKind};
+use crate::sema::overload;
+use crate::syntax::ast::{FnDecl, ImportNames, Op, Slot, Stmt, StmtKind};
 use crate::syntax::token::Span;
 
 /// An error for a program that parses and still is not one.
@@ -40,15 +42,54 @@ pub(super) fn declaration(message: impl Into<String>, span: Span) -> Raised {
 mod alias;
 
 pub fn resolve(program: &mut [Stmt]) -> Result<()> {
+    resolve_within(program, &Prior::default())
+}
+
+/// The same, told what an earlier compilation left bound at the top level.
+///
+/// One caller: the REPL, which compiles a line at a time into an interpreter
+/// that is still holding everything the lines before it declared. Without this
+/// each entry is resolved against an empty world, so a class declared on line
+/// one is a class this pass cannot see on line two — and every rule that reads
+/// a hierarchy quietly declines to answer.
+///
+/// The prior world is read off what is *bound*, not off accumulated text. A REPL
+/// is not a file being appended to: a name may be redeclared, and a line that
+/// raised half way through still bound what it got to. What is in the globals is
+/// what the next line can actually reach, and it is the only honest answer.
+pub fn resolve_within(program: &mut [Stmt], prior: &Prior) -> Result<()> {
     // Before anything reads a type, so no later pass ever sees an alias.
     alias::expand(program)?;
     let mut resolver = Resolver::default();
+    resolver.seed(prior);
     // The top level has no scope, so `scoped` never runs over it — which is why
     // nothing used to register the classes declared there or look at the names
     // its bindings take. Slots are unaffected: `declare_slot` returns early
     // without a scope, because a global is bound by name at run time.
     resolver.declare_all(program, &[])?;
     resolver.stmts(program)
+}
+
+/// What an earlier compilation left bound at the top level.
+///
+/// Declarations rather than names, because every rule that wants this wants to
+/// read one: `override` needs a superclass's members, overloading needs the
+/// signatures already under a name, and default construction needs what a
+/// constructor requires.
+#[derive(Default)]
+pub struct Prior {
+    /// The declarations bound under each top-level name, which is more than one
+    /// where the name is overloaded.
+    pub functions: HashMap<String, Vec<Rc<FnDecl>>>,
+    pub classes: HashMap<String, PriorClass>,
+}
+
+/// A class an earlier compilation bound.
+pub struct PriorClass {
+    pub parent: Option<String>,
+    /// The methods the class's own body declared — not the ones it inherited,
+    /// which belong to whichever class wrote them and are found by walking.
+    pub methods: Vec<Rc<FnDecl>>,
 }
 
 /// The builtin type called `name`, if there is one.
@@ -67,6 +108,111 @@ pub(super) fn builtin_named(name: &str) -> Option<&'static str> {
 /// Whether `name` is one of the types the language defines.
 fn is_builtin_type(name: &str) -> bool {
     builtin_named(name).is_some()
+}
+
+/// Whether the builtin type `name` seeds a method called `member`.
+///
+/// The other half of what a class can inherit, and readable at resolution
+/// because a seed table is a `static`: `class Email extends string` inherits
+/// `upper` from a list written in Rust rather than from a class body this pass
+/// walked, and `override` has to be required there for the same reason it is
+/// required anywhere.
+fn builtin_declares(name: &str, member: &str) -> bool {
+    BUILTINS
+        .iter()
+        .find(|builtin| builtin.name() == name)
+        .is_some_and(|builtin| {
+            builtin
+                .seed()
+                .methods
+                .iter()
+                .any(|(seeded, _)| *seeded == member)
+        })
+}
+
+/// The fewest arguments any of these declarations' constructors needs.
+///
+/// `None` when none of them is a constructor, which is a class that inherits
+/// whatever is above it — see [`Resolver::default_constructible`].
+fn required_arguments(methods: &[Rc<FnDecl>]) -> Option<usize> {
+    methods
+        .iter()
+        .filter(|decl| decl.op == Some(Op::Init))
+        .map(|init| {
+            init.params
+                .iter()
+                .filter(|param| !param.receiver && param.default.is_none())
+                .count()
+        })
+        .min()
+}
+
+/// Refuses two declarations sharing a name that cannot be told apart.
+///
+/// `whose` names what they share — a class, an `extend` block, a scope — and is
+/// what the report says they collided in. Every pair is compared rather than
+/// each against the one before it, because a defaulted parameter makes a
+/// declaration several signatures and the collision may be with any of them.
+pub(super) fn refuse_clashes(decls: &[&Rc<FnDecl>], name: &str, whose: &str) -> Result<()> {
+    for (index, later) in decls.iter().enumerate() {
+        for earlier in &decls[..index] {
+            let Some(clash) = overload::clash(earlier, later) else {
+                continue;
+            };
+            return Err(
+                declaration(clash.describe(name, whose), later.name_span)
+                    .with_help(clash.help()),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// What the superclass chain has to say about a member a subclass declared.
+///
+/// Three answers and not two, because "nothing declares it" and "nothing here
+/// can tell" have to be acted on differently: the first refuses a stray
+/// `override`, and the second must not. A parent imported from another module is
+/// the case — `extends` names a binding, and this pass has evaluated nothing —
+/// so the check is allowed to miss an override that should have been written and
+/// is never allowed to accuse one that was.
+pub(super) enum Inherited {
+    /// A superclass declares it, and what its declaration said.
+    Found { owner: String, member: Member },
+    /// The chain is known all the way up and nothing in it declares this.
+    Absent,
+    /// Some class in the chain is not one this pass can see.
+    Unknown,
+}
+
+/// What a class's declaration of one method said about it.
+///
+/// The two words a *later* declaration has to read: `final`, which forbids a
+/// subclass replacing it, and `const`, which is what a `const` method is allowed
+/// to call. Both are properties of the declaration rather than of the body, so
+/// they are recorded when the class is collected and never revisited.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Member {
+    pub(super) guarded: bool,
+    pub(super) constant: bool,
+}
+
+/// The `const fn` currently being resolved, if the walk is inside one.
+///
+/// Held rather than passed because the check is asked at two unrelated
+/// expression arms — an assignment and a call — several layers below the
+/// declaration that set it.
+#[derive(Clone, Debug)]
+pub(super) struct Constness {
+    /// How deep the scope stack was when the body was entered.
+    ///
+    /// What separates "a local this function made" from "something that was
+    /// already there". A name bound at or beyond this depth is the function's
+    /// own and may be reassigned; anything shallower is state the caller can
+    /// see, which is exactly what `const` promises not to touch.
+    pub(super) base: usize,
+    /// How the declaration reads in a report — `const fn distance_to`.
+    pub(super) named: String,
 }
 
 #[derive(Debug)]
@@ -112,6 +258,30 @@ pub(super) struct Resolver {
     /// `super.init`. Names rather than classes, because nothing has been
     /// evaluated yet.
     pub(super) parents: HashMap<String, String>,
+    /// The methods each class declares, and whether the declaration wrote
+    /// `final` in front of one. Flat and never popped, for the reason
+    /// [`Resolver::parents`] is.
+    ///
+    /// Methods only. A field is not a member a subclass *overrides* — the
+    /// evaluator lets one shadow a parent's field and reads the nearer
+    /// declaration, which is a different rule with a different reason — so
+    /// requiring `override` on a redeclared field would be inventing one.
+    pub(super) members: HashMap<String, HashMap<String, Member>>,
+    /// The class whose body is being resolved, for the one question a method's
+    /// own class is the answer to: whether `self.m(…)` reaches a `const` method.
+    pub(super) in_class: Option<String>,
+    /// How many parameters each class's own `op init` requires, for the classes
+    /// that declare one. Flat and never popped, as [`Resolver::parents`] is.
+    ///
+    /// Absent means the class declares no constructor and inherits whatever is
+    /// above it, which is what makes this a chain walk rather than a lookup —
+    /// see [`Resolver::default_constructible`].
+    pub(super) constructors: HashMap<String, usize>,
+    /// The enclosing `const fn`, if there is one. See [`Constness`].
+    pub(super) constness: Option<Constness>,
+    /// Declarations an earlier compilation bound under each top-level name.
+    /// Empty for a file, which is compiled all at once. See [`Prior`].
+    pub(super) prior: HashMap<String, Vec<Rc<FnDecl>>>,
     /// Whether the body being resolved is an `op init`. Cleared for a `fn` nested
     /// inside one, which could run at any time and so is not construction.
     pub(super) in_init: bool,
@@ -155,7 +325,13 @@ impl Resolver {
         // below would only catch the half of the mistake that happens to come
         // second in the file.
         for stmt in stmts.iter() {
-            if let StmtKind::Class { name, parent, .. } = &stmt.kind {
+            if let StmtKind::Class {
+                name,
+                parent,
+                methods,
+                ..
+            } = &stmt.kind
+            {
                 self.declare_type(name, stmt.span)?;
                 // Recorded in the same pass, so a class can extend one declared
                 // further down the file — which the evaluator refuses, but as an
@@ -163,18 +339,59 @@ impl Resolver {
                 if let Some(parent) = parent {
                     self.parents.insert(name.clone(), parent.name.clone());
                 }
+                // And its members, for the same reason: `override` is a claim
+                // about a class that may be written below this one.
+                self.members.insert(
+                    name.clone(),
+                    methods
+                        .iter()
+                        .map(|decl| {
+                            (
+                                decl.name.clone(),
+                                Member {
+                                    guarded: decl.guarded,
+                                    constant: decl.constant,
+                                },
+                            )
+                        })
+                        .collect(),
+                );
+                // The fewest arguments any of the class's constructors needs.
+                // "What a call has to supply": the receiver is not the program's
+                // to write, a defaulted parameter is one the call may leave out,
+                // and a class declaring `op init(n: int)` beside `op init()` is
+                // default-constructible on the strength of the second.
+                if let Some(required) = required_arguments(methods) {
+                    self.constructors.insert(name.clone(), required);
+                }
             }
         }
 
         for (name, mutable, span) in predeclare {
             self.declare(name, *mutable, *span)?;
         }
+        // Which `fn` names this scope declares more than once, and whether the
+        // several declarations may stand together. Done before the loop below,
+        // because the answer is about the *set* and the loop sees one at a time.
+        let overloaded = self.overloaded(stmts)?;
+        let mut bound: HashSet<String> = HashSet::new();
         for stmt in stmts {
-            match &stmt.kind {
+            match &mut stmt.kind {
                 StmtKind::Let { name, bind, .. } => {
                     self.declare(name, bind.mutable(), stmt.span)?
                 }
-                StmtKind::Fn { decl, .. } => self.declare(&decl.name, false, stmt.span)?,
+                StmtKind::Fn { decl, overload, .. } => {
+                    // The first declaration of a name binds it; the rest join
+                    // what it bound. Only one slot is reserved, which is what
+                    // makes them one name holding several declarations rather
+                    // than several names.
+                    *overload =
+                        overloaded.contains(&decl.name) && !bound.insert(decl.name.clone());
+                    if !*overload {
+                        self.refuse_prior_ambiguity(decl)?;
+                        self.declare(&decl.name, false, stmt.span)?;
+                    }
+                }
                 StmtKind::Class { name, .. } => self.declare_slot(name, false, stmt.span)?,
                 // Through the same check as every other binding, so `import math`
                 // twice, or beside a `let math`, is the one mistake that already
@@ -212,6 +429,91 @@ impl Resolver {
             }
         }
         Ok(())
+    }
+
+    /// Records what an earlier compilation bound, so this one can read it.
+    ///
+    /// Deliberately *not* `globals`: that set is what refuses a name declared
+    /// twice, and a REPL entry redeclaring one is the ordinary thing to do. What
+    /// is seeded is only what the declaration rules read.
+    fn seed(&mut self, prior: &Prior) {
+        for (name, decls) in &prior.functions {
+            self.prior.insert(name.clone(), decls.clone());
+        }
+        for (name, class) in &prior.classes {
+            self.types.insert(name.clone());
+            if let Some(parent) = &class.parent {
+                self.parents.insert(name.clone(), parent.clone());
+            }
+            self.members.insert(
+                name.clone(),
+                class
+                    .methods
+                    .iter()
+                    .map(|decl| {
+                        (
+                            decl.name.clone(),
+                            Member {
+                                guarded: decl.guarded,
+                                constant: decl.constant,
+                            },
+                        )
+                    })
+                    .collect(),
+            );
+            if let Some(required) = required_arguments(&class.methods) {
+                self.constructors.insert(name.clone(), required);
+            }
+        }
+    }
+
+    /// Refuses a declaration an earlier compilation's cannot be told apart from.
+    ///
+    /// A *duplicate* signature is allowed and is the reason this is not simply
+    /// `refuse_clashes`: retyping a declaration to change it is what a REPL is
+    /// for, and the evaluator replaces the signature it matches. An ambiguity is
+    /// not a redefinition of anything — it is a second declaration that some
+    /// call would reach equally well — so it is refused here exactly as it is
+    /// inside one compilation.
+    fn refuse_prior_ambiguity(&self, decl: &Rc<FnDecl>) -> Result<()> {
+        let Some(earlier) = self.prior.get(&decl.name) else {
+            return Ok(());
+        };
+        for bound in earlier {
+            if let Some(clash @ overload::Clash::Ambiguous { .. }) = overload::clash(bound, decl) {
+                return Err(declaration(
+                    clash.describe(&decl.name, "an earlier entry"),
+                    decl.name_span,
+                )
+                .with_help(clash.help()));
+            }
+        }
+        Ok(())
+    }
+
+    /// The `fn` names this statement list declares more than once, having
+    /// checked that the declarations can stand together.
+    ///
+    /// Grouped first and checked as a group, because §3.5's rules are about a
+    /// *set*: an identical signature is a duplicate, and two that some argument
+    /// would reach equally well are an ambiguity. Neither question can be asked
+    /// of one declaration at a time.
+    fn overloaded(&self, stmts: &[Stmt]) -> Result<HashSet<String>> {
+        let mut seen: HashMap<&str, Vec<&Rc<FnDecl>>> = HashMap::new();
+        for stmt in stmts {
+            if let StmtKind::Fn { decl, .. } = &stmt.kind {
+                seen.entry(decl.name.as_str()).or_default().push(decl);
+            }
+        }
+        let mut overloaded = HashSet::new();
+        for (name, decls) in seen {
+            if decls.len() == 1 {
+                continue;
+            }
+            refuse_clashes(&decls, name, "this scope")?;
+            overloaded.insert(name.to_string());
+        }
+        Ok(overloaded)
     }
 
     /// Records that `name` belongs to a type, refusing the builtin type names.
@@ -319,5 +621,102 @@ impl Resolver {
 
     pub(super) fn slot_of(&self, name: &str) -> Slot {
         self.find(name).map_or(Slot::Global, |(slot, _)| slot)
+    }
+
+    /// Whether `let x: T` with no initializer has something to put there.
+    ///
+    /// A class is default-constructible when the first `op init` up its chain
+    /// takes nothing — or when there is no `op init` anywhere, which is the
+    /// synthesized `op init() {}` of §3.4 stated as the absence of a reason to
+    /// refuse. Declaring `op init(val: int)` suppresses that: a class that
+    /// requires an argument means it.
+    ///
+    /// Only `list` and `dict` answer among the builtins, and they answer with
+    /// `[]` and `{}`. There is no honest default for an `int` — zero is a value
+    /// somebody chose — which is the whole reason v0.7 refused the form.
+    ///
+    /// Answers `true` for a class this pass cannot see, for the reason
+    /// [`Inherited::Unknown`] exists: a check that has evaluated nothing must be
+    /// allowed to miss, and never to accuse.
+    pub(super) fn default_constructible(&self, ty: &str) -> bool {
+        let mut seen = HashSet::new();
+        let mut name = ty;
+        loop {
+            if !seen.insert(name) {
+                return true;
+            }
+            if let Some(builtin) = builtin_named(name) {
+                return matches!(builtin, "list" | "dict");
+            }
+            if !self.members.contains_key(name) {
+                return true;
+            }
+            if let Some(&required) = self.constructors.get(name) {
+                return required == 0;
+            }
+            match self.parents.get(name) {
+                Some(up) => name = up,
+                None => return true,
+            }
+        }
+    }
+
+    /// What the chain starting at `parent` declares under `member`.
+    ///
+    /// Walks names rather than classes, because nothing has been evaluated. A
+    /// builtin ends the walk: its seed table is the last word, and it descends
+    /// from nothing.
+    ///
+    /// `excluding` is the class doing the asking, when the question is about
+    /// what it *inherits*: `class A extends B` with `class B extends A` is a
+    /// cycle the evaluator refuses, and a walk that came back round to `A` would
+    /// find `A`'s own method and report it as overriding itself. `None` asks
+    /// about the whole chain including `from`, which is what a `self.m(…)` inside
+    /// the class wants.
+    pub(super) fn inherited(
+        &self,
+        excluding: Option<&str>,
+        from: &str,
+        member: &str,
+    ) -> Inherited {
+        let mut seen: HashSet<&str> = excluding.into_iter().collect();
+        let mut name = from;
+        loop {
+            // The other half of the same guard: a cycle that does not include
+            // the asking class still has to terminate. `builtin_base` carries it
+            // for the same reason.
+            if !seen.insert(name) {
+                return Inherited::Absent;
+            }
+            if let Some(declared) = self.members.get(name) {
+                if let Some(&found) = declared.get(member) {
+                    return Inherited::Found {
+                        owner: name.to_string(),
+                        member: found,
+                    };
+                }
+            } else if let Some(builtin) = builtin_named(name) {
+                return match builtin_declares(builtin, member) {
+                    // A builtin's method table is written in Rust and carries
+                    // neither word. Guarding one, or promising it is pure, would
+                    // be a decision taken in a seed table, and none of them
+                    // takes it.
+                    true => Inherited::Found {
+                        owner: builtin.to_string(),
+                        member: Member {
+                            guarded: false,
+                            constant: false,
+                        },
+                    },
+                    false => Inherited::Absent,
+                };
+            } else {
+                return Inherited::Unknown;
+            }
+            match self.parents.get(name) {
+                Some(up) => name = up,
+                None => return Inherited::Absent,
+            }
+        }
     }
 }

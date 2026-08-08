@@ -29,5 +29,16 @@ Floating-point numbers use standard double precision. Non-float values are packe
 
 ## 2. `Weak[T]` Non-Tracing Reference Handles
 
+**`Weak[T]` is language surface owned by no milestone** — a built-in generic type with a
+method, in the same category as `list[T]` or `range`. `BYTECODE_VM_DESIGN.md` §12 lists it as
+unscheduled. The representation below is this phase's; the type, its interaction with `is`,
+and what happens when a `Weak[T]` outlives its arena need a milestone document first.
+
+Worth noting that Quince's collector does not *need* weak references the way a reference
+counted runtime does — DESIGN.md's whole argument for arena-and-handles is that cycles are
+just integers pointing at each other and a mark phase collects them. `Weak[T]` is a caching
+and observer-list convenience here, not a correctness requirement, which is an argument for
+scheduling it on its own merits rather than as a rider on a GC rework.
+
 - `Weak[T]` holds a non-owning handle to a heap object.
 - **Cycle Prevention**: Resolving `weak_ref.upgrade(): Option[T]` returns `nil` when the referenced object has been collected by GC.

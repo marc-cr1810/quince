@@ -1,0 +1,8 @@
+# An unannotated parameter matches anything, so a class may have at most one
+# unannotated overload for a name.
+class Sink {
+    fn take(anything) { }
+    fn take(whatever) { }
+}
+
+Sink().take(1)

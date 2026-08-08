@@ -74,9 +74,15 @@ change.
 
 ## Documentation
 
-`DESIGN.md` is the language's design and the reasoning behind it. The milestone
-documents beside it — `V0_7_TYPE_SYSTEM_DESIGN.md` and the rest — record what
-each release added and, more usefully, which alternatives were rejected and why.
+`docs/` is the reference manual — [grammar](docs/grammar.md), the
+[type system](docs/type_system.md), [classes](docs/classes_and_objects.md),
+[control flow](docs/control_flow_and_errors.md), the [library](docs/stdlib.md), and the
+[tooling](docs/tooling_and_architecture.md).
+
+`docs/roadmap/` is the design record. [`DESIGN.md`](docs/roadmap/DESIGN.md) holds the
+language's design and the reasoning behind it; the milestone documents beside it record what
+each release adds and, more usefully, which alternatives were rejected and why.
+[`docs/roadmap/README.md`](docs/roadmap/README.md) is the index.
 
 ## Development
 

@@ -1,0 +1,19 @@
+# A class that declares `op mul` has said what `*` means to it, so an operand it
+# does not take is a refusal rather than a fall-through to what a list normally
+# does with `*` — which is nothing.
+#
+# Reported at the expression with both operands labelled. The parameter-mismatch
+# report an ordinary call gets would underline a parameter nobody wrote, in a
+# declaration somewhere else.
+extend list {
+    public op mul(factor: int): list {
+        let doubled: list = []
+        for val in self {
+            doubled.push(val * factor)
+        }
+        return doubled
+    }
+}
+
+print([1, 2, 3] * 2)
+print([1, 2, 3] * 2.4)

@@ -144,12 +144,27 @@ impl Interp {
             if let Some(field) = class.fields.iter().find(|field| field.name == name) {
                 return Some((field.visibility, id));
             }
-            if let Some(Value::Function(func)) = class.methods.get(name) {
-                return Some((self.heap.function(*func).decl.visibility, id));
+            // Every declaration under one name shares its reach: the parser
+            // takes the visibility word off the same header the name is on, and
+            // an overload set that was half `private` would be a member the
+            // outside could reach by choosing its argument types.
+            if let Some(found) = class.methods.get(name)
+                && let Some(Value::Function(func)) = self.first_candidate(found)
+            {
+                return Some((self.heap.function(func).decl.visibility, id));
             }
             current = class.parent;
         }
         None
+    }
+
+    /// The first declaration behind a name, which is the value itself unless
+    /// the name is overloaded.
+    pub(super) fn first_candidate(&self, value: &Value) -> Option<Value> {
+        match value {
+            Value::Overload(id) => self.heap.overload(*id).first().cloned(),
+            other => Some(other.clone()),
+        }
     }
 
     /// Whether `class` is `ancestor`, or descends from it.
@@ -302,13 +317,32 @@ impl Interp {
             ));
         }
 
-        if self.extensions.contains_key(&(id, name.to_string())) {
-            return Err(QuinceError::new(
-                format!("{} has already been extended with `{name}`", type_name()),
-                span,
-            )
-            .with_kind(ErrorKind::Type)
-            .with_help("the first `extend` won, and this one would replace it just as silently"));
+        // Two declarations under one name are two declarations when their
+        // parameter types differ — §3.5 — and the `extend` blocks they are
+        // written in may be in different modules. What is refused is the pair a
+        // call could not tell apart, which is the same rule a class body follows
+        // and is checked with the same code.
+        if let Some(earlier) = self.extensions.get(&(id, name.to_string())) {
+            let against: Vec<Rc<FnDecl>> = match earlier {
+                Value::Overload(set) => self
+                    .heap
+                    .overload(*set)
+                    .iter()
+                    .filter_map(|value| self.declaration(value))
+                    .collect(),
+                other => self.declaration(other).into_iter().collect(),
+            };
+            if let Some(clash) = against
+                .iter()
+                .find_map(|earlier| crate::sema::overload::clash(earlier, decl))
+            {
+                return Err(QuinceError::new(
+                    clash.describe(name, &format!("`{}`", type_name())),
+                    span,
+                )
+                .with_kind(ErrorKind::Type)
+                .with_help(clash.help()));
+            }
         }
         Ok(())
     }

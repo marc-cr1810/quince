@@ -858,7 +858,7 @@ public class QuantumCircuit {
     }
 
     private fn validate_qubit(q: int) {
-        if q < 0 || q >= self.num_qubits {
+        if q < 0 or q >= self.num_qubits {
             throw CircuitValidationError("out of bounds")
         }
     }

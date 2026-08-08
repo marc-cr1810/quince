@@ -383,8 +383,23 @@ if val is string {
 - Evaluating `l is list[string]` compares the header's descriptor in O(1). It does not
   perform an O(N) element scan, which is what avoids both Java-style erasure and the cost
   of checking.
-- **`is` is exact, not variant.** `l1 is list[any?]` is `false` for a `list[int]`, matching
-  §4.1's invariance. A test meaning "some list" is spelled `l1 is list`.
+- **`is` compares arguments by the same table an annotation does.** ~~`is` is exact, not
+  variant: `l1 is list[any?]` is `false` for a `list[int]`.~~ **Superseded in v0.8.** Exactness
+  was not invariance, it was a second table — and it disagreed with the first about a type the
+  language has only one of. §4.1 makes `any` the top type, so `l1 is list[any]` and
+  `l1 is list[any?]` are `true` for a `list[int]`, exactly as a `list[any]` parameter accepts
+  one. Invariance is untouched: `l1 is list[int?]` is still `false`.
+
+  A test meaning "some list" may be spelled `l1 is list` or `l1 is list[any?]`, and those are
+  the same test — an argument nobody wrote is `any?` (§3.10), so the two are one type. Keeping
+  them distinguishable was the whole content of the exactness rule, and it cost more than it
+  bought.
+- **What `is` still does not do**, both because it asks what a value *is* rather than what it
+  may become: no `float` widening (`1 is float` is `false`), and no element scan. A container
+  nothing has described has no element type, so it reads as every argument elided — a
+  `list[any?]` and nothing narrower. The annotation on a `let` is what *decides* an unstamped
+  container's type, which is why `let xs: list[int] = [1, 2]` is still accepted and why
+  `holds` walks elements where this does not.
 
 ### 3.10 Built-in container types (`list[T]`, `dict[K, V]`)
 
@@ -478,7 +493,7 @@ declaration and waits for v0.9, which is where there is something for it to abbr
 | `bool` | `true`, `false` | everything else |
 | `list[T]` | lists whose every item holds as `T` | non-lists, lists with an item that does not |
 | `dict[K, V]` | dicts whose keys hold as `K` and values as `V` | anything else |
-| `dict[K]` | that, with values unconstrained | non-dicts, a key that does not hold as `K` |
+| `dict[K]` | shorthand for `dict[K, any?]` — values unconstrained | non-dicts, a key that does not hold as `K`, a `dict[K, V]` asked for |
 | `UserClass` | instances of it or a subclass | unrelated classes, `nil` |
 | `UserClass?` | that, and `nil` | unrelated classes |
 | `any` (or `_`) | any non-nil value | `nil` |

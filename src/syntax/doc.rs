@@ -433,6 +433,7 @@ mod tests {
             span: Span::new(0, 0),
             ty: None,
             bind: crate::syntax::ast::BindKind::Let,
+            default: None,
             receiver: false,
         }];
         let err = doc.check(&params).expect_err("a drifted name is refused");
@@ -453,6 +454,7 @@ mod tests {
                 span: Span::new(0, 0),
                 ty: None,
                 bind: crate::syntax::ast::BindKind::Let,
+                default: None,
                 receiver: false,
             })
             .collect::<Vec<_>>();
@@ -471,6 +473,7 @@ mod tests {
                 span: Span::new(0, 0),
                 ty: None,
                 bind: crate::syntax::ast::BindKind::Let,
+                default: None,
                 receiver: true,
             },
             Param {
@@ -478,6 +481,7 @@ mod tests {
                 span: Span::new(0, 0),
                 ty: None,
                 bind: crate::syntax::ast::BindKind::Let,
+                default: None,
                 receiver: false,
             },
         ];

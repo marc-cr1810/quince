@@ -45,6 +45,17 @@ pub fn compile_tokens(
     Ok(program)
 }
 
+/// The same, resolved against what an interpreter already has bound.
+///
+/// For the REPL, which compiles a line at a time into a session that is still
+/// holding everything the lines before it declared. A file is compiled all at
+/// once and uses [`compile`], where the prior world is empty by definition.
+pub fn compile_within(source: &str, prior: &sema::resolve::Prior) -> Result<Vec<Stmt>> {
+    let mut program = Parser::new(Lexer::new(source).tokenize()?).parse()?;
+    sema::resolve::resolve_within(&mut program, prior)?;
+    Ok(program)
+}
+
 /// Lexes and parses a source file leniently, recovering from errors where possible.
 pub fn compile_recovering(source: &str) -> (Vec<Stmt>, Vec<crate::error::Raised>) {
     let tokens = match Lexer::new(source).tokenize() {

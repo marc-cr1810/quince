@@ -3,8 +3,8 @@ if "" { print("no") } else { print("empty string is falsy") }
 if [] { print("no") } else { print("empty list is falsy") }
 if nil { print("no") } else { print("nil is falsy") }
 if 1 { print("one is truthy") }
-print(!0)
-print(!1)
-print(nil || "default")
-print("set" || "default")
-print(1 && 2)
+print(not 0)
+print(not 1)
+print(nil or "default")
+print("set" or "default")
+print(1 and 2)

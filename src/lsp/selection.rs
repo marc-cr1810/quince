@@ -122,7 +122,7 @@ fn visit_expr_selection(source: &str, expr: &Expr, offset: u32, spans: &mut Vec<
         ExprKind::Call { callee, args } => {
             visit_expr_selection(source, callee, offset, spans);
             for arg in args {
-                visit_expr_selection(source, arg, offset, spans);
+                visit_expr_selection(source, &arg.value, offset, spans);
             }
         }
         ExprKind::Field { target, .. } => visit_expr_selection(source, target, offset, spans),
@@ -130,7 +130,9 @@ fn visit_expr_selection(source: &str, expr: &Expr, offset: u32, spans: &mut Vec<
         ExprKind::Binary { lhs, rhs, .. }
         | ExprKind::Logical { lhs, rhs, .. }
         | ExprKind::Coalesce { lhs, rhs }
-        | ExprKind::Assign { target: lhs, value: rhs } => {
+        | ExprKind::Assign { target: lhs, value: rhs }
+        | ExprKind::AssignOp { target: lhs, value: rhs, .. }
+        | ExprKind::AssignShort { target: lhs, value: rhs, .. } => {
             visit_expr_selection(source, lhs, offset, spans);
             visit_expr_selection(source, rhs, offset, spans);
         }

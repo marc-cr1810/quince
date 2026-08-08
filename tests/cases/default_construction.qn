@@ -1,0 +1,56 @@
+# v0.7 refuses `let x: int` because there is no honest default for an int. This
+# relaxes it for the types that can answer: a class with no constructor to run,
+# one whose constructor takes nothing, and the two builtin containers.
+class Logger {
+    private let entries: list[string]
+
+    public op init() {
+        # `entries` is already [] before this body runs.
+    }
+
+    public fn log(msg: string) {
+        self.entries.push(msg)
+    }
+
+    public fn history(): list[string] {
+        return self.entries
+    }
+}
+
+let logger: Logger
+let items: list[int]
+let config: dict[string, string]
+
+logger.log("ready")
+logger.log("steady")
+print(logger.history())
+print(items, config)
+
+# A class declaring no `op init` at all is default-constructible, which is the
+# same reasoning that already gives a builtin subclass an implicit one.
+class Marker {}
+let m: Marker
+print(type(m))
+
+# The annotation still holds afterwards: the empty list remembers what it was
+# built to hold, so a later `push` is checked against it.
+items.push(1)
+print(items)
+try {
+    items.push("two")
+} catch e {
+    print("caught:", e.message)
+}
+
+# Unannotated and uninitialized is untouched — a dynamic binding holding `nil`.
+let anything
+print(anything)
+
+class Box {
+    let contents: list
+    let label
+    fn describe(): string {
+        return string(self.label) + " " + string(self.contents)
+    }
+}
+print(Box().describe())

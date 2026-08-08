@@ -1,0 +1,81 @@
+# `override` is required where a member replaces a superclass one, and refused
+# where it does not — the two halves are what make the word worth reading. The
+# refusals are the `err_override_` cases beside this one.
+class Vector2D {
+    op init(x: float, y: float) {
+        self.x = x
+        self.y = y
+    }
+
+    # No subclass may replace this one.
+    public final op string(): string {
+        return "(" + string(self.x) + ", " + string(self.y) + ")"
+    }
+
+    public op add(other: Vector2D): Vector2D {
+        return Vector2D(self.x + other.x, self.y + other.y)
+    }
+
+    fn length_squared(): float {
+        return self.x * self.x + self.y * self.y
+    }
+}
+
+class NamedVector extends Vector2D {
+    op init(name: string, x: float, y: float) {
+        super.init(x, y)
+        self.name = name
+    }
+
+    # `super` reaches the original, which is what makes an override an addition
+    # rather than a rewrite.
+    public override op add(other: Vector2D): Vector2D {
+        let sum = super.add(other)
+        return NamedVector(self.name, sum.x, sum.y)
+    }
+
+    override fn length_squared(): float {
+        return super.length_squared() * 2.0
+    }
+}
+
+let a = Vector2D(1.0, 2.0)
+let b = NamedVector("b", 3.0, 4.0)
+
+print(a + b)
+print(b + a)
+print(a.length_squared(), b.length_squared())
+
+# `op string` is final, so a `NamedVector` prints through `Vector2D`'s.
+print(b)
+
+# An `op init` is exempt: every constructor in a hierarchy replaces its
+# parent's, so requiring the word would mean writing it on every subclass.
+class Origin extends Vector2D {
+    op init() {
+        super.init(0.0, 0.0)
+    }
+}
+print(Origin())
+
+# A method added under a name no superclass declares needs no word either.
+class Tagged extends Vector2D {
+    op init(x: float, y: float) {
+        super.init(x, y)
+    }
+    fn tag(): string {
+        return "tagged " + string(self)
+    }
+}
+print(Tagged(5.0, 6.0).tag())
+
+# The words are the same ones a binding takes. `final` on a member is that
+# implementation bound once, exactly as `final` on a name is that value.
+class Base {
+    final fn kind(): string { return "base" }
+    fn open(): string { return "open" }
+}
+class Derived extends Base {
+    override fn open(): string { return "derived " + super.open() }
+}
+print(Derived().kind(), Derived().open())

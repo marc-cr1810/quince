@@ -1,0 +1,8 @@
+let calls = 0
+
+const fn counted(n: int): int {
+    calls = calls + 1
+    return n
+}
+
+print(counted(1), calls)

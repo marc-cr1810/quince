@@ -7,23 +7,82 @@
 
 use crate::error::Result;
 use crate::syntax::ast::{
-    self, BindKind, FieldDecl, FnDecl, ImportName, ImportNames, Op, Openness, Param, Stmt, StmtKind,
-    TypeExpr, TypeName, Var,
+    self, BindKind, Expr, ExprKind, FieldDecl, FnDecl, ImportName, ImportNames, Op, Openness, Param,
+    Stmt, StmtKind, TypeExpr, TypeName, Var,
 };
 use crate::syntax::doc::Doc;
-use crate::syntax::parser::{Modifiers, Parser, declaration, syntax};
-use crate::syntax::token::{Token, TokenKind};
+use crate::syntax::parser::{Modifiers, Parser, Site, declaration, is_member_modifier, syntax};
+use crate::syntax::token::{Span, Token, TokenKind};
+
+/// What the declaration starting at the current token turns out to be.
+///
+/// Read by the class body, by the `extend` body, and by statement dispatch,
+/// which have the same problem for the same reason: `final` and `const` open a
+/// binding *and* qualify a method, and `final` opens a class as well, so the
+/// first word says nothing about which form this is.
+///
+/// [`Member::Neither`] rather than an `Option`, because "none of the three" is a
+/// report each caller writes in its own words and not a case for them to invent
+/// one for.
+pub(super) enum Member {
+    /// A binding: a field in a class body, a `let` at statement level.
+    Field,
+    Method,
+    Class,
+    Neither,
+}
 
 impl Parser {
+    /// Reads ahead over the modifier words to see which kind of member follows.
+    ///
+    /// Consumes nothing. The ambiguity is entirely `final` and `const`, which
+    /// are both binding keywords and both method modifiers, so the answer is
+    /// whatever the first word that is *neither* a visibility word nor a
+    /// modifier turns out to be. `let` settles it on its own — nothing but a
+    /// field starts with it.
+    pub(super) fn member_kind(&self) -> Member {
+        let mut at = self.pos;
+        // Whether a word that could have opened a field has gone past. If the
+        // run ends at something that is not `fn` or `op`, that word was the
+        // binding keyword after all.
+        let mut binding = false;
+        loop {
+            let Some(token) = self.tokens.get(at) else {
+                return Member::Neither;
+            };
+            match token.kind {
+                TokenKind::Public | TokenKind::Private | TokenKind::Protected => at += 1,
+                TokenKind::Const | TokenKind::Final => {
+                    binding = true;
+                    at += 1;
+                }
+                TokenKind::Let => return Member::Field,
+                TokenKind::Fn | TokenKind::Op => return Member::Method,
+                // `complete` and `sealed` introduce nothing else, so they need
+                // no run of their own — reaching one means a class either way.
+                TokenKind::Class | TokenKind::Complete | TokenKind::Sealed => {
+                    return Member::Class;
+                }
+                _ if is_member_modifier(&token.kind) => at += 1,
+                _ if binding => return Member::Field,
+                _ => return Member::Neither,
+            }
+        }
+    }
+
     pub(super) fn fn_stmt(&mut self) -> Result<Stmt> {
         let start = self.peek().span;
-        let modifiers = self.modifiers("a function")?;
-        let decl = self.fn_decl(false, modifiers)?;
+        let modifiers = self.declaration_modifiers("a function")?;
+        let decl = self.fn_decl(Site::Free, modifiers)?;
         Ok(Stmt {
             span: start.to(decl.body.span),
             kind: StmtKind::Fn {
                 decl: std::rc::Rc::new(decl),
                 slot: None,
+                // Set by the resolver, which is the only pass that sees the
+                // whole scope and so the only one that can say whether another
+                // declaration got here first.
+                overload: false,
             },
         })
     }
@@ -39,12 +98,42 @@ impl Parser {
     /// An `op` is validated here rather than in the resolver because everything
     /// the check needs is local: the name, the span, and the parameters, all in
     /// hand before the body is parsed.
-    pub(super) fn fn_decl(&mut self, method: bool, modifiers: Modifiers) -> Result<FnDecl> {
+    pub(super) fn fn_decl(&mut self, site: Site, modifiers: Modifiers) -> Result<FnDecl> {
         let Modifiers {
             doc,
             visibility,
             vis_span,
+            constant,
+            overrides,
+            guarded,
+            explicit,
         } = modifiers;
+        let method = site.takes_receiver();
+
+        // `override` and `final` are claims about a superclass, so they can only
+        // be written where there is one to make a claim about. Refused here
+        // rather than at the resolver because the answer needs nothing but the
+        // position — and because the resolver, seeing `override` on a plain
+        // `fn`, could only report it as overriding nothing, which describes the
+        // symptom rather than the mistake.
+        if !site.inherits() {
+            for (word, span) in [("override", overrides), ("final", guarded)] {
+                let Some(span) = span else { continue };
+                return Err(declaration(
+                    format!("`{word}` means nothing on {}", site.what()),
+                    span,
+                )
+                .with_help(match site {
+                    Site::Extension =>
+                        "an extension adds to a type and never replaces part of it, so nothing \
+                         it declares can override or be overridden",
+                    _ =>
+                        "both words are about a superclass member — they belong on a method or \
+                         an `op` declared in a class body",
+                }));
+            }
+        }
+
         let token = self.advance();
         let keyword = token.kind.clone();
         let is_op = keyword == TokenKind::Op;
@@ -97,6 +186,9 @@ impl Parser {
                 // Rebindable, as it always was. Refusing `self = x` is the
                 // resolver's, and it refuses it by name rather than by kind.
                 bind: BindKind::Let,
+                // Nobody omits the receiver, so there is nothing to default it
+                // to — it is filled by the call itself.
+                default: None,
                 receiver: true,
             });
         }
@@ -116,11 +208,33 @@ impl Parser {
             };
             let (name, span) = self.expect_ident("in the parameter list")?;
             let ty = self.annotation()?;
+            let default = match self.eat(&TokenKind::Assign) {
+                true => Some(self.expression()?),
+                false => None,
+            };
+            // A mandatory parameter after a defaulted one is refused: there is
+            // no call that could reach it positionally, so it is not a parameter
+            // with a surprising rule, it is a parameter with no way to be
+            // filled. Caught here because the list is what the caret wants.
+            if default.is_none()
+                && let Some(earlier) = params.iter().rev().find(|param| param.default.is_some())
+            {
+                return Err(declaration(
+                    format!("`{name}` has no default, but `{}` before it does", earlier.name),
+                    span,
+                )
+                .with_help(
+                    "every call that omitted the earlier one would have to omit this one too, \
+                     and then there is nothing to give it — move it in front, or give it a \
+                     default of its own",
+                ));
+            }
             params.push(Param {
                 name,
                 span,
                 ty,
                 bind,
+                default,
                 receiver: false,
             });
             if !self.eat(&TokenKind::Comma) {
@@ -154,6 +268,33 @@ impl Parser {
                         op.name()
                     ),
                 }));
+            }
+        }
+
+        // `explicit` turns off the coercion a single-parameter constructor gives
+        // its class, so it is meaningless on anything that is not one. Both
+        // halves are checked here, where the op and the parameter list are in
+        // hand and the report can say which of the two failed.
+        if let Some(at) = explicit {
+            let taken = params.len() - usize::from(method);
+            let wrong = match op {
+                Some(Op::Init) => (taken != 1).then(|| {
+                    format!("`op init` takes {taken} parameters, and only a one-parameter constructor coerces")
+                }),
+                _ => Some(format!(
+                    "`{}` is not a constructor",
+                    match op {
+                        Some(op) => format!("op {}", op.name()),
+                        None => format!("fn {name}"),
+                    }
+                )),
+            };
+            if let Some(wrong) = wrong {
+                return Err(declaration(format!("`explicit` means nothing here — {wrong}"), at)
+                    .with_help(
+                        "`explicit` refuses the implicit coercion of `let x: T = value`, and \
+                         only a one-parameter `op init` offers one to refuse",
+                    ));
             }
         }
 
@@ -210,6 +351,10 @@ impl Parser {
             op,
             returns,
             visibility,
+            constant: constant.is_some(),
+            overrides: overrides.is_some(),
+            guarded: guarded.is_some(),
+            explicit: explicit.is_some(),
             doc,
         })
     }
@@ -231,8 +376,10 @@ impl Parser {
 
         let (name, name_span) = self.expect_ident(&format!("after {word}"))?;
         let ty = self.annotation()?;
-        self.expect(TokenKind::Assign, &format!("in a {word} field"))?;
-        let value = self.expression()?;
+        let (value, defaulted) = match self.eat(&TokenKind::Assign) {
+            true => (self.expression()?, false),
+            false => (Self::default_for(ty.as_ref(), name_span), true),
+        };
         self.end_of_statement()?;
 
         Ok(FieldDecl {
@@ -242,8 +389,42 @@ impl Parser {
             visibility: modifiers.visibility,
             ty,
             value,
+            defaulted,
             doc: modifiers.doc,
         })
+    }
+
+    /// What a declaration with no `= value` holds.
+    ///
+    /// `nil` where nothing was annotated, which is the dynamic binding v0.7
+    /// already describes; otherwise a call to the annotated type with no
+    /// arguments, which is exactly what `let logger: Logger` means. Built as an
+    /// ordinary [`ExprKind::Call`] rather than as a node of its own, so that the
+    /// resolver gives its callee a slot and the evaluator constructs it through
+    /// the path every other construction takes.
+    ///
+    /// The *base* name, so `list[int]` reaches `list()`. What the arguments say
+    /// is enforced afterwards, when the annotation is checked against the value
+    /// — which is also what stamps the descriptor on the empty list.
+    ///
+    /// A type this cannot name gets `nil`, and the resolver refuses the
+    /// declaration before the expression can run. `any` is the case: it is not
+    /// a class and there is nothing to call.
+    pub(super) fn default_for(ty: Option<&TypeExpr>, span: Span) -> Expr {
+        let named = match ty.map(|ty| &ty.name) {
+            Some(TypeName::Named(name)) => name.clone(),
+            _ => return Expr { kind: ExprKind::Nil, span },
+        };
+        Expr {
+            kind: ExprKind::Call {
+                callee: Box::new(Expr {
+                    kind: ExprKind::Var(Var::new(named)),
+                    span,
+                }),
+                args: Vec::new(),
+            },
+            span,
+        }
     }
 
     /// Refuses a field a body has already declared.
@@ -377,34 +558,6 @@ impl Parser {
         Ok((!doc.is_empty()).then_some(doc))
     }
 
-    /// Refuses a name a body has already declared.
-    ///
-    /// A class body is a table keyed by name, so a second `fn a` overwrites the
-    /// first — silently, with the one it replaced still sitting on the page above
-    /// it. The resolver already refuses two `fn`s in a *function* for the same
-    /// reason and in almost the same words; a class body simply is not a scope,
-    /// so there was nowhere for that check to live until here.
-    ///
-    /// `fn` and `op` share the table, so `fn string` beside `op string` is the
-    /// same collision and gets the same answer.
-    pub(super) fn refuse_duplicate(
-        declared: &[std::rc::Rc<FnDecl>],
-        decl: &FnDecl,
-        whose: &str,
-    ) -> Result<()> {
-        if !declared.iter().any(|seen| seen.name == decl.name) {
-            return Ok(());
-        }
-        Err(declaration(
-            format!("{whose} already declares `{}`", decl.name),
-            decl.name_span,
-        )
-        .with_help(
-            "the second would replace the first without a word — rename it, or delete the \
-             one you meant to be rid of",
-        ))
-    }
-
     /// `alias ScoreTable = dict[string, int]`.
     ///
     /// Parsed like a binding and resolved like nothing: an alias declares a
@@ -477,34 +630,25 @@ impl Parser {
         let mut methods = Vec::new();
         let mut fields = Vec::new();
         while !self.check(&TokenKind::RBrace) && !self.at_end() {
-            // The visibility word comes first and says nothing about which of the
-            // two this is, so it is read before the branch and handed to whichever
-            // side takes it. The doc block is read from the word, for the reason
-            // the class header reads its own from the modifier.
-            let member = self.peek().clone();
-            let (visibility, vis_span) = self.visibility_word();
-            match self.peek().kind {
-                TokenKind::Fn | TokenKind::Op => {
-                    let modifiers = Modifiers {
-                        doc: Self::doc_of(&member, "a function")?,
-                        visibility,
-                        vis_span,
-                    };
-                    let decl = self.fn_decl(true, modifiers)?;
-                    Self::refuse_duplicate(&methods, &decl, &name)?;
+            // Which of the two this is cannot be read off the next word: `final`
+            // and `const` introduce a field *and* qualify a method, so the
+            // decision waits for the first token that is neither a visibility
+            // word nor a modifier. The look ahead consumes nothing, because
+            // each side reads its own modifiers and the two do not take the
+            // same set.
+            match self.member_kind() {
+                Member::Method => {
+                    let modifiers = self.declaration_modifiers("a function")?;
+                    let decl = self.fn_decl(Site::Member, modifiers)?;
                     methods.push(std::rc::Rc::new(decl));
                 }
-                TokenKind::Let | TokenKind::Final | TokenKind::Const => {
-                    let modifiers = Modifiers {
-                        doc: Self::doc_of(&member, "a field")?,
-                        visibility,
-                        vis_span,
-                    };
+                Member::Field => {
+                    let modifiers = self.modifiers("a field")?;
                     let field = self.field_decl(modifiers)?;
                     Self::refuse_duplicate_field(&fields, &field, &name)?;
                     fields.push(field);
                 }
-                _ => {
+                Member::Class | Member::Neither => {
                     return Err(syntax(
                         format!("expected a field or a method, found {}", self.peek().kind),
                         self.peek().span,
@@ -549,16 +693,21 @@ impl Parser {
         while !self.check(&TokenKind::RBrace) && !self.at_end() {
             // Refused here rather than at the class, because everything the check
             // needs is in hand: the keyword and its span, before a body is parsed.
-            // The same reason `op` at the top level is caught in this file.
-            if !self.check(&TokenKind::Fn) && !self.check(&TokenKind::Op) {
+            // The same reason `op` at the top level is caught in this file. An
+            // extension declares no fields — there is no instance of its own to
+            // put one on — so anything that is not a method is this report.
+            if !matches!(self.member_kind(), Member::Method) {
                 return Err(syntax(
                     format!("expected a method or op, found {}", self.peek().kind),
                     self.peek().span,
+                )
+                .with_help(
+                    "an `extend` block adds methods to a type that already exists — it declares \
+                     no fields, because it allocates nothing to hold one",
                 ));
             }
-            let modifiers = self.modifiers("a function")?;
-            let decl = self.fn_decl(true, modifiers)?;
-            Self::refuse_duplicate(&methods, &decl, &target)?;
+            let modifiers = self.declaration_modifiers("a function")?;
+            let decl = self.fn_decl(Site::Extension, modifiers)?;
             methods.push(std::rc::Rc::new(decl));
         }
         let end = self

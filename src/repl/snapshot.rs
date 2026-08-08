@@ -259,7 +259,9 @@ impl Snapshot {
 pub(crate) fn kind_of(value: &Value) -> Kind {
     match value {
         Value::Class(_) => Kind::Class,
-        Value::Function(_) | Value::Native(_) | Value::BoundMethod(_) => Kind::Function,
+        Value::Function(_) | Value::Overload(_) | Value::Native(_) | Value::BoundMethod(_) => {
+            Kind::Function
+        }
         Value::Module(_) => Kind::Module,
         _ => Kind::Variable,
     }

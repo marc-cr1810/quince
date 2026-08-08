@@ -596,7 +596,7 @@ fn visit_expr(source: &str, expr: &Expr, target: &str, ranges: &mut Vec<Range>) 
         ExprKind::Call { callee, args } => {
             visit_expr(source, callee, target, ranges);
             for arg in args {
-                visit_expr(source, arg, target, ranges);
+                visit_expr(source, &arg.value, target, ranges);
             }
         }
         ExprKind::Field { target: recv, name, .. } => {
@@ -611,7 +611,9 @@ fn visit_expr(source: &str, expr: &Expr, target: &str, ranges: &mut Vec<Range>) 
         ExprKind::Binary { lhs, rhs, .. }
         | ExprKind::Logical { lhs, rhs, .. }
         | ExprKind::Coalesce { lhs, rhs }
-        | ExprKind::Assign { target: lhs, value: rhs } => {
+        | ExprKind::Assign { target: lhs, value: rhs }
+        | ExprKind::AssignOp { target: lhs, value: rhs, .. }
+        | ExprKind::AssignShort { target: lhs, value: rhs, .. } => {
             visit_expr(source, lhs, target, ranges);
             visit_expr(source, rhs, target, ranges);
         }

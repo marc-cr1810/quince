@@ -1,0 +1,1 @@
+`const fn counted` may not reassign a name bound outside it

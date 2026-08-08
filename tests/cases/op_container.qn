@@ -8,7 +8,7 @@ class Range {
     }
     op len() { return self.to - self.from }
     op get(i) { return self.from + i }
-    op contains(n) { return n >= self.from && n < self.to }
+    op contains(n) { return n >= self.from and n < self.to }
     op iter() {
         final out = []
         let n = self.from

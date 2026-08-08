@@ -1,0 +1,11 @@
+# An `int` argument reaches `float` by widening and `int?` by widening, so
+# neither is preferred. A dispatch failure has to mean nothing matched, never
+# that two things did — so the pair is refused where it is written.
+#
+# Container overloads are *not* this case: a container that crossed an annotated
+# boundary carries what it was built to hold, so `list[int]` and `list[string]`
+# can be told apart. See `container_overloads.qn`.
+fn size(n: float): string { return "float" }
+fn size(n: int?): string { return "maybe int" }
+
+print(size(1))

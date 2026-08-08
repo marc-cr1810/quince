@@ -48,6 +48,7 @@ use crate::runtime::class::BUILTINS as BUILTIN_TYPES;
 use crate::runtime::env::Globals;
 use crate::runtime::heap::{Heap, ObjId, Object};
 use crate::runtime::value::Value;
+use crate::sema::resolve::{Prior, PriorClass};
 use crate::syntax::ast::{Slot, Stmt, StmtKind};
 use crate::syntax::token::TokenKind;
 
@@ -520,6 +521,73 @@ impl Interp {
         }
         self.temps.truncate(mark);
         Ok(last)
+    }
+
+    /// The declarations bound at the top level, for resolving the next entry.
+    ///
+    /// The REPL's answer to "what does the file so far say", read off what is
+    /// *bound* rather than off accumulated text — see
+    /// [`resolve_within`](crate::sema::resolve::resolve_within). A class
+    /// contributes only the methods its own body declared: `Function::owner` is
+    /// what tells those apart from the ones merged in from a superclass, which
+    /// belong to whichever class wrote them and are found by walking.
+    pub fn declarations(&self) -> Prior {
+        let mut prior = Prior::default();
+        for (name, value) in self.heap.globals(self.globals).iter() {
+            match value {
+                Value::Function(_) | Value::Overload(_) => {
+                    prior
+                        .functions
+                        .insert(name.to_string(), self.decls_of(value, None));
+                }
+                Value::Class(id) => {
+                    let class = self.heap.class(*id);
+                    let methods = class
+                        .methods
+                        .values()
+                        .flat_map(|entry| self.decls_of(entry, Some(*id)))
+                        .collect();
+                    prior.classes.insert(
+                        name.to_string(),
+                        PriorClass {
+                            parent: class.parent.map(|up| self.heap.class(up).name.clone()),
+                            methods,
+                        },
+                    );
+                }
+                _ => {}
+            }
+        }
+        prior
+    }
+
+    /// The declarations behind a bound name, which is one unless it is a set.
+    ///
+    /// `owner` keeps only the ones a particular class declared, which is what
+    /// separates a subclass's own methods from the inherited signatures folded
+    /// in beside them.
+    fn decls_of(
+        &self,
+        value: &Value,
+        owner: Option<ObjId>,
+    ) -> Vec<Rc<crate::syntax::ast::FnDecl>> {
+        let candidates = match value {
+            Value::Overload(id) => self.heap.overload(*id).to_vec(),
+            other => vec![other.clone()],
+        };
+        candidates
+            .iter()
+            .filter_map(|candidate| {
+                let Value::Function(id) = candidate else {
+                    return None;
+                };
+                let func = self.heap.function(*id);
+                match owner {
+                    Some(class) if func.owner != Some(class) => None,
+                    _ => Some(Rc::clone(&func.decl)),
+                }
+            })
+            .collect()
     }
 
     pub fn get_globals(&self) -> Vec<(String, Value)> {

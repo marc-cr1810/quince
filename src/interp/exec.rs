@@ -11,8 +11,10 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::error::{ErrorKind, QuinceError, Result};
+use crate::interp::call::Written;
 use crate::interp::error::an;
 use crate::interp::{Flow, Interp, resolved};
+use crate::sema::overload;
 use crate::runtime::class::Class;
 use crate::runtime::env::{self, Env};
 use crate::runtime::heap::{ObjId, Object};
@@ -35,6 +37,7 @@ impl Interp {
                 name,
                 name_span: _,
                 value,
+                defaulted: _,
                 bind,
                 ty,
                 visibility: _,
@@ -53,7 +56,7 @@ impl Interp {
                         value,
                         &format!("`{name}`"),
                         initializer.span,
-                        Some(initializer),
+                        Written::declared(initializer),
                     )?;
                 }
                 // Freezing before binding, so that a `const` can never be
@@ -82,15 +85,42 @@ impl Interp {
                 Ok(Flow::Normal)
             }
 
-            StmtKind::Fn { decl, slot } => {
+            StmtKind::Fn {
+                decl,
+                slot,
+                overload,
+            } => {
                 // Declared before the body ever runs, and closing over the scope
                 // it is declared in, so the function can call itself.
-                let func = self.heap.alloc(Object::Function(Function {
+                let func = Value::Function(self.heap.alloc(Object::Function(Function {
                     decl: Rc::clone(decl),
                     env,
                     owner: None,
-                }));
-                self.bind(slot, &decl.name, Value::Function(func), false, env);
+                })));
+                // The second and later declarations of a name join the set the
+                // first one bound. Which those are was decided at resolution —
+                // see `StmtKind::Fn::overload` — so a REPL entry redefining a
+                // function replaces it, and two `fn f` in one file do not.
+                let value = match overload {
+                    true => match self.held(slot, &decl.name, env) {
+                        Some(earlier) => self.also(&earlier, func),
+                        None => func,
+                    },
+                    // Not an overload *in this compilation*. In a file that is
+                    // the whole story — the resolver refuses a name declared
+                    // twice in one scope — but the REPL compiles a line at a
+                    // time, so two overloads typed on two lines each arrive as a
+                    // first declaration. Folding them makes the rule the same
+                    // either way: a signature already bound is replaced, and one
+                    // that is not joins what is there.
+                    false => match self.held(slot, &decl.name, env) {
+                        Some(earlier @ (Value::Function(_) | Value::Overload(_))) => {
+                            self.folded(func, earlier)
+                        }
+                        _ => func,
+                    },
+                };
+                self.bind(slot, &decl.name, value, false, env);
                 Ok(Flow::Normal)
             }
 
@@ -189,8 +219,13 @@ impl Interp {
                 // Methods close over that scope, exactly as a `fn` at the same
                 // position would. Nothing here reaches a safe point, so the
                 // functions are safe unrooted until the class owning them exists.
-                let mut table = HashMap::with_capacity(methods.len());
+                let mut table: HashMap<String, Value> = HashMap::with_capacity(methods.len());
                 let mut slots = Class::empty_slots();
+                // The functions this body declared, kept apart from the table:
+                // once the class exists each learns it is theirs, and a method
+                // inherited into an overload set below must *not* — its reach is
+                // the class that wrote it.
+                let mut declared: Vec<ObjId> = Vec::with_capacity(methods.len());
                 for decl in methods {
                     let func = Value::Function(self.heap.alloc(Object::Function(Function {
                         decl: Rc::clone(decl),
@@ -199,13 +234,43 @@ impl Interp {
                         // method's reach is its own class's.
                         owner: None,
                     })));
+                    declared.extend(func.handle());
+                    // Several declarations may share a name — v0.8 §3.5 — and
+                    // the resolver has already refused any pair a call could not
+                    // tell apart. What lands in the table is the set.
+                    let joined = match table.get(&decl.name) {
+                        Some(earlier) => self.also(earlier, func),
+                        None => func,
+                    };
                     // Every op lands in the table by name *and* in its slot. The
                     // name is what `super.init(msg)` reaches; the slot is what
                     // `Point(1, 2)` and `if p` reach, without hashing anything.
                     if let Some(op) = decl.op {
-                        slots[op.index()] = Some(func.clone());
+                        slots[op.index()] = Some(joined.clone());
                     }
-                    table.insert(decl.name.clone(), func);
+                    table.insert(decl.name.clone(), joined);
+                }
+
+                // An `override` replaces the one signature it matches, not the
+                // whole set: a subclass overriding `add(other: Vector)` leaves
+                // `add(scalar: float)` inherited and reachable. Done here rather
+                // than at the lookup, because `Class::method` answers with the
+                // first table that holds the name and cannot see past it.
+                //
+                // `op init` is the exception, as it is for `override`: every
+                // constructor in a hierarchy replaces its parent's outright —
+                // that is what `super.init` is for — so merging them would make
+                // `Deep(message)` reach `Error`'s constructor on a `Deep`.
+                if let Some(id) = parent {
+                    for (name, own) in table.iter_mut() {
+                        if name == Op::Init.name() {
+                            continue;
+                        }
+                        let Some(inherited) = self.heap.class(id).method(name, &self.heap) else {
+                            continue;
+                        };
+                        *own = self.folded(own.clone(), inherited);
+                    }
                 }
 
                 let mut class = Class {
@@ -230,6 +295,21 @@ impl Interp {
                 // `op eq` without restating it.
                 if let Some(id) = parent {
                     let inherited = self.heap.class(id).slots.clone();
+                    // The same per-signature merge the method table just took,
+                    // for the ops: a subclass that overrides one `op add` keeps
+                    // the other. A slot the subclass did not fill at all is the
+                    // plain copy-down `inherit_slots` does.
+                    for op in crate::syntax::ast::OPS {
+                        if *op == Op::Init {
+                            continue;
+                        }
+                        let (Some(own), Some(above)) =
+                            (class.slots[op.index()].clone(), inherited[op.index()].clone())
+                        else {
+                            continue;
+                        };
+                        class.slots[op.index()] = Some(self.folded(own, above));
+                    }
                     class.inherit_slots(&inherited);
                 }
 
@@ -239,13 +319,6 @@ impl Interp {
                 // which class that was. Done after rather than during, because a
                 // method's owner is the class object and the class object cannot
                 // be allocated before the table it holds.
-                let declared: Vec<ObjId> = self
-                    .heap
-                    .class(class)
-                    .methods
-                    .values()
-                    .filter_map(Value::handle)
-                    .collect();
                 for id in declared {
                     self.heap.function_mut(id).owner = Some(class);
                 }
@@ -296,9 +369,19 @@ impl Interp {
                         // adds to, so it reaches what any outsider reaches.
                         owner: None,
                     })));
-                    self.extensions.insert((id, decl.name.clone()), func.clone());
+                    // Overloads coexist across `extend` blocks as well as inside
+                    // one, which is what §3.5 means by "extensions coexist
+                    // across modules": what is already there under the name is
+                    // joined rather than replaced, and `may_extend` above is what
+                    // refused any pair a call could not tell apart.
+                    let key = (id, decl.name.clone());
+                    let joined = match self.extensions.get(&key) {
+                        Some(earlier) => self.also(&earlier.clone(), func),
+                        None => func,
+                    };
+                    self.extensions.insert(key, joined.clone());
                     if let Some(op) = decl.op {
-                        self.heap.class_mut(id).slots[op.index()] = Some(func);
+                        self.heap.class_mut(id).slots[op.index()] = Some(joined);
                     }
                 }
                 Ok(Flow::Normal)
@@ -540,6 +623,82 @@ impl Interp {
             .heap
             .alloc(Object::Env(Env::new(Some(env), block.slot_count)));
         self.exec_scoped(&block.stmts, scope)
+    }
+
+    /// The set `later` joins, given what the name already holds here.
+    ///
+    /// Both are declarations of this class's own, so neither replaces the other
+    /// — the resolver refused any pair a call could not tell apart.
+    fn also(&mut self, earlier: &Value, later: Value) -> Value {
+        let mut candidates = match earlier {
+            Value::Overload(id) => self.heap.overload(*id).to_vec(),
+            other => vec![other.clone()],
+        };
+        candidates.push(later);
+        Value::Overload(self.heap.alloc(Object::Overload(candidates)))
+    }
+
+    /// What a name reaches once `own` is laid over `existing`.
+    ///
+    /// Signature by signature: a declaration in `own` replaces the one in
+    /// `existing` it matches and leaves the rest reachable. `own` unchanged is
+    /// the answer whenever there is nothing left over, which is the
+    /// overwhelmingly common case.
+    ///
+    /// Two callers, and the rule is the same for both: a subclass laying its
+    /// methods over the ones it inherits, and a REPL line laying a declaration
+    /// over the one an earlier line bound.
+    ///
+    /// A native is never merged into. A builtin's methods are a static table
+    /// with no annotations to dispatch on, so a subclass declaring a method of
+    /// that name replaces it outright — which is what `override` already said.
+    fn folded(&mut self, own: Value, existing: Value) -> Value {
+        let mine = match &own {
+            Value::Overload(id) => self.heap.overload(*id).to_vec(),
+            other => vec![other.clone()],
+        };
+        let above = match &existing {
+            Value::Overload(id) => self.heap.overload(*id).to_vec(),
+            other => vec![other.clone()],
+        };
+        let signatures: Vec<Rc<crate::syntax::ast::FnDecl>> = mine
+            .iter()
+            .filter_map(|value| self.declaration(value))
+            .collect();
+        let kept: Vec<Value> = above
+            .into_iter()
+            .filter(|value| match self.declaration(value) {
+                Some(theirs) => !signatures
+                    .iter()
+                    .any(|ours| overload::clash(ours, &theirs).is_some()),
+                None => false,
+            })
+            .collect();
+        if kept.is_empty() {
+            return own;
+        }
+        let candidates = mine.into_iter().chain(kept).collect();
+        Value::Overload(self.heap.alloc(Object::Overload(candidates)))
+    }
+
+    /// The declaration behind a candidate, for anything comparing signatures.
+    pub(super) fn declaration(&self, value: &Value) -> Option<Rc<crate::syntax::ast::FnDecl>> {
+        match value {
+            Value::Function(id) => Some(Rc::clone(&self.heap.function(*id).decl)),
+            _ => None,
+        }
+    }
+
+    /// What the slot the resolver picked already holds, if anything.
+    fn held(&self, slot: &Option<Slot>, name: &str, env: ObjId) -> Option<Value> {
+        match resolved(slot) {
+            Slot::Local { index, .. } => self.heap.env(env).get(index).cloned(),
+            Slot::Global => self
+                .heap
+                .globals(env::module_of(&self.heap, env))
+                .get(name)
+                .cloned(),
+        }
     }
 
     /// Stores a freshly declared value in the slot the resolver picked for it.

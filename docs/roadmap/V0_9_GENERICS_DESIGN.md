@@ -21,7 +21,9 @@ grammar change rather than a library addition. Either this lands whole or it wai
    and variadic tail unpacking. §3.5.
 6. **Container-constrained extensions.** `extend list[int]`. §3.6.
 7. **Generic type aliases.** `alias Pair[T] = tuple[T, T]`. §3.7.
-8. **LSP support for all of it** — completion inside `[…]`, hover showing bound arguments. §6.
+8. **Function type annotations and function literals.** `function(int) -> string`, and the
+   `fn(x: int): string { … }` expression there was previously no way to write. §3.8.
+9. **LSP support for all of it** — completion inside `[…]`, hover showing bound arguments. §6.
 
 ---
 
@@ -37,8 +39,9 @@ grammar change rather than a library addition. Either this lands whole or it wai
   though `tuple` is the case most likely to force the issue, since a tuple of keys is
   obviously a key. v0.7 §8.
 - **Constructors, coercion, and overloading** come from v0.8, and apply to generic classes
-  unchanged. §3.1's `Stack[int] = [1, 2, 3]` is v0.8's coercion reaching a generic
-  constructor, not a new rule.
+  unchanged. §3.4's `let t2: CustomTuple[…] = (101, "Bob", true)` is v0.8's coercion reaching
+  a generic constructor, not a new rule — with the one extension §3.4 states, since v0.8
+  §3.3 admits only single-parameter constructors and a pack is not one.
 - **`const` already has three jobs** — a frozen binding, `const T` at a boundary, `const fn`
   on a declaration. §3.3 adds the fourth, and v0.7 §3.3 argues they are one idea.
 
@@ -50,6 +53,13 @@ grammar change rather than a library addition. Either this lands whole or it wai
 | `(` `)` | exists (grouping, calls) | tuple literals and tuple types, incl. `(42,)` and `()` |
 | `const` | exists | **new use:** `const N: int` generic value parameter |
 | `[` `]` | exists (v0.7 type arguments) | now also on class and alias *declarations* |
+| `function` | **new keyword** | the function type constructor, `function(int) -> string`. §3.8 |
+| `->` | **new token** | separates a function type's parameters from its return type. §3.8 |
+| `fn` | exists (declarations) | **new position:** a function *expression*. §3.8 |
+
+`->` appears only inside a `function(…)` type. A declaration's return type is still written
+with `:` — `fn f(): int` — and §3.8 says why the two are spelled differently rather than
+unifying them.
 
 ---
 
@@ -229,6 +239,13 @@ Rules:
 - **One pack per parameter list, in last position.** Two packs cannot be told apart when the
   arguments arrive.
 - **A pack may be empty.** `CustomTuple[]` is a type, and `CustomTuple()` builds one.
+- **A pack constructor coerces from a tuple**, which is the one extension this milestone
+  makes to v0.8 §3.3. That rule admits only single-parameter constructors, because there is
+  no rule that could split one value across several parameters — but a `tuple` is exactly a
+  value that says how it splits, and its arity is part of its type. So `op init(args: Ts...)`
+  coerces from a `tuple` whose arity and element types match the bound pack, and from
+  nothing else. Every other constructor obeys v0.8 §3.3 unchanged, and coercion still does
+  not chain.
 
 ### 3.5 `tuple[T1, …, TN]`
 
@@ -313,25 +330,58 @@ An alias is still a resolution-time substitution introducing no new type: `Pair[
 `tuple[float, float]` are the same type, and `is` cannot tell them apart. A cyclic alias —
 including one that cycles through its own parameter, `alias A[T] = A[T]` — is refused.
 
-### 3.8 First-class function type annotations (`function(...) -> ...`)
+### 3.8 Function types (`function(…) -> T`) and function literals
 
-Function signatures can be used as type annotations for variables, parameters, and return types:
+A function has been a first-class value since v0.1 and has never had a type that could
+describe one. `let f: any = …` is the only annotation that fits a callback today, which
+means the one place a program most wants a contract — what it is about to *call* — is the
+one place the type system says nothing.
 
 ```quince
-# Higher-order function taking a typed callback:
+# A higher-order function taking a typed callback
 fn apply_transform(val: int, transform: function(int) -> int): int {
     return transform(val)
 }
 
-# Variable typed as a function signature:
+# A function literal, and a binding annotated with its type
 let formatter: function(int, string) -> string = fn(code: int, msg: string): string {
-    return f"[{code}] {msg}"
+    return "[" + string(code) + "] " + msg
 }
+
+print(apply_transform(20, fn(x: int): int { return x + 1 }))   # 21
 ```
 
 Rules:
-- **Syntax.** `function(Param1, Param2, ...) -> ReturnType`.
-- **Callable checking.** Parameter types and return type annotations are checked at function boundaries during resolution and call execution.
+
+- **The type is `function(P1, …, PN) -> R`.** A function taking nothing is
+  `function() -> R`; one returning nothing is `function(P) -> nil`.
+- **A function literal is `fn(params): R { … }`** — an ordinary `fn` declaration with the
+  name left out, in expression position. It closes over its enclosing scope like any nested
+  function, because below the parser it *is* one.
+- **The return type is spelled `:` in a declaration and `->` in a type.** They are different
+  positions and the parser can tell them apart trivially, but they are also different
+  questions: `fn f(): int` declares what this body produces, and `function(int) -> int`
+  describes a value. Reusing `:` in the type would put a third meaning on the token v0.10
+  §7.1.1 removes slice syntax to protect, and `->` inside a declaration would leave the
+  language with two spellings for one thing — the objection v0.7 §9 records against `pub`.
+- **Matching is by arity, then parameter types, then return type**, and it is **invariant**
+  in both, following v0.7 §4.1 rather than defining a second rule. A
+  `function(int) -> int` does not hold as `function(int) -> any`. Contravariant parameters
+  and covariant returns are the sound relation and are deferred with the rest of variance in
+  §8 — invariance is the restrictive direction, and it can be relaxed later.
+- **An unannotated parameter makes the type `Unknown`**, as everywhere else. A literal
+  written with no annotations is a `function` nobody has claimed anything about, and passing
+  it where a `function(int) -> int` is wanted is checked at the boundary the value crosses,
+  not at the literal.
+- **Checked where the value is bound and where it is called.** The declaration site checks
+  the literal against the annotation; the call site checks the arguments. A function reached
+  through a `list[function(int) -> int]` is checked by the container rules that already
+  exist, and needs nothing new.
+
+This is in v0.9 rather than earlier because `function(T) -> U` is only worth writing when
+`T` and `U` can be type parameters — the motivating annotation is a `map` over a `list[T]`,
+and that sentence cannot be written before this milestone. v0.11's generic functions are
+what finally let it be *declared*.
 
 ---
 
@@ -522,13 +572,16 @@ same deferred work.
 - An `extend list[T]` block whose target is not a real instantiation. §3.6.
 - Constructing from a bare type parameter — `T()`. §3.1.
 - An uninitialized `let t: tuple[…]`. §3.5.
+- A function literal whose arity or annotated types disagree with the `function(…) -> T`
+  it is bound to. §3.8.
 
 **At run time:**
 - Arguments against method parameters mentioning `T`, once `T` is bound. §3.1.
 - Building a generic instance against its arguments, and recording them in the header.
-- Coercion from a literal into a generic constructor. §3.4, v0.8 §3.3.
+- Coercion from a tuple into a pack constructor. §3.4, v0.8 §3.3.
 - A method from `extend list[int]` invoked on a receiver whose header disagrees. §3.6.
 - Destructuring against arity. §3.5.
+- A value crossing a `function(…) -> T` boundary whose own type was `Unknown`. §3.8.
 
 ---
 
@@ -566,11 +619,17 @@ should stop moving before a fourth parameter form joins it.
 
 **Tranche 6 — `extend list[T]` and generic aliases.** The two small ones.
 
-**Tranche 7 — editor tooling.**
+**Tranche 7 — function types and literals.** Independent of every tranche above it, and
+last of the language items because nothing here waits on it. It is the one tranche a
+milestone running long could move to v0.11, where generic functions want it anyway.
 
-There is no useful cut line in this milestone, which is the point the head of this file makes
-about it being one mechanism. The nearest thing to one is dropping tranches 5 and 6 — but tranche 5 is
-what v0.10's `array[T, N]` needs, so dropping it moves work rather than removing it.
+**Tranche 8 — editor tooling.**
+
+There is no useful cut line inside the generic mechanism, which is the point the head of this
+file makes about it being one thing. The nearest thing to one is dropping tranches 5 and 6 —
+but tranche 5 is what v0.10's `array[T, N]` needs, so dropping it moves work rather than
+removing it. **Tranche 7 is the real cut line**, and it is a clean one precisely because
+function types are not part of the mechanism this milestone exists to build.
 
 ---
 
@@ -587,7 +646,10 @@ can promise a zero-arity constructor, so it waits on the same work.
 
 **Generic functions** — `fn first[T](xs: list[T]): T?`. Genuinely useful and genuinely
 separable: generic *classes* need the header machinery, generic *functions* need call-site
-inference, and they share almost nothing. Doing both here would double the milestone.
+inference, and they share almost nothing. Doing both here would double the milestone. Moved
+to **v0.11**, beside interfaces, because that is the milestone that gives a bound something
+to promise and so is the first point at which a generic function can do more than pass a
+`T` through untouched.
 
 **`op hash`, and generics or tuples as dict keys.** Inherited from v0.7 §8, and §4.3 shows
 why it will keep coming up.
@@ -612,4 +674,12 @@ effect of tuples landing.
 - **`extend list[T]` mismatches are caught at run time**, matching where v0.7 puts every
   other receiver-dependent check. §3.6.
 - **Aliases stay substitutions**, even with parameters. §3.7.
+- **A pack constructor coerces from a `tuple`**, which is the single extension made to
+  v0.8 §3.3's single-parameter rule, and it is made because a tuple's arity is part of its
+  type. §3.4.
+- **Function types are invariant**, like every other type in the language, rather than
+  contravariant in their parameters. The sound relation is deferred with the rest of
+  variance, because invariance is the direction that can be relaxed later. §3.8.
+- **A return type is `:` in a declaration and `->` in a function type.** Two positions, two
+  questions, and neither spelling is available to the other without cost. §3.8.
 - **Dict iteration is not changed here**, though this is what unblocks it. §8.

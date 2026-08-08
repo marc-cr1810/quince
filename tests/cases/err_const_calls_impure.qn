@@ -1,0 +1,13 @@
+class Counter {
+    op init() { self.n = 0 }
+    fn bump() { self.n = self.n + 1 }
+
+    # A `const` method that could reach a mutating one would be promising
+    # nothing, so the rule has to run through calls as well as assignments.
+    const fn total(): int {
+        self.bump()
+        return self.n
+    }
+}
+
+print(Counter().total())

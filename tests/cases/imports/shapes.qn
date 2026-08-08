@@ -12,7 +12,7 @@ class Point {
         self.y = y
     }
     op string() { return "(" + string(self.x) + ", " + string(self.y) + ")" }
-    op eq(other) { return self.x == other.x && self.y == other.y }
+    op eq(other) { return self.x == other.x and self.y == other.y }
 }
 
 fn origin() { return Point(0, 0) }

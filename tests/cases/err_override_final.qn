@@ -1,0 +1,11 @@
+class Vector2D {
+    op init(x, y) { self.x = x; self.y = y }
+    final op string() { return "(" + string(self.x) + ", " + string(self.y) + ")" }
+}
+
+class NamedVector extends Vector2D {
+    op init(x, y) { super.init(x, y) }
+    override op string() { return "named" }
+}
+
+print(NamedVector(1, 2))

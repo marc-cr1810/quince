@@ -360,3 +360,127 @@ fn a_repl_entry_may_redefine_what_an_earlier_one_declared() {
     let call = quince::compile("a()").unwrap();
     assert_eq!(interp.run_repl(&call).unwrap(), Some(Value::Int(2)));
 }
+
+/// Feeds each line to one interpreter as its own entry, answering with the
+/// value of the last.
+///
+/// Through `compile_within`, which is what the REPL loop itself uses: an entry
+/// is resolved against what the session already has bound, so the declaration
+/// rules see the lines before it. Reaching for `compile` here would test a
+/// pipeline the REPL does not have.
+fn entries(lines: &[&str]) -> Option<quince::runtime::value::Value> {
+    let mut interp = Interp::new();
+    let mut last = None;
+    for line in lines {
+        let program = quince::compile_within(line, &interp.declarations())
+            .unwrap_or_else(|err| panic!("`{line}` should compile: {}", err.message));
+        last = interp.run_repl(&program).expect("it runs");
+    }
+    last
+}
+
+/// The message the first line to be refused produced.
+fn refused(lines: &[&str]) -> String {
+    let mut interp = Interp::new();
+    for line in lines {
+        match quince::compile_within(line, &interp.declarations()) {
+            Ok(program) => {
+                interp.run_repl(&program).expect("it runs");
+            }
+            Err(err) => return err.message,
+        }
+    }
+    panic!("no line was refused");
+}
+
+#[test]
+fn overloads_typed_on_separate_lines_join_and_a_repeat_replaces() {
+    // A REPL line is its own compilation, so two overloads typed on two lines
+    // each arrive as a *first* declaration. What makes them one name holding two
+    // declarations is that the entry is resolved against what is already bound —
+    // the same parameter types replace, different ones join.
+    use quince::runtime::value::Value;
+    let declared = ["fn f(a: int): int { return 1 }", "fn f(s: string): int { return 2 }"];
+    assert_eq!(entries(&[declared[0], declared[1], "f(1)"]), Some(Value::Int(1)));
+    assert_eq!(entries(&[declared[0], declared[1], "f(\"x\")"]), Some(Value::Int(2)));
+
+    let again = "fn f(a: int): int { return 99 }";
+    assert_eq!(
+        entries(&[declared[0], declared[1], again, "f(1)"]),
+        Some(Value::Int(99)),
+        "the same signature is replaced"
+    );
+    assert_eq!(
+        entries(&[declared[0], declared[1], again, "f(\"x\")"]),
+        Some(Value::Int(2)),
+        "the other one is untouched"
+    );
+}
+
+#[test]
+fn an_entry_may_not_add_an_overload_nothing_could_choose_between() {
+    // The half a redefinition is not. Retyping a declaration to change it means
+    // writing the same parameter types; writing *different* ones that some call
+    // would reach equally well is adding an ambiguity, and is refused here for
+    // the reason it is refused in a file.
+    assert_eq!(
+        refused(&["fn f(a: float): int { return 1 }", "fn f(a: int?): int { return 2 }"]),
+        "an earlier entry declares a `f` this one cannot be told apart from"
+    );
+}
+
+#[test]
+fn the_declaration_rules_see_the_lines_before_them() {
+    // Every rule that reads a hierarchy used to decline to answer in the REPL,
+    // because each entry was resolved against an empty world. A class declared
+    // on one line is a class the next line can see.
+    assert_eq!(
+        refused(&[
+            "class Animal { fn speak(): string { return \"...\" } }",
+            "class Dog extends Animal { fn speak(): string { return \"woof\" } }",
+        ]),
+        "`fn speak` replaces `Animal`'s and does not say so"
+    );
+    assert_eq!(
+        refused(&[
+            "class A { final fn m(): int { return 1 } }",
+            "class B extends A { override fn m(): int { return 2 } }",
+        ]),
+        "cannot override `fn m`, which is final in `A`"
+    );
+    assert_eq!(
+        refused(&[
+            "class Money { op init(cents: int) { self.cents = cents } }",
+            "let m: Money",
+        ]),
+        "`Money` has no default constructor, so `m` needs an initializer"
+    );
+    // And a class's own methods are told apart from the ones it merged in from a
+    // superclass, so a grandchild is reported against whichever class wrote the
+    // member rather than against whichever one it happened to reach.
+    assert_eq!(
+        refused(&[
+            "class A { fn m(): int { return 1 } }",
+            "class B extends A {}",
+            "class C extends B { fn m(): int { return 3 } }",
+        ]),
+        "`fn m` replaces `A`'s and does not say so"
+    );
+}
+
+#[test]
+fn redefining_is_still_what_a_repl_is_for() {
+    // The property every one of the rules above has to leave alone. A REPL entry
+    // redeclaring a name is the ordinary thing to do, and `globals` — the set
+    // that refuses a name declared twice — is deliberately not seeded.
+    use quince::runtime::value::Value;
+    assert_eq!(entries(&["let x = 1", "let x = 2", "x"]), Some(Value::Int(2)));
+    assert_eq!(
+        entries(&[
+            "class P { fn m(): int { return 1 } }",
+            "class P { fn m(): int { return 7 } }",
+            "P().m()",
+        ]),
+        Some(Value::Int(7))
+    );
+}

@@ -1,0 +1,6 @@
+CustomInt(10) 10
+42
+CustomInt(7)
+3
+CustomInt(5)
+connection(1000ms)

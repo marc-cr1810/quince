@@ -1,0 +1,5 @@
+fn connect(host: string, port: int = 8080): string {
+    return host + string(port)
+}
+
+print(connect(port: 443))

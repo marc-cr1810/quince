@@ -1,0 +1,43 @@
+# `++` and `--` are statements, not operators, so both spellings mean the same
+# thing: `n += 1`. There is no value for prefix and postfix to differ about.
+let n = 0
+n++
+++n
+print(n)
+n--
+--n
+print(n)
+
+# Which target the count lands on is whatever `+=` already accepted.
+let xs = [10, 20]
+xs[0]++
+xs[1]--
+print(xs)
+
+class Counter {
+    op init() { self.hits = 0 }
+}
+let c = Counter()
+c.hits++
+c.hits++
+print(c.hits)
+
+# And the target is evaluated once, because the compound assignment is what
+# carries that rule — `where()` runs a single time per count.
+let calls = 0
+fn where() {
+    calls += 1
+    return 0
+}
+xs[where()]++
+xs[where()]++
+print(xs[0], calls)
+
+# The usual place for one.
+let total = 0
+let i = 0
+while i < 5 {
+    total += i
+    i++
+}
+print(total, i)

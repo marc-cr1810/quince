@@ -1,0 +1,8 @@
+ints strings
+ints strings
+ints
+some list of 2 some list of 2
+caught: the item is `int`, but this is a string
+string to int string to anything
+string to anything
+caught: `d` is `dict[string, int]`, but this is `dict[string]`

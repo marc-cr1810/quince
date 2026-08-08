@@ -1,6 +1,6 @@
-# Quince v0.7 — Standard Library & Built-ins Reference
+# Quince v0.8.1 — Standard Library & Built-ins Reference
 
-This document provides a comprehensive API reference for Quince v0.7's global built-in functions, type conversions, container methods, and standard modules (`math`, `io`, `random`, `time`), complete with runnable code examples and edge-case exception details.
+This document provides a comprehensive API reference for Quince v0.8.1's global built-in functions, type conversions, container methods, and standard modules (`math`, `io`, `random`, `time`), complete with runnable code examples and edge-case exception details.
 
 ---
 

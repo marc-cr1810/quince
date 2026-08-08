@@ -31,6 +31,7 @@ use crate::runtime::heap::Heap;
 use crate::runtime::value::{Native, Value};
 use crate::sema::infer::ClassInfo;
 use crate::syntax::ast::{BinaryOp, TypeExpr, TypeName};
+use crate::syntax::token::Span;
 
 
 /// A type's name, shared rather than copied.
@@ -400,9 +401,16 @@ pub fn stated(ty: &TypeExpr) -> Type {
 ///   how a program says which.
 /// - **A subclass holds as its parent.** `UserClass` admits an instance of it or
 ///   of anything descending from it.
-/// - **Arguments are not checked here.** Nothing can carry them until tranche 4
-///   gives the containers parameters; when it does, this is the function that
-///   grows an arm, and §4.1's invariance is the rule it grows.
+/// - **Arguments go through [`arguments_admit`]**, shared with `is` so the two
+///   cannot drift. Every elided argument reads as the `any?` §3.10 says it is,
+///   which makes `list` and `list[any?]` one type and `dict[K]` and
+///   `dict[K, any?]` one type.
+/// - **A container nothing described is walked**, because at a boundary it is
+///   raw material: `let xs: list[int] = [1, 2]` is the annotation *deciding* the
+///   type rather than agreeing with one, and the walk is what stamps the header.
+///   `is` answers differently there and says so — see [`Interp::has_type`].
+///
+/// [`Interp::has_type`]: crate::interp::Interp
 pub fn holds(ty: &TypeExpr, value: &Value, heap: &Heap) -> bool {
     if matches!(value, Value::Nil) {
         return ty.admits_nil();
@@ -422,10 +430,20 @@ pub fn holds(ty: &TypeExpr, value: &Value, heap: &Heap) -> bool {
         return false;
     }
 
-    // The elements, once the container itself holds. Walked rather than trusted:
-    // a `list[int]` built from a literal is checked here, and thereafter the
-    // descriptor stamped on the allocation is what keeps it one — see
-    // `Heap::describe`.
+    // The reified header first, where the allocation carries one. A container
+    // that crossed an annotated boundary was *built to hold* those types, and
+    // that is what it is: `let xs: list[int] = []` is a list of ints while it is
+    // empty, and asking its elements would answer that it is equally a
+    // `list[string]`. The header is the only thing that knows better.
+    if let Some(id) = value.base(heap).handle()
+        && let Some(held) = heap.descriptor(id)
+    {
+        return arguments_admit(ty, &held.args);
+    }
+
+    // The elements, for a container nothing has described. That is every
+    // container built from a literal and passed straight on, and it is what
+    // stamps the header in the first place — see `Heap::describe`.
     match (name, value.base(heap)) {
         ("list", Value::List(id)) if !ty.args.is_empty() => heap
             .list(*id)
@@ -446,6 +464,69 @@ pub fn holds(ty: &TypeExpr, value: &Value, heap: &Heap) -> bool {
                 })
         }
         _ => true,
+    }
+}
+
+/// The type an elided argument stands for: `any?`, the top type.
+///
+/// §3.10's `dict[K]` is shorthand for `dict[K, _?]`, and v0.9 §3.1 says the same
+/// of an unbounded `[T]` — an argument nobody wrote constrains nothing, and it
+/// has to admit `nil` or the shorthand becomes a trap. One function rather than
+/// seven sites deciding it, which is what let `is` and an annotation disagree
+/// about what `list` and `list[any?]` were.
+///
+/// Cheap enough to build per comparison: an empty `Vec` does not allocate.
+fn unconstrained() -> TypeExpr {
+    TypeExpr {
+        name: TypeName::Any,
+        args: Vec::new(),
+        nullable: true,
+        frozen: false,
+        span: Span::new(0, 0),
+    }
+}
+
+/// Whether a container built to hold `has` may be asked for as `want`.
+///
+/// Both sides are read out to the longer of the two argument lists, with every
+/// position neither of them wrote filled in as [`unconstrained`]. That single
+/// step is what makes `list` and `list[any?]` one type, `dict[K]` and
+/// `dict[K, any?]` one type, and a container nothing described a `list[any?]` —
+/// three questions that used to be three separate special cases answering
+/// slightly differently.
+///
+/// The comparison is by position, which assumes the two name the same container.
+/// Every caller has already established that.
+pub fn arguments_admit(want: &TypeExpr, has: &[TypeExpr]) -> bool {
+    let elided = unconstrained();
+    (0..want.args.len().max(has.len())).all(|index| {
+        admits((
+            want.args.get(index).unwrap_or(&elided),
+            has.get(index).unwrap_or(&elided),
+        ))
+    })
+}
+
+/// Whether a container built to hold `has` may be used where `want` is asked.
+///
+/// Invariant, with one exception that is not a hole in it: `any` is the top type
+/// and accepts whatever is there, so `list[any]` still means "a list of
+/// anything". That is safe because the *header* is what a write is checked
+/// against, not the annotation it arrived through — `xs.push("s")` inside
+/// `fn f(xs: list[any])` is refused on the strength of the `list[int]` the
+/// caller passed, because [`Heap::describe`] is write-once and the first
+/// annotation a container crosses is its type for good.
+///
+/// Nothing else widens: `list[int]` is not a `list[int?]`, because a `nil`
+/// written through the second would be a `nil` read out of the first.
+///
+/// [`Heap::describe`]: crate::runtime::heap::Heap::describe
+fn admits((want, has): (&TypeExpr, &TypeExpr)) -> bool {
+    match want.name {
+        // `any` does not admit `nil`, so it does not admit a container that may
+        // hold one either. `any?` is the spelling for that.
+        TypeName::Any => want.nullable || !has.nullable,
+        TypeName::Named(_) => want.same_as(has),
     }
 }
 
@@ -487,7 +568,19 @@ pub fn refusal(ty: &TypeExpr, value: &Value, heap: &Heap, what: &str) -> (String
     }
 
     let actual = value.type_name(heap);
-    let message = format!("{what} is `{written}`, but this is {}", an(actual));
+    // What the value *is*, said as precisely as anything knows. A container that
+    // crossed an annotated boundary carries what it was built to hold, and
+    // "this is a list" is a poor answer to "why is this not a `list[int]`" when
+    // the reason is that it is a `list[string]`. Only where the header adds
+    // something: a bare `list` reads as itself.
+    let described = value
+        .base(heap)
+        .handle()
+        .and_then(|id| heap.descriptor(id))
+        .filter(|held| !held.args.is_empty())
+        .map(|held| format!("`{}`", held.written()));
+    let precise = described.clone().unwrap_or_else(|| an(actual).to_string());
+    let message = format!("{what} is `{written}`, but this is {precise}");
     // The specific advice where there is some, and the general shape of the fix
     // otherwise. An annotation refused is always two things a reader might have
     // meant — the value is wrong, or the annotation is — and naming both is
@@ -499,9 +592,8 @@ pub fn refusal(ty: &TypeExpr, value: &Value, heap: &Heap, what: &str) -> (String
             "write `int(x)` to say which way it should round".to_string()
         }
         _ => format!(
-            "either give it {}, or widen the annotation to admit {}",
+            "either give it {}, or widen the annotation to admit {precise}",
             an_article(&written),
-            an(actual)
         ),
     };
     (message, Some(help))

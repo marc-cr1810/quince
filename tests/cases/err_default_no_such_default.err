@@ -1,0 +1,1 @@
+`float` has no default constructor, so `total` needs an initializer

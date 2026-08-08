@@ -24,6 +24,14 @@ pub enum Object {
     /// permanent root.
     Globals(Globals),
     Function(Function),
+    /// Several declarations sharing one name, in the order they were written.
+    ///
+    /// A heap object rather than a `Vec` inside [`Value`], for the reason
+    /// everything else here is one: a value is copied on every read, and the
+    /// overloaded name is the rare case. Every entry is a [`Value::Function`] —
+    /// a native cannot be overloaded, since its parameters are a static table
+    /// with no annotations to dispatch on.
+    Overload(Vec<Value>),
     BoundMethod(BoundMethod),
     Class(Class),
     Instance(Instance),
@@ -325,6 +333,14 @@ impl Heap {
         }
     }
 
+    /// The candidates of an overload set, in the order they were declared.
+    pub fn overload(&self, id: ObjId) -> &[Value] {
+        match self.get(id) {
+            Object::Overload(candidates) => candidates,
+            other => panic!("expected an overload set, found {other:?}"),
+        }
+    }
+
     /// Only for the one write a function ever takes after allocation: the class
     /// that declared it, which cannot be known until that class exists.
     pub fn function_mut(&mut self, id: ObjId) -> &mut Function {
@@ -402,6 +418,11 @@ fn trace(object: &Object, worklist: &mut Vec<ObjId>) {
         Object::Env(env) => env.trace(worklist),
         Object::Globals(globals) => globals.trace(worklist),
         Object::Function(func) => worklist.push(func.env),
+        // The set is the only thing holding its candidates: a class's table
+        // points at the set, not at the functions inside it.
+        Object::Overload(candidates) => {
+            worklist.extend(candidates.iter().filter_map(Value::handle))
+        }
         // A bound method is often the only thing holding its receiver alive:
         // in `[1, 2].push`, the list is reachable from nowhere else.
         //
@@ -450,6 +471,7 @@ fn reachable_data(object: &Object, worklist: &mut Vec<ObjId>) {
         Object::Env(_)
         | Object::Globals(_)
         | Object::Function(_)
+        | Object::Overload(_)
         | Object::BoundMethod(_)
         | Object::Class(_) => {}
     }
@@ -621,6 +643,10 @@ mod tests {
                     span: crate::syntax::token::Span::new(0, 0),
                 },
                 op: None,
+                constant: false,
+                overrides: false,
+                guarded: false,
+                explicit: false,
             }),
             env: scope,
         }));

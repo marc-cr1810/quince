@@ -1,1 +1,1 @@
-`total` is already declared in this scope
+this scope already declares `total` with these parameter types

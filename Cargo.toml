@@ -1,6 +1,6 @@
 [package]
 name = "quince"
-version = "0.7.0"
+version = "0.8.1"
 edition = "2024"
 description = "A gradually-typed scripting language with a language server"
 # No `license` field: the repository has no LICENSE file, and naming one here

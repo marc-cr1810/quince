@@ -27,6 +27,18 @@ pub struct Param {
     /// written now that the two spellings agree. [`BindKind::Let`] is the
     /// default and is what every parameter written before v0.7 is.
     pub bind: BindKind,
+    /// What the parameter holds when the call does not say — v0.8 §3.6.
+    ///
+    /// Evaluated **at the call**, in the callee's declaration scope, every time.
+    /// That is the one place Python's answer is refused outright: a default
+    /// evaluated once at the declaration makes `fn f(xs: list = [])` share one
+    /// list between every call that omits it, which is the single most reported
+    /// footgun in that language.
+    ///
+    /// `?` on the type does not imply one. `fn f(x: int?)` requires an argument;
+    /// only `= nil` makes it optional. An annotation says what a parameter may
+    /// hold, not whether it must be written.
+    pub default: Option<Expr>,
     /// Whether this is the `self` the parser inserted, rather than a parameter
     /// someone wrote.
     ///
@@ -111,6 +123,36 @@ pub struct FnDecl {
     /// a private one would be a method `print` is entitled to call and forbidden
     /// from calling.
     pub visibility: Visibility,
+    /// Whether `const` was written in front of it, marking the body pure and
+    /// read-only — v0.8 §3.1.
+    ///
+    /// The same word as the binding and annotation forms, and v0.7 §3.3 argues
+    /// they are one idea: a `const` binding may not be rebound, a `const T`
+    /// parameter may not be mutated through, and a `const fn` may not mutate
+    /// anything at all. What it restricts is *state*, not effects — `print`,
+    /// `throw`, and an early `return` are all fine. The resolver is what holds
+    /// a declaration to it; see `sema::resolve::purity`.
+    pub constant: bool,
+    /// Whether `override` was written, saying that this member replaces one a
+    /// superclass declared.
+    ///
+    /// Required where it is true and refused where it is not, which is the pair
+    /// that makes it worth writing: a keyword that could be written where it is
+    /// false would be documentation nobody could trust, and a typo'd method name
+    /// is exactly the mistake the other half catches.
+    pub overrides: bool,
+    /// Whether `final` was written, forbidding a subclass from replacing it.
+    ///
+    /// The same word as [`BindKind::Final`] and for the same idea — this name is
+    /// bound once and cannot be rebound. On a field it is the value; here it is
+    /// the implementation.
+    pub guarded: bool,
+    /// Whether `explicit` was written, refusing the implicit constructor
+    /// coercion of v0.8 §3.3.
+    ///
+    /// Only ever set on an `op init` taking one parameter; the parser refuses it
+    /// anywhere else, since there is nothing elsewhere for it to turn off.
+    pub explicit: bool,
     /// The `##` block written above it, already checked against `params`.
     ///
     /// Checked at the parser rather than kept raw, so that a `@param` naming
@@ -346,11 +388,11 @@ pub struct FieldDecl {
     /// What the field holds, if the declaration said.
     pub ty: Option<TypeExpr>,
     /// What it holds when an instance is built.
-    ///
-    /// Not optional in this milestone: a declaration with no initializer needs
-    /// a type to synthesize a default from, and there is none until tranche 3.
-    /// §3.5's blank `final` is the form that waits for it.
     pub value: Expr,
+    /// Whether the declaration wrote no `= value`, leaving [`FieldDecl::value`]
+    /// the one the language supplied. The same flag a binding carries, for the
+    /// same reason — see `StmtKind::Let`.
+    pub defaulted: bool,
     /// The `##` block written above it, as for a binding.
     pub doc: Option<Doc>,
 }

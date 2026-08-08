@@ -1,0 +1,15 @@
+class Inner {
+    let n: int = 0
+    op init(n: int) { self.n = n }
+}
+
+class Outer {
+    let inner: Inner = Inner(0)
+    op init(inner: Inner) { self.inner = inner }
+}
+
+# One implicit call is a convenience; a search is a mystery. `Outer` is built
+# from an `Inner` and `Inner` from an int, and that does not make `Outer` a
+# thing an int becomes.
+let o: Outer = 1
+print(o)

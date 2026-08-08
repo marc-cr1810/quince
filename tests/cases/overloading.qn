@@ -1,0 +1,109 @@
+# Several declarations may share a name as long as their parameter types are
+# distinct. Dispatch is on the run-time argument types, exact match before
+# widened — the same widening rule an annotation follows, not a second one.
+class Vector {
+    op init(x: float, y: float) {
+        self.x = x
+        self.y = y
+    }
+
+    public op add(other: Vector): Vector {
+        return Vector(self.x + other.x, self.y + other.y)
+    }
+
+    public op add(scalar: float): Vector {
+        return Vector(self.x + scalar, self.y + scalar)
+    }
+
+    const op string(): string {
+        return "(" + string(self.x) + ", " + string(self.y) + ")"
+    }
+}
+
+let v = Vector(1.0, 2.0)
+print(v + Vector(3.0, 4.0))
+print(v + 10.0)
+
+# Top-level functions overload too, and an unannotated parameter is the one that
+# takes anything — so it is tried last.
+fn describe(n: int): string { return "an int: " + string(n) }
+fn describe(s: string): string { return "a string: " + s }
+fn describe(xs: list): string { return "a list of " + string(len(xs)) }
+fn describe(anything): string { return "something else" }
+
+print(describe(1))
+print(describe("hi"))
+print(describe([1, 2, 3]))
+print(describe(true))
+
+# Exact before widened: an `int` argument prefers an `int` parameter and reaches
+# the `float` one only when there is no `int` one.
+fn width(n: int): string { return "int" }
+fn width(n: float): string { return "float" }
+print(width(1), width(1.0))
+
+# An `extend` block may overload, including an `op` the type does not have.
+extend list {
+    public op mul(factor: int): list {
+        let doubled: list = []
+        for val in self {
+            doubled.push(val * factor)
+        }
+        return doubled
+    }
+}
+print([1, 2, 3, 4] * 2)
+
+extend int {
+    fn scaled(by: int): int { return self * by }
+    fn scaled(by: float): float { return float(self) * by }
+}
+print((3).scaled(2), (3).scaled(2.5))
+
+# Overloads are all-or-nothing across a subclass boundary: an `override`
+# replaces the one signature it matches and leaves the rest inherited.
+class Greeter {
+    fn hello(n: int): string { return "base int " + string(n) }
+    fn hello(s: string): string { return "base string " + s }
+}
+class Loud extends Greeter {
+    override fn hello(n: int): string { return "loud int " + string(n) }
+}
+let loud = Loud()
+print(loud.hello(1), loud.hello("x"))
+
+# Selection runs before defaults are filled in, so it sees the arity the call
+# actually wrote.
+fn pad(text: string): string { return "[" + text + "]" }
+fn pad(text: string, times: int, mark: string = "*"): string {
+    let out = text
+    let i = 0
+    while i < times {
+        out = mark + out + mark
+        i += 1
+    }
+    return out
+}
+print(pad("a"), pad("a", 2), pad("a", 1, mark: "-"))
+
+# A class may declare several constructors, told apart the same way.
+class Money {
+    op init() { self.cents = 0 }
+    op init(cents: int) { self.cents = cents }
+    op init(text: string) { self.cents = int(text) }
+    op init(whole: int, part: int) { self.cents = whole * 100 + part }
+    const op string(): string { return "$" + string(self.cents) }
+}
+print(Money(), Money(5), Money("700"), Money(1, 25))
+print(Money(part: 5, whole: 2))
+
+# A zero-argument constructor beside a parameterized one is what makes the
+# class default-constructible.
+let wallet: Money
+print(wallet)
+
+# And the implicit coercion of §3.3 reaches whichever single-parameter
+# constructor the value fits.
+let fromInt: Money = 5
+let fromText: Money = "700"
+print(fromInt, fromText)

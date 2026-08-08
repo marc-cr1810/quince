@@ -1,0 +1,4 @@
+fn describe(n: int): string { return "int" }
+fn describe(s: string): string { return "string" }
+
+print(describe(1.5))

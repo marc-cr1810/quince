@@ -1,6 +1,6 @@
-# Quince v0.7 — Control Flow, Functions & Error Handling
+# Quince v0.8.1 — Control Flow, Functions & Error Handling
 
-This manual details control flow constructs, lexical functions and closures, docstring validation, and exception handling in Quince v0.7.
+This manual details control flow constructs, lexical functions and closures, docstring validation, and exception handling in Quince v0.8.1.
 
 ---
 

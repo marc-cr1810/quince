@@ -1,0 +1,10 @@
+fn total(xs: list[int]): string { return "ints" }
+fn total(xs: list[string]): string { return "strings" }
+
+# Both work, because each list says what it holds.
+print(total([1, 2]), total(["a"]))
+
+# This one does not. An empty literal is every element type at once, and
+# answering with whichever declaration came first would be the "two things
+# matched" that a dispatch failure must never mean.
+print(total([]))

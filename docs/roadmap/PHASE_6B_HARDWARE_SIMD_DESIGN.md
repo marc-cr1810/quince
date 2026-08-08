@@ -4,6 +4,13 @@
 
 Phase 6B introduces first-class **128-Bit Hardware SIMD Vector Types (`float32x4`, `int32x4`)**, emitting native CPU vector instructions (x86_64 SSE2/AVX2, ARM NEON).
 
+**The types themselves are language surface owned by no milestone**, per
+`BYTECODE_VM_DESIGN.md` §12: two built-in types means two `Value` variants, entries in `OPS`
+for their arithmetic, a rule for how they interact with the numeric tower (`float32x4 + 1.0`
+— broadcast, or refused?), and a decision about whether the element type is `f32` when the
+language has no sized numeric types at all. That last one is the real blocker: sized integers
+are in DESIGN.md's *Later*, and `int32x4` cannot be spelled honestly before them.
+
 ---
 
 ## 1. Native SIMD Types & Vector Operations

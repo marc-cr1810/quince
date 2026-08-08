@@ -15,7 +15,7 @@ The proposed architecture introduces:
 2. **Direct Cranelift JIT Execution (`cranelift-jit`)**: Compiles Bytecode IR basic blocks directly into native machine code in RAM (`x86_64` / `AArch64`) in a few milliseconds upon module load, executing functions via raw C-ABI function pointers at native CPU speeds.
 3. **Native AOT Compilation Pipeline (`cranelift-object`)**: Uses the same IR to build standalone native executables (`quince build --aot`) and native dynamic shared libraries (`.qnx`) via system linkers.
 4. **Advanced Runtime Optimizations**: Implements 8-byte NaN-tagging, Morphic Inline Caching (IC) for property access, string index caching, and opcode specialization via static type inference.
-5. **Rich Language Operators**: First-class support for exponentiation (`**`), floor division (`//`), and all compound assignment operators (`+=`, `-=`, `*=`, `/=`, `//=`, `**=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=`).
+5. **Rich Language Operators**: opcodes for exponentiation (`**`), floor division (`//`), and all compound assignment operators (`+=`, `-=`, `*=`, `/=`, `//=`, `**=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=`). Only `//` exists in the language today; `**` and compound assignment are **v0.8 §3.7**, and this document emits opcodes for them rather than introducing them. See §12.
 6. **Polymorphic Dispatch**: Support for single class inheritance and multiple interface implementation with $O(1)$ interface table (`itable`) vtable offsets.
 7. **GIL-Free Multi-Threaded Concurrency**: Structured concurrency (`parallel`), async/await coroutines, `shared` RWLock objects, and dual-arena lock-free memory.
 8. **Self-Hosting Roadmap**: Enables the Quince compiler, toolchain, and Language Server (LSP) to be written natively in Quince.
@@ -178,6 +178,13 @@ pub struct ObjClosure {
 * **Closing Upvalues**: When an enclosing frame returns, `close_upvalues` copies stack values into heap `ObjUpvalue.closed` fields.
 
 ### 3.6 Reference Parameter Calling Conventions (`ref`, `ref x: const T`)
+
+**Conditional on a language feature that is deferred and unscheduled.** `ref` parameters were
+in v0.7's first draft and v0.7 §8 defers them — "they are not a feature; they are a change to
+the calling convention" — and no milestone since has taken them. `PassRef` and `StoreRef` are
+specified here so that the calling convention has room for them; neither opcode is
+implementable until `ref` is scheduled. See §12.
+
 * **`OpCode::PassRef <slot_offset>`**: Pushes an indirect stack reference cell pointing to caller's stack slot.
 * **`OpCode::StoreRef`**: Validates coerced types and writes directly into the caller's stack slot.
 
@@ -203,6 +210,12 @@ When an exception occurs, the unwinder queries `chunk.spans[frame.ip]` across ac
 ---
 
 ## 4. Low-Level Polymorphic Method Dispatch Architecture
+
+Interfaces are **v0.11**, and `V0_11_INTERFACES_AND_SUBTYPING_DESIGN.md` §6 specifies the
+same dispatch for the tree-walking evaluator, where it is an ordinary method lookup against
+a recorded interface set. What follows is the compiled form of that structure, and it is
+Phase 1B and Phase 3 work — sequenced after every language milestone. Both are correct; only
+the tree-walker's version exists at v0.11.
 
 ### 4.1 Class Virtual Tables (`vtable`)
 * **Single Inheritance**: Superclass method indices are invariant in derived subclasses (`vtable[method_slot]`).
@@ -292,6 +305,11 @@ Quince features a **Unified Import System** where standard `import` syntax trans
 ```
 
 ### 8.2 Import Syntax Grammar & Aliasing Rules (`as`)
+
+The aliasing forms below are a **language** feature, scheduled in **v0.13 §7** — this
+document is where they were first written down, and they are specified there because a phase
+document is not the place to introduce syntax. The `py:` prefix and the C-library resolution
+step are Phase 4B's and belong here.
 
 Quince supports module-level imports, selective symbol imports, and flexible symbol aliasing via `as`:
 
@@ -389,4 +407,40 @@ For Tier-1 targets (`x86_64`/`AArch64`), Quince uses internal native encoders. F
 | **Phase 5** | **Self-Hosting Bootstrapping** | Stage 0 (`quince-rust`) $\rightarrow$ Stage 1 (`compiler/*.qn`) $\rightarrow$ Stage 2 Native Binary (`quince-native`). |
 | **Phase 6A** | **GIL-Free Multi-Threaded Concurrency** | Coroutines (`async`/`await`), structured concurrency (`parallel { spawn ... }`), `shared` RWLock objects, zero-copy `spawn move`, and per-thread local GC arenas. |
 | **Phase 6B** | **Hardware SIMD Vector Acceleration** | Native 128-bit `float32x4` / `int32x4` vector primitive types compiling to SSE2 / AVX2 / ARM NEON native CPU vector instructions. |
+
+---
+
+## 12. Language Prerequisites This Document Assumes
+
+This is an execution-engine design, and it is not the place to introduce language surface.
+Several sections above nonetheless assume syntax and types that no `v0.x` milestone in
+`DESIGN.md` schedules. They are listed here so that nothing is smuggled in as a side effect
+of a runtime phase, and so that a phase blocked on one of them fails visibly rather than
+inventing it.
+
+**Scheduled.** These were unowned when this document was written and have since been placed:
+
+| Assumed by | Feature | Now owned by |
+| :--- | :--- | :--- |
+| §1.5, §3.1, §3.2 | `**` and twelve compound-assignment operators | v0.8 §3.7 |
+| §8.2 | `import … as`, `from … import … as`, `from … as … import …` | v0.13 §7 |
+| §4.2 | `interface`, `implements`, and the interface set a class records | v0.11 §3 |
+| §9.4 | deeply frozen `const` values shared across threads | DESIGN.md, *Bindings* |
+
+**Unscheduled.** Each of these is language surface with no milestone. A phase that needs one
+is blocked on a design that does not exist yet, and saying so is the point of this table:
+
+| Assumed by | Feature | Status |
+| :--- | :--- | :--- |
+| §3.6, Phase 1B | `ref` / `final ref` / `const ref` parameters | **deferred** in v0.7 §8, never rescheduled. `PassRef` / `StoreRef` are unreachable until it is. |
+| §3.1, §9.7, Phase 1B | `op deinit`, and deterministic destruction | **unowned.** Not in `OPS`, not in any milestone. Scope-exit semantics, ordering, and what happens on an unwind are a language decision, not a codegen one. |
+| Phase 2 | `Weak[T]` and `upgrade(): Option[T]` | **unowned.** A built-in generic with a method, i.e. a language type. |
+| Phase 4A | `@export` and `@inline` pragmas | **unowned.** New declaration syntax; attribute syntax is deferred in v0.15 §7, and these are the first two attributes. |
+| Phase 6A | `async`, `await`, `parallel`, `spawn`, `spawn move`, `shared` | **unowned.** Six keywords and a concurrency model. `DESIGN.md`'s *Later* notes that designing them inside a phase document is itself the thing to revisit. |
+| Phase 6B | `float32x4`, `int32x4` | **unowned.** New built-in types with arithmetic, so a `Value` variant and `OPS` entries. |
+| §5.3 | small-string optimization changing what a `string` *is* | representation only — no language surface, listed for completeness. |
+
+The rule this table exists to enforce: **a phase may specify how a language feature is
+compiled; it may not be the only place that feature is specified.** Where the second column
+says *unowned*, the work of the phase includes writing the milestone document first.
 

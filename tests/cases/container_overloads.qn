@@ -1,0 +1,56 @@
+# A container that crossed an annotated boundary carries what it was built to
+# hold, and that is what it *is* — an empty `list[int]` is a list of ints, not a
+# list of anything the elements happen not to contradict. So container overloads
+# are told apart the same way every other overload is.
+fn total(xs: list[int]): string { return "ints" }
+fn total(xs: list[string]): string { return "strings" }
+
+let numbers: list[int] = [1, 2]
+let words: list[string] = ["a", "b"]
+print(total(numbers), total(words))
+
+# A literal with something in it is decidable from the elements alone.
+print(total([1, 2]), total(["a"]))
+
+# And an empty one is decidable once something has said what it holds.
+let nothing_yet: list[int] = []
+print(total(nothing_yet))
+
+# `any` is the top type and still accepts whatever is there, which is what keeps
+# "a list of anything" writable. Nothing else widens.
+fn describe(xs: list[any]): string { return "some list of " + string(len(xs)) }
+print(describe(numbers), describe(words))
+
+# The header is what a write is checked against, whichever annotation the value
+# arrived through — which is why widening to `list[any]` is safe.
+fn grow(xs: list[any]) {
+    xs.push("a string")
+}
+try {
+    grow(numbers)
+} catch e {
+    print("caught:", e.message)
+}
+
+# Dicts the same way. `dict[K]` is shorthand for `dict[K, _?]` (§3.10), so it is
+# a claim about the values after all — the claim that they are anything. That
+# makes a `dict[string]` no more a `dict[string, int]` than a `list[any?]` is a
+# `list[int]`, and the widening runs the other way.
+fn scores(d: dict[string, int]): string { return "string to int" }
+fn keys_only(d: dict[string]): string { return "string to anything" }
+let table: dict[string, int] = {}
+let keyed: dict[string] = {}
+print(scores(table), keys_only(keyed))
+
+# A `dict[string, int]` is a `dict[string]`, because `int` is one of the things
+# the elided `any?` admits.
+print(keys_only(table))
+
+# Not the other way. Accepting it would be a hole and not a convenience: the
+# header stays `dict[string]`, which has nothing at the value slot, so every
+# write through the `dict[string, int]` name would go unchecked.
+try {
+    print(scores(keyed))
+} catch e {
+    print("caught:", e.message)
+}

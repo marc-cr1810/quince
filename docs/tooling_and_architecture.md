@@ -1,6 +1,6 @@
-# Quince v0.7 — Tooling, LSP & CLI Reference
+# Quince v0.8.1 — Tooling, LSP & CLI Reference
 
-This manual details the command-line interface, Language Server Protocol (LSP) capabilities, editor integrations, compiler architecture, and test suite layout in Quince v0.7.
+This manual details the command-line interface, Language Server Protocol (LSP) capabilities, editor integrations, compiler architecture, and test suite layout in Quince v0.8.
 
 ---
 
@@ -103,6 +103,18 @@ Source Code (.qn)
       ▼
  4. Evaluator (src/interp/)           --> AST Interpreter & Heap Execution
 ```
+
+Stage 3 is two passes over one tree. `src/sema/resolve/` answers *where a name lives*, and
+fails — a name that does not resolve is a program that cannot run. It is also where the
+declaration rules live: `const fn` purity, `override` and `final`, default construction, and
+the overload duplicate and ambiguity checks in `src/sema/overload.rs`. `src/sema/infer/`
+answers *what a name holds*, and does not fail: `Unknown` is an answer, and most of a
+dynamically typed program is `Unknown`.
+
+Overload *selection* is stage 4's, in `src/interp/call.rs`, because it reads the argument
+values. The two halves share one idea of how well an argument fits a parameter — an exact
+type, a widening, or a parameter that takes anything — so what stage 3 predicts from the
+annotations is what stage 4 measures from the values.
 
 ### 4.2 Heap GC & Temporary Rooting (`interp.temps`)
 

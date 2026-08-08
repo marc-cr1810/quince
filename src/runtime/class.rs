@@ -127,6 +127,7 @@ impl Builtin {
                     | Op::Div
                     | Op::FloorDiv
                     | Op::Rem
+                    | Op::Pow
                     | Op::Neg
                     | Op::Eq
                     | Op::Cmp

@@ -1,0 +1,47 @@
+# `??=`, `and=`, and `or=` read the target first and may do nothing at all.
+let a: int? = nil
+a ??= 5
+print(a)
+# Already answered, so the right side is not even reached.
+fn boom() {
+    throw Error("the right side ran")
+}
+a ??= boom()
+print(a)
+
+let yes = true
+let no = false
+yes and= no
+print(yes)
+no and= boom()
+print(no)
+no or= "filled"
+print(no)
+let held = "already"
+held or= boom()
+print(held)
+
+# The target is evaluated once whether or not it assigns, exactly as for `+=`.
+let calls = 0
+fn key() {
+    calls += 1
+    return "k"
+}
+let d = {}
+d[key()] ??= 1
+d[key()] ??= 2
+print(d, calls)
+
+# A field target works the same way.
+class Config {
+    op init() { self.name = nil }
+}
+let cfg = Config()
+cfg.name ??= "default"
+cfg.name ??= "ignored"
+print(cfg.name)
+
+# The whole form is an expression, and answers with whichever side won.
+let b: int? = nil
+print(b ??= 7)
+print(b ??= 9)

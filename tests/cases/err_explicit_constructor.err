@@ -1,0 +1,1 @@
+`DatabaseConnection`'s constructor is `explicit`, so an int does not become one on its own

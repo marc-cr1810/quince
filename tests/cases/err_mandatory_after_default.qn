@@ -1,0 +1,7 @@
+# There is no call that could reach `b` positionally: every call that omitted
+# `a` would have to omit `b` too, and then there is nothing to give it.
+fn connect(port: int = 8080, host: string): string {
+    return host + string(port)
+}
+
+print(connect("localhost"))

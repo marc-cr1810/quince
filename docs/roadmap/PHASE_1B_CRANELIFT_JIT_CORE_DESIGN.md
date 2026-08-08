@@ -4,6 +4,12 @@
 
 Phase 1B implements the **Cranelift JIT Core Engine** (`src/codegen/cranelift/`), lowering Bytecode IR basic blocks directly into native RAM machine instructions (`x86_64` / `AArch64`) via `cranelift-jit`.
 
+**Blocked on two unscheduled language features**, per `BYTECODE_VM_DESIGN.md` §12: `ref`
+parameters (deferred in v0.7 §8) and `op deinit` (owned by no milestone). §1's `PassRef` /
+`StoreRef` lowering and §2's cleanup guards are unreachable until each is designed as a
+language feature. Everything else in this phase is independent of both, so the phase is
+deliverable without them — with those two items cut, not improvised.
+
 ---
 
 ## 1. Cranelift IR Translation Architecture

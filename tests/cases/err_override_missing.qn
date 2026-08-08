@@ -1,0 +1,11 @@
+class Animal {
+    fn speak() { return "..." }
+}
+
+# Replacing a superclass member silently is how a rename in `Animal` stops
+# being an error and starts being two methods that no longer meet.
+class Dog extends Animal {
+    fn speak() { return "woof" }
+}
+
+print(Dog().speak())

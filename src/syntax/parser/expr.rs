@@ -5,13 +5,28 @@
 //! to it and v0.10 adds `..`; each is a row here rather than a new production.
 
 use crate::error::Result;
-use crate::syntax::ast::{self, BinaryOp, Expr, ExprKind, LogicalOp, UnaryOp, Var};
-use crate::syntax::parser::{Parser, syntax};
+use crate::syntax::ast::{self, BinaryOp, CallArg, Expr, ExprKind, LogicalOp, UnaryOp, Var};
+use crate::syntax::parser::stmt::incr_outside_statement;
+use crate::syntax::parser::{Parser, declaration, syntax};
 use crate::syntax::token::TokenKind;
 
 /// Binding power of unary operators, above every infix operator so `-a * b`
 /// groups as `(-a) * b`.
 const UNARY_BP: u8 = 21;
+
+/// Binding power of `not`, which is the one unary operator that binds *looser*
+/// than the comparisons.
+///
+/// Above `and` and `or` and below everything else, which is where Python puts
+/// it and is the only placement that makes the word read as the word: `not a in
+/// b` is `not (a in b)`, `not a == b` is `not (a == b)`, and `not a and b` is
+/// still `(not a) and b`.
+///
+/// It sat at [`UNARY_BP`] with the others while it was spelled `!`, where C puts
+/// it and where `!a == b` means `(!a) == b`. That is defensible for a symbol and
+/// indefensible for a word — nobody reads "not a in b" as asking whether the
+/// negation of `a` is in `b`. `-` and `~` stay where they were, being symbols.
+const NOT_BP: u8 = 4;
 
 /// Binding power of `??`.
 ///
@@ -25,17 +40,36 @@ const COALESCE_BP: u8 = 9;
 /// Binding power of `is`, which is a comparison and sits with the others.
 const IS_BP: u8 = 7;
 
+/// Binding power of `in`, named because `not in` reaches it from outside the
+/// table and the two spellings must bind identically.
+const IN_BP: u8 = 7;
+
 enum InfixOp {
     Binary(BinaryOp),
     Logical(LogicalOp),
 }
 
-/// Left and right binding powers for an infix operator. Every operator here is
-/// left-associative, so the right power is always one higher.
+/// Binding power of `**`.
+///
+/// Above [`UNARY_BP`], which is what makes `-2 ** 2` mean `-(2 ** 2)`: the
+/// operand of a unary operator is parsed at `UNARY_BP`, so an operator that
+/// binds tighter is pulled into it. Python and ordinary mathematical notation
+/// both read it that way.
+const POW_BP: u8 = 23;
+
+/// Left and right binding powers for an infix operator.
+///
+/// Every operator here is left-associative except `**`, so the right power is
+/// one higher than the left — and one *lower* for the exception, which is what
+/// makes `2 ** 3 ** 2` group as `2 ** (3 ** 2)`. It differs because left
+/// association would make the operator useless for what it is for.
 fn infix_op(kind: &TokenKind) -> Option<(InfixOp, u8, u8)> {
+    if let TokenKind::StarStar = kind {
+        return Some((InfixOp::Binary(BinaryOp::Pow), POW_BP, POW_BP - 1));
+    }
     let (op, lbp) = match kind {
-        TokenKind::OrOr => (InfixOp::Logical(LogicalOp::Or), 1),
-        TokenKind::AndAnd => (InfixOp::Logical(LogicalOp::And), 3),
+        TokenKind::Or => (InfixOp::Logical(LogicalOp::Or), 1),
+        TokenKind::And => (InfixOp::Logical(LogicalOp::And), 3),
         // The three bitwise operators sit between the logical operators and the
         // comparisons, in C's order — `|` loosest, then `^`, then `&`. Quince
         // does not inherit C's mistake of putting them *looser* than `==`,
@@ -44,7 +78,7 @@ fn infix_op(kind: &TokenKind) -> Option<(InfixOp, u8, u8)> {
         // looks like.
         TokenKind::Eq => (InfixOp::Binary(BinaryOp::Eq), 5),
         TokenKind::Ne => (InfixOp::Binary(BinaryOp::Ne), 5),
-        TokenKind::In => (InfixOp::Binary(BinaryOp::In), 7),
+        TokenKind::In => (InfixOp::Binary(BinaryOp::In), IN_BP),
         TokenKind::Lt => (InfixOp::Binary(BinaryOp::Lt), 7),
         TokenKind::Le => (InfixOp::Binary(BinaryOp::Le), 7),
         TokenKind::Gt => (InfixOp::Binary(BinaryOp::Gt), 7),
@@ -82,6 +116,48 @@ impl Parser {
     /// `a = (b = c)`.
     pub(super) fn assignment(&mut self) -> Result<Expr> {
         let lhs = self.binary(0)?;
+
+        // `a op= b` is `a = a op b` with the target evaluated once, which is the
+        // whole reason it is a language form rather than something a program
+        // writes out — `d[f()] += 1` calls `f` a single time. The node is what
+        // carries "once"; a desugaring here could not.
+        if let TokenKind::AssignOp(op) = self.peek().kind {
+            self.advance();
+            if !is_assignable(&lhs) {
+                return Err(syntax("cannot assign to this expression", lhs.span));
+            }
+            let value = self.assignment()?;
+            let span = lhs.span.to(value.span);
+            return Ok(Expr {
+                kind: ExprKind::AssignOp {
+                    target: Box::new(lhs),
+                    op,
+                    value: Box::new(value),
+                },
+                span,
+            });
+        }
+
+        // `and=`, `or=`, and `??=`. Parsed beside the compound assignments
+        // because they are written like one and bind like one; a separate node
+        // because the right side may not run — see [`ExprKind::AssignShort`].
+        if let TokenKind::AssignShort(op) = self.peek().kind {
+            self.advance();
+            if !is_assignable(&lhs) {
+                return Err(syntax("cannot assign to this expression", lhs.span));
+            }
+            let value = self.assignment()?;
+            let span = lhs.span.to(value.span);
+            return Ok(Expr {
+                kind: ExprKind::AssignShort {
+                    target: Box::new(lhs),
+                    op,
+                    value: Box::new(value),
+                },
+                span,
+            });
+        }
+
         if !self.eat(&TokenKind::Assign) {
             return Ok(lhs);
         }
@@ -136,12 +212,57 @@ impl Parser {
                     break;
                 }
                 self.advance();
+                // `x is not string` is the negation of `x is string`, and is
+                // built as one: a `Not` over the ordinary node rather than a
+                // second node meaning the opposite. Every pass that already
+                // knows what `is` means therefore needs no change — including
+                // the narrowing in `sema::infer`, which correctly declines to
+                // narrow here, since what a *failed* type test proves is not
+                // something that pass can express.
+                let negated = self.eat(&TokenKind::Not);
                 let ty = self.type_expr()?;
                 let span = lhs.span.to(ty.span);
                 lhs = Expr {
                     kind: ExprKind::Is {
                         value: Box::new(lhs),
                         ty,
+                    },
+                    span,
+                };
+                if negated {
+                    lhs = Expr {
+                        kind: ExprKind::Unary {
+                            op: UnaryOp::Not,
+                            rhs: Box::new(lhs),
+                        },
+                        span,
+                    };
+                }
+                continue;
+            }
+            // `a not in b`, the other operator written as two words. `not` is a
+            // prefix operator everywhere else, so it is only this form when an
+            // `in` follows it — and reaching here at all means an operand is
+            // already in hand, where a prefix `not` could not be.
+            if self.check(&TokenKind::Not) && matches!(self.peek_ahead(), TokenKind::In) {
+                if IN_BP < min_bp {
+                    break;
+                }
+                self.advance();
+                self.advance();
+                let rhs = self.binary(IN_BP + 1)?;
+                let span = lhs.span.to(rhs.span);
+                lhs = Expr {
+                    kind: ExprKind::Unary {
+                        op: UnaryOp::Not,
+                        rhs: Box::new(Expr {
+                            kind: ExprKind::Binary {
+                                op: BinaryOp::In,
+                                lhs: Box::new(lhs),
+                                rhs: Box::new(rhs),
+                            },
+                            span,
+                        }),
                     },
                     span,
                 };
@@ -176,14 +297,22 @@ impl Parser {
     }
 
     pub(super) fn unary(&mut self) -> Result<Expr> {
-        let op = match self.peek().kind {
-            TokenKind::Minus => UnaryOp::Neg,
-            TokenKind::Not => UnaryOp::Not,
-            TokenKind::Tilde => UnaryOp::BitNot,
+        let (op, bp) = match self.peek().kind {
+            TokenKind::Minus => (UnaryOp::Neg, UNARY_BP),
+            TokenKind::Not => (UnaryOp::Not, NOT_BP),
+            TokenKind::Tilde => (UnaryOp::BitNot, UNARY_BP),
+            // Reaching here means an operand was expected, and `++` is not one:
+            // it is a statement, and `statement` has already taken every `++`
+            // that opens one. Refusing it by name beats letting it fall through
+            // to "expected an expression", which names the token and not the
+            // rule. `- -x` still works; `--x` in operand position lands here.
+            TokenKind::PlusPlus | TokenKind::MinusMinus => {
+                return Err(incr_outside_statement(self.peek()));
+            }
             _ => return self.postfix(),
         };
         let start = self.advance().span;
-        let rhs = self.binary(UNARY_BP)?;
+        let rhs = self.binary(bp)?;
         let span = start.to(rhs.span);
         Ok(Expr {
             kind: ExprKind::Unary {
@@ -223,13 +352,7 @@ impl Parser {
                 }
                 TokenKind::LParen if !newline => {
                     self.advance();
-                    let mut args = Vec::new();
-                    while !self.check(&TokenKind::RParen) {
-                        args.push(self.expression()?);
-                        if !self.eat(&TokenKind::Comma) {
-                            break;
-                        }
-                    }
+                    let args = self.arguments()?;
                     let close = self.expect(TokenKind::RParen, "after the arguments")?;
                     Expr {
                         span: expr.span.to(close.span),
@@ -288,6 +411,62 @@ impl Parser {
                 }
             };
         }
+    }
+
+    /// The arguments between a call's parentheses, positional then named.
+    ///
+    /// `name: expr` is a keyword argument and `expr` is a positional one, told
+    /// apart by one token of lookahead — an identifier followed by a `:`. There
+    /// is nothing else that shape can be inside a call: a dict literal starts
+    /// with `{`, and a bare `:` here was a syntax error before v0.8.
+    ///
+    /// A positional argument after a named one is refused, because that ordering
+    /// has no reading that is not a guess: the named one already took a
+    /// parameter out of the sequence, and which one the next value continues
+    /// from would be a rule nobody could hold in their head.
+    pub(super) fn arguments(&mut self) -> Result<Vec<CallArg>> {
+        let mut args: Vec<CallArg> = Vec::new();
+        while !self.check(&TokenKind::RParen) {
+            let named = match &self.peek().kind {
+                TokenKind::Ident(name) => self
+                    .tokens
+                    .get(self.pos + 1)
+                    .is_some_and(|token| token.kind == TokenKind::Colon)
+                    .then(|| (name.clone(), self.peek().span)),
+                _ => None,
+            };
+            match named {
+                Some(name) => {
+                    self.advance();
+                    self.advance();
+                    args.push(CallArg {
+                        name: Some(name),
+                        value: self.expression()?,
+                    });
+                }
+                None => {
+                    if let Some(earlier) = args.iter().find_map(|arg| arg.name.as_ref()) {
+                        return Err(declaration(
+                            format!(
+                                "this argument has no name, and `{}:` before it does",
+                                earlier.0
+                            ),
+                            self.peek().span,
+                        )
+                        .with_help(
+                            "a named argument takes a parameter out of the sequence, so what \
+                             this one would continue from is a guess — name it too, or move it \
+                             in front",
+                        ));
+                    }
+                    args.push(CallArg::positional(self.expression()?));
+                }
+            }
+            if !self.eat(&TokenKind::Comma) {
+                break;
+            }
+        }
+        Ok(args)
     }
 
     pub(super) fn primary(&mut self) -> Result<Expr> {
@@ -384,7 +563,7 @@ impl Parser {
     // -- token helpers -----------------------------------------------------
 }
 
-fn is_assignable(expr: &Expr) -> bool {
+pub(super) fn is_assignable(expr: &Expr) -> bool {
     matches!(
         expr.kind,
         ExprKind::Var(_) | ExprKind::Index { .. } | ExprKind::Field { .. }

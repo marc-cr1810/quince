@@ -1,0 +1,1 @@
+`const fn total` may not call `bump`, which is not `const`

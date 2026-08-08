@@ -1,0 +1,11 @@
+class Animal {
+    fn speak() { return "..." }
+}
+
+# The other half: a keyword that could be written where it is not true would be
+# documentation nobody can trust, and this is the typo it catches.
+class Dog extends Animal {
+    override fn speek() { return "woof" }
+}
+
+print(Dog().speak())

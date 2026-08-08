@@ -1,0 +1,7 @@
+fn connect(host: string, port: int = 8080): string {
+    return host + string(port)
+}
+
+# A parameter is filled once. Last-wins would make which value arrives depend
+# on a reading order nobody agrees on.
+print(connect("localhost", host: "elsewhere"))

@@ -33,6 +33,13 @@ impl Interp {
         // Whatever the op returns is the answer — a subscript has no type it has
         // to be, any more than `+` does.
         if let Some(method) = self.slot(target, Op::Get) {
+            let method = self.op_for(
+                Op::Get,
+                method,
+                target,
+                std::slice::from_ref(index),
+                (span, span, span),
+            )?;
             return self.call_op(method, target, vec![index.clone()]);
         }
 

@@ -12,7 +12,7 @@ use crate::runtime::class::Instance;
 use crate::runtime::dict::{Dict, Key};
 use crate::runtime::heap::{Heap, ObjId, Object};
 use crate::runtime::value::Value;
-use crate::syntax::ast::{BinaryOp, TypeExpr};
+use crate::syntax::ast::{BinaryOp, Op, TypeExpr};
 use crate::syntax::token::Span;
 
 /// Refuses a value that does not hold as the annotation it was checked against.
@@ -221,6 +221,7 @@ pub(crate) fn type_error(
         Mul => "multiply",
         Div | FloorDiv => "divide",
         Rem => "take the remainder of",
+        Pow => "raise",
         BitAnd | BitOr | BitXor => "combine the bits of",
         Shl | Shr => "shift",
         Lt | Le | Gt | Ge => "compare",
@@ -249,6 +250,56 @@ pub(crate) fn type_error(
         "Change {} or {} to be compatible types and try again",
         lhs.type_name(heap),
         rhs.type_name(heap)
+    ))
+}
+
+/// An operator whose class declares the slot, but not for these operands.
+///
+/// Deliberately not the parameter-mismatch report an ordinary call gets. That
+/// one underlines the parameter that refused the value, which is right for a
+/// call — the reader wrote the argument and can see the declaration — and wrong
+/// here twice over: the parameter is one nobody wrote, and the caret lands in
+/// the class rather than on the expression that failed.
+///
+/// So this keeps [`type_error`]'s shape — a label on each operand and the caret
+/// on the whole expression — and adds the one thing that report cannot know:
+/// what the class *does* declare the operator for.
+pub(crate) fn op_mismatch(
+    heap: &Heap,
+    op: Op,
+    receiver: &Value,
+    args: &[Value],
+    takes: &[String],
+    spans: (Span, Span, Span),
+) -> Raised {
+    let (lhs_span, rhs_span, expr_span) = spans;
+    let given: Vec<&str> = args.iter().map(|arg| arg.type_name(heap)).collect();
+    let mut err = QuinceError::new(
+        format!(
+            "`op {}` on {} does not take ({})",
+            op.name(),
+            an(receiver.type_name(heap)),
+            given.join(", ")
+        ),
+        expr_span,
+    )
+    .with_kind(ErrorKind::Type);
+
+    // The operand labels only where the two are really apart. `x[k]` and
+    // `needle in x` come through here with one span for all three, and three
+    // labels on one range renders as noise.
+    if lhs_span != rhs_span {
+        err = err
+            .with_label(lhs_span, receiver.type_name(heap).to_string())
+            .with_label(rhs_span, given.join(", "));
+    }
+
+    err.with_help(format!(
+        "`{}` declares `op {}` for: {} — convert the operand, or declare one for these types \
+         beside the ones that are there",
+        receiver.type_name(heap),
+        op.name(),
+        takes.join(", ")
     ))
 }
 

@@ -22,6 +22,7 @@
 
 pub mod check;
 pub mod infer;
+pub mod overload;
 pub mod resolve;
 pub mod symbols;
 pub mod types;

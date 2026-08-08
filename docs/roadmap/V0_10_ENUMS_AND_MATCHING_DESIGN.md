@@ -23,7 +23,9 @@ codebase has already recorded, the reversal is argued rather than assumed.
 8. **`array[T, N]`** — fixed-size contiguous storage, on v0.9's const generics. §7.3.
 9. **`bytes`** — a sequence of `u8`, with a `b"…"` literal. §7.4.
 10. **`set[T]`**, and the `set`-versus-`dict` literal rules `{…}` now needs. §7.5.
-11. **Tagged-union layout and null pointer optimization.** §8.
+11. **Class and dict destructuring in a binding**, which is §6's patterns reaching the one
+    place that is not a `match`. §6.6.
+12. **Tagged-union layout and null pointer optimization.** §8.
 
 `tuple` is **not** on this list. An earlier draft claimed it; it is specified in full in
 v0.9 §3.5, and what this milestone adds is pattern matching over it (§6.3).
@@ -247,15 +249,20 @@ The grammar, stated because an earlier draft left three of these to be guessed:
   `fn`, `op`, or modifier keyword. A trailing comma after the last variant is permitted.
 - **A unit variant takes no parentheses**, in declaration or in use — `Event.Heartbeat`,
   never `Event.Heartbeat()`.
-- **Field defaults are not in this milestone.** `Ok(code: int = 200)` appeared in an earlier
-  draft. It needs rules for what `HttpStatus.Ok()` means and whether a defaulted field may
-  be skipped mid-list, which is the whole of default arguments — a feature the language does
-  not have for functions either. §10.
+- **Field defaults follow v0.8 §3.6, and add nothing.** `Ok(code: int = 200)` was deferred
+  in an earlier draft on the grounds that it needs rules for what `HttpStatus.Ok()` means
+  and whether a defaulted field may be skipped mid-list — which is the whole of default
+  arguments, a feature the language did not then have. It has them now: a variant is
+  constructed by a call, defaults are filled in at that call, and a field is skipped by
+  naming the ones after it (`HttpStatus.Ok(reason: "OK")`). This milestone writes no rule of
+  its own, which is the point — the alternative was two answers to one question, which is
+  the mistake v0.7 §3.6 names about module visibility.
 
 ### 5.2 Methods and operators
 
-Methods and operators follow the variant list, and everything v0.7 says about them applies
-unchanged — visibility, `const`, overloading, `override`, `final`:
+Methods and operators follow the variant list, and everything v0.7 and v0.8 say about them
+applies unchanged — visibility from v0.7 §3.4, and `const fn`, `override`, `final`, and
+overloading from v0.8 §3:
 
 ```quince
 enum HttpStatus {
@@ -393,30 +400,56 @@ if let Option.Some(user) = find_user(101) {
 - Patterns are §6.2's, so named and positional binding both work.
 - **No `while let` in this milestone.** It is small, and it belongs with the iteration work
   in §7.2 rather than here. §10.
-### 6.6 Class & Dict Destructuring
 
-Beyond tuple destructuring (v0.9 §3.5) and enum pattern matching (§6.2), Quince supports class field and dictionary key destructuring in `let` bindings:
+### 6.6 Class and dict destructuring in a binding
+
+Tuple destructuring is v0.9 §3.5's, and enum destructuring is §6.2's. The remaining two
+shapes a program routinely pulls apart are a class instance and a dict, and both are
+reachable in a `let`:
 
 ```quince
 class User {
-    public let name: string
-    public let age: int
+    public final name: string
+    public final age: int
     private let token: string
+
+    op init(name: string, age: int, token: string) {
+        self.name = name
+        self.age = age
+        self.token = token
+    }
 }
 
 let user = User("Alice", 30, "secret_tok")
 
-# Destructure public fields:
+# Class fields, by name
 let User { name, age } = user
 
-# Dict key destructuring:
+# Dict keys, by literal key
 let config = {"host": "localhost", "port": 8080}
-let {"host": server_host, "port": server_port} = config
+let { "host": server_host, "port": server_port } = config
 ```
 
 Rules:
-- **Strict Member Visibility Enforcement.** Class destructuring can **only** extract `public` fields. Destructuring `private` or `protected` fields outside class scope is refused at resolution with a `VisibilityError`.
-- **Dict Destructuring.** Unpacks specific literal key values into new local variable bindings.
+
+- **Binding position only.** `User { … }` is a pattern in a `let`, and is **not** an
+  expression and **not** a `match` arm. This is a deliberate limit, and §7.5 is why: the
+  argument that a `{` never competes with a block rests on Quince having no `Name { … }`
+  form in *expression* position. Admitting one into `match` arms — where a scrutinee is
+  followed by a `{` — would reintroduce exactly the ambiguity Rust has to restrict its way
+  out of. A `let` has no such problem, because the form is reached only after `let` and
+  before `=`.
+- **Public fields only.** Class destructuring extracts `public` fields; naming a `private`
+  or `protected` one from outside the declaring class is refused at resolution, by v0.7's
+  visibility rules and not by a new one. Inside the class, the ordinary rules apply and
+  `token` is reachable.
+- **A field is bound to its own name**, or renamed with `field: local`, matching §6.2's
+  named form so that one syntax means one thing in both places.
+- **Dict destructuring takes literal keys**, and each is a `d[k]` — so it answers `V?` by
+  v0.7 §3.10, and a missing key binds `nil` rather than failing. That is the one place this
+  form differs from the others: a class always has its fields and a tuple always has its
+  arity, and a dict does not.
+- **Every name introduced obeys the usual binding rules**, as v0.9 §3.5 says of tuples.
 
 ---
 
@@ -604,8 +637,10 @@ let diff_set  = s1 - s2         # {1, 2}
 
 **`T` must be a type a set can hash** — `dict::Key`'s closed set of `nil`, `bool`, `int`,
 `float`, `string` — for exactly the reason v0.7 §4.2 gives about dict keys. A set is a dict
-without values; it inherits the constraint, and it will inherit the loosening when v0.7 §8's
-`op hash` work happens.
+without values; it inherits the constraint, and it inherits the loosening one milestone
+later, when v0.11's `op hash` lands. Shipping `set[T]` here with the narrow constraint and
+widening it there is deliberate: the alternative is holding `set` back a milestone for a
+restriction that every existing dict already lives with.
 
 **Literal disambiguation.** `{…}` now spells three things:
 
@@ -627,8 +662,8 @@ Rust needs a restriction here because it has `Name { … }` struct literals, who
 follows a path expression; Quince has no such form, so the two uses never compete. The
 parser says as much at the `LBrace` arm of `primary`.
 
-`let s: set[int]` with no initializer auto-initializes to an empty set, extending v0.7
-v0.8 §3.4's rule (`list` → `[]`, `dict` → `{}`) with `set` → `set()`.
+`let s: set[int]` with no initializer auto-initializes to an empty set, extending v0.8
+§3.4's rule (`list` → `[]`, `dict` → `{}`) with `set` → `set()`.
 
 ---
 
@@ -679,8 +714,10 @@ enums, because it closes the `Op::Get` hole the codebase has been carrying, and 
 operators, the reified header, `is`. No matching yet: an enum value can be built, stored,
 compared, and printed.
 
-**Tranche 3 — `match` and `if let`.** Patterns, binding, arm type-joining, exhaustiveness,
-unreachable-arm refusal. The largest single item here, and what justifies tranche 2.
+**Tranche 3 — `match`, `if let`, and destructuring bindings.** Patterns, binding, arm
+type-joining, exhaustiveness, unreachable-arm refusal, and §6.6's class and dict forms — which
+are last within the tranche and are the same pattern code reaching a second grammar position.
+The largest single item here, and what justifies tranche 2.
 
 **Tranche 4 — `Option` and `Result`.** The built-in generic enums, and §3's unification of
 `T?` with `Option[T]` — which touches v0.7's `?.`, `??`, and `d[key]`. Deliberately after
@@ -695,13 +732,18 @@ whole milestone.
 `list[T]` moving onto `array` as its backing store is an optimization that can follow the
 milestone rather than gate it.
 
+**The cut line is after tranche 5**, and this milestone needs one stated because it is the
+largest in the roadmap by feature count. Tranches 6 and 7 are three container types that
+share no machinery with enums, matching, or `Option` — the document's own ordering says so —
+and each is a self-contained addition that a later milestone can take unchanged.
+
+What cannot be cut is tranche 1. It is sequenced first because §7.1.1 removes `x[a:b]`, and
+a milestone that ships matching while leaving two slicing syntaxes in the language has taken
+on the cost of the change without the benefit.
+
 ---
 
 ## 10. Deferred
-
-**Field defaults on variants.** §5.1. It is default arguments, which the language does not
-have for functions either, and doing it for one and not the other repeats the mistake v0.7
-v0.7 §3.6 names about module visibility.
 
 **`while let`.** §6.5. It belongs with iteration, and is small enough to fold into whichever
 milestone next touches loops.
@@ -756,4 +798,12 @@ milestone does not need them.
 - **`{}` stays an empty dict.** §7.5 rule 3.
 - **`bytes` indexes to `int` and slices to `bytes`.** §7.4.
 - **The tag is a `u8`; 256 variants is the limit.** §8.1.
+- **Variant field defaults are v0.8 §3.6's rules, unchanged.** An earlier draft deferred
+  them; defaults exist now, and writing a second set of rules for variants is the thing to
+  avoid. §5.1.
+- **Class destructuring is a binding form and never an expression or a `match` arm**, which
+  is what keeps §7.5's argument about `{` intact. §6.6.
+- **A destructured dict key answers `V?`**, so a missing key binds `nil`. §6.6.
 - **`tuple` belongs to v0.9.** This milestone only matches on it. §1.
+- **The cut line is after tranche 5** — `set`, `array`, and `bytes` are severable and the
+  rest is not. §9.

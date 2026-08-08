@@ -178,6 +178,14 @@ pub enum Value {
     List(ObjId),
     Dict(ObjId),
     Function(ObjId),
+    /// Several declarations sharing a name, one of which a call selects — v0.8
+    /// §3.5.
+    ///
+    /// A `function` like any other as far as a program can see: it prints as
+    /// one, its type is `function`, and it is called the same way. What is
+    /// different happens inside the call, where the argument types decide which
+    /// of the declarations runs.
+    Overload(ObjId),
     Native(&'static Native),
     /// Heap-allocated because it holds a receiver, which may be a handle the
     /// collector has to follow.
@@ -203,6 +211,7 @@ impl Value {
             Value::List(id)
             | Value::Dict(id)
             | Value::Function(id)
+            | Value::Overload(id)
             | Value::BoundMethod(id)
             | Value::Class(id)
             | Value::Instance(id)
@@ -231,7 +240,10 @@ impl Value {
             Value::Str(_) => Builtin::Str,
             Value::List(_) => Builtin::List,
             Value::Dict(_) => Builtin::Dict,
-            Value::Function(_) | Value::Native(_) | Value::BoundMethod(_) => Builtin::Function,
+            Value::Function(_)
+            | Value::Overload(_)
+            | Value::Native(_)
+            | Value::BoundMethod(_) => Builtin::Function,
             Value::Class(_) => Builtin::Class,
             Value::Module(_) => Builtin::Module,
             Value::Instance(id) => return heap.instance(*id).class,
@@ -300,7 +312,10 @@ impl Value {
             Value::Str(s) => !s.is_empty(),
             Value::List(id) => !heap.list(*id).is_empty(),
             Value::Dict(id) => !heap.dict(*id).is_empty(),
-            Value::Function(_) | Value::Native(_) | Value::BoundMethod(_) => true,
+            Value::Function(_)
+            | Value::Overload(_)
+            | Value::Native(_)
+            | Value::BoundMethod(_) => true,
             // An instance carrying no payload is truthy regardless of its fields:
             // there is nothing to ask, since a class cannot yet answer for itself.
             // One extending a builtin was unwrapped above, so `Username("")` is
@@ -347,6 +362,14 @@ impl Value {
                 format!("{{{}}}", entries.join(", "))
             }
             Value::Function(id) => format!("<fn {}>", heap.function(*id).decl.name),
+            Value::Overload(id) => match heap.overload(*id).first() {
+                Some(first) => format!(
+                    "<fn {} and {} more>",
+                    first.callable_name(heap),
+                    heap.overload(*id).len() - 1
+                ),
+                None => "<fn>".to_string(),
+            },
             Value::Native(native) => format!("<builtin {}>", native.name),
             Value::BoundMethod(id) => {
                 let bound = heap.bound_method(*id);
@@ -376,6 +399,11 @@ impl Value {
         match self {
             Value::Native(native) => native.name,
             Value::Function(id) => &heap.function(*id).decl.name,
+            // Every candidate shares the name — that is what makes them a set.
+            Value::Overload(id) => match heap.overload(*id).first() {
+                Some(first) => first.callable_name(heap),
+                None => "function",
+            },
             other => other.type_name(heap),
         }
     }
@@ -408,6 +436,7 @@ impl PartialEq for Value {
             (Value::List(a), Value::List(b)) => a == b,
             (Value::Dict(a), Value::Dict(b)) => a == b,
             (Value::Function(a), Value::Function(b)) => a == b,
+            (Value::Overload(a), Value::Overload(b)) => a == b,
             (Value::Native(a), Value::Native(b)) => std::ptr::eq(*a, *b),
             (Value::BoundMethod(a), Value::BoundMethod(b)) => a == b,
             (Value::Class(a), Value::Class(b)) => a == b,

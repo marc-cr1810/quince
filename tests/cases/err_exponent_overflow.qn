@@ -1,0 +1,3 @@
+# Overflow stays checked: `**` grows fast enough that this is the first
+# operator anyone reaches it with.
+print(2 ** 63)

@@ -4,6 +4,15 @@
 
 Phase 6A introduces **GIL-Free Multi-Core Parallelism**, **Structured Concurrency (`parallel { spawn ... }`)**, **Coroutines (`async`/`await`)**, and **`shared` RWLock Objects**.
 
+**This phase is mostly a language milestone wearing a runtime phase's clothes.** `async`,
+`await`, `parallel`, `spawn`, `spawn move`, and `shared` are six new keywords, a colouring
+rule for which functions may await, a cancellation model, and a decision about what a
+`shared` object's field access means — none of which is a codegen question, and all of which
+`BYTECODE_VM_DESIGN.md` §12 lists as unscheduled. The runtime work here (per-thread arenas,
+work stealing, safepoint polls) is real and is this phase's; the surface above it needs a
+`v0.x` document first, and DESIGN.md's *Later* says so. What follows is the runtime sketch,
+not that design.
+
 ---
 
 ## 1. Concurrency Primitives

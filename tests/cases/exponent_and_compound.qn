@@ -1,0 +1,83 @@
+# `**` and the compound assignments. Neither is a declaration modifier; both are
+# the operator surface the bytecode phases already assume exists.
+print(2 ** 10)
+print(2.0 ** 0.5)
+
+# Right-associative, which is the one place it differs from every other binary
+# operator in the language — left association would make it useless for what it
+# is for.
+print(2 ** 3 ** 2)
+
+# And tighter than unary minus, following Python and ordinary mathematical
+# notation. `(-2) ** 2` is how the other reading is written.
+print(-2 ** 2, (-2) ** 2)
+
+# An `int ** negative-int` answers a float, because the integer result does not
+# exist — the same rule `/` already follows.
+print(2 ** -1, 2 ** 0)
+
+let n = 5
+n += 3
+print(n)
+n **= 2
+print(n)
+n //= 5
+print(n)
+n -= 2
+n *= 4
+n %= 7
+print(n)
+
+let bits = 1
+bits <<= 4
+bits |= 3
+bits &= 30
+bits ^= 2
+bits >>= 1
+print(bits)
+
+# `a op= b` is `a = a op b`, so a list gets a new list exactly as `xs = xs + [3]`
+# would — there is no in-place slot beside the binary one.
+let xs = [1, 2]
+final same = xs
+xs += [3]
+print(xs, same)
+
+let text = "ab"
+text += "c"
+print(text)
+
+# The target is evaluated once, which is the whole reason this is a language
+# form rather than something a program writes out.
+let calls = 0
+fn key(): string {
+    calls += 1
+    return "k"
+}
+let counts = {"k": 10}
+counts[key()] += 1
+print(counts, calls)
+
+let grid = [[1, 2], [3, 4]]
+grid[0][1] *= 10
+print(grid)
+
+# A class defining `op add` gets `+=` for free, and `op pow` answers `**`.
+class Money {
+    op init(cents: int) { self.cents = cents }
+    const op add(other: Money): Money { return Money(self.cents + other.cents) }
+    const op pow(times: int): Money { return Money(self.cents ** times) }
+    const op string(): string { return "$" + string(self.cents) }
+}
+let wallet = Money(5)
+wallet += Money(3)
+print(wallet)
+print(Money(3) ** 2)
+
+class Tally {
+    let total: int = 0
+}
+let t = Tally()
+t.total += 4
+t.total **= 2
+print(t.total)

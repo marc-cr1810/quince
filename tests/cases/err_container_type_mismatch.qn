@@ -1,0 +1,7 @@
+# A container is what its annotation said, not what its elements have so far
+# failed to contradict.
+let scores: dict[string, int] = {}
+
+fn flags(d: dict[string, bool]): int { return len(d) }
+
+print(flags(scores))

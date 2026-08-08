@@ -278,16 +278,21 @@ pub(crate) fn highlight_token(
         | TokenKind::Slash
         | TokenKind::SlashSlash
         | TokenKind::Percent
+        | TokenKind::StarStar
         | TokenKind::Assign
+        | TokenKind::AssignOp(_)
+        // `and=` and `or=` are spelled with letters and so are caught by the
+        // keyword arm above before ever reaching here. Listed anyway, because
+        // which arm claims a token is not a thing to leave to arm order.
+        | TokenKind::AssignShort(_)
+        | TokenKind::PlusPlus
+        | TokenKind::MinusMinus
         | TokenKind::Eq
         | TokenKind::Ne
         | TokenKind::Lt
         | TokenKind::Le
         | TokenKind::Gt
-        | TokenKind::Ge
-        | TokenKind::Not
-        | TokenKind::AndAnd
-        | TokenKind::OrOr => Style::DIM.paint(text, use_color),
+        | TokenKind::Ge => Style::DIM.paint(text, use_color),
 
         _ => text.to_string(),
     }

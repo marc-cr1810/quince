@@ -46,18 +46,32 @@ print(nil is int)
 print(nil is int?)
 print(known is User)
 
-# Exact, not variant: a `list[int]` is a `list` and is not a `list[string]`.
+# Invariant, with the one exception §4.1 makes: `any` is the top type, so a
+# `list[int]` is a `list[any]` and is not a `list[string]`.
 let ints: list[int] = [1, 2]
-print(ints is list)
 print(ints is list[int])
+print(ints is list[any])
 print(ints is list[string])
+
+# An argument nobody wrote is `any?`, so `list` and `list[any?]` are one type
+# written two ways, and `is` answers them alike. §3.10.
+print(ints is list)
+print(ints is list[any?])
+
+# `any` does not admit `nil`, so it does not admit a container that may hold one.
+let maybe: list[int?] = [1, nil]
+print(maybe is list[any?])
+print(maybe is list[any])
 
 # No widening. An annotation converts at a boundary; a question about a value in
 # hand answers about the value in hand.
 print(1 is float)
 
 # Read off the reified header rather than by scanning, so a list nothing ever
-# declared an element type for is not a `list[int]`.
+# declared an element type for is a `list[any?]` and nothing narrower. The
+# annotation on a `let` is what *decides* an unstamped container's type, which is
+# why `let xs: list[int] = [1, 2]` is still accepted.
+print([1, 2] is list[any?])
 print([1, 2] is list[int])
 
 # Narrowing, which the guard is for.

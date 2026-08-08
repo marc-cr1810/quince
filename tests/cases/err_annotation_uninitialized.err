@@ -1,1 +1,1 @@
-`x` is annotated but not initialized
+`int` has no default constructor, so `x` needs an initializer

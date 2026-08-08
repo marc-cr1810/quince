@@ -1,0 +1,12 @@
+class DatabaseConnection {
+    private let timeout_ms: int = 0
+
+    # The argument is not a conversion: `DatabaseConnection(1000)` reads as a
+    # timeout only because the call names the class.
+    public explicit op init(timeout_ms: int) {
+        self.timeout_ms = timeout_ms
+    }
+}
+
+let db: DatabaseConnection = 1000
+print(db)

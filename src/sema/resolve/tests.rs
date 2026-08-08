@@ -118,7 +118,7 @@ fn top_level_names_stay_global() {
         panic!("expected a call");
     };
     assert_eq!(var(callee), Slot::Global, "`print` is a builtin global");
-    assert_eq!(var(&args[0]), Slot::Global);
+    assert_eq!(var(&args[0].value), Slot::Global);
 }
 
 #[test]
@@ -477,7 +477,7 @@ fn super_init_is_confined_to_op_init() {
     // Every other `super` name is untouched.
     resolved(
         "class Animal {\n fn speak() { return 1 }\n}\n\
-         class Dog extends Animal {\n fn speak() { return super.speak() }\n}",
+         class Dog extends Animal {\n override fn speak() { return super.speak() }\n}",
     );
 }
 
@@ -505,4 +505,306 @@ fn a_cycle_in_what_was_written_does_not_hang_the_walk() {
     // Refused by the evaluator, which reads a parent before binding the
     // subclass's name — but this walk runs first and has to terminate.
     resolved("class A extends B {}\nclass B extends A {}");
+}
+
+#[test]
+fn replacing_a_superclass_member_has_to_say_so() {
+    // Both halves, because either alone is worthless: a word that is required
+    // where it is true and writable where it is not is documentation nobody can
+    // trust, and a word that is optional catches no rename at all.
+    assert_eq!(
+        resolve_err("class A {\n fn m() { return 1 }\n}\nclass B extends A {\n fn m() { return 2 }\n}"),
+        "`fn m` replaces `A`'s and does not say so"
+    );
+    assert_eq!(
+        resolve_err("class A {\n fn m() { return 1 }\n}\nclass B extends A {\n override fn n() { return 2 }\n}"),
+        "`fn n` overrides nothing"
+    );
+    resolved("class A {\n fn m() { return 1 }\n}\nclass B extends A {\n override fn m() { return 2 }\n}");
+    // And one that adds rather than replaces needs no word.
+    resolved("class A {\n fn m() { return 1 }\n}\nclass B extends A {\n fn n() { return 2 }\n}");
+}
+
+#[test]
+fn override_reaches_through_the_whole_chain() {
+    // Not just the immediate parent: what a grandparent declared is what a
+    // grandchild replaces, and the walk is what makes the two agree.
+    resolved(
+        "class A {\n fn m() { return 1 }\n}\nclass B extends A {}\n\
+         class C extends B {\n override fn m() { return 2 }\n}",
+    );
+    assert_eq!(
+        resolve_err(
+            "class A {\n fn m() { return 1 }\n}\nclass B extends A {}\n\
+             class C extends B {\n fn m() { return 2 }\n}"
+        ),
+        "`fn m` replaces `A`'s and does not say so"
+    );
+}
+
+#[test]
+fn a_builtin_ancestors_methods_count_as_declared() {
+    // A seed table is a `static`, so this is answerable at resolution — and it
+    // has to be, or `class Email extends string` would be the one hierarchy in
+    // the language where a member could be replaced silently.
+    assert_eq!(
+        resolve_err("class Email extends string {\n fn upper() { return \"E\" }\n}"),
+        "`fn upper` replaces `string`'s and does not say so"
+    );
+    resolved("class Email extends string {\n override fn upper() { return \"E\" }\n}");
+    // A builtin descends from nothing, so a name it does not seed is absent
+    // rather than unknown, and a stray `override` there is still refused.
+    assert_eq!(
+        resolve_err("class Email extends string {\n override fn shout() { return \"E\" }\n}"),
+        "`fn shout` overrides nothing"
+    );
+}
+
+#[test]
+fn a_final_member_cannot_be_replaced() {
+    assert_eq!(
+        resolve_err(
+            "class A {\n final fn m() { return 1 }\n}\nclass B extends A {\n override fn m() { return 2 }\n}"
+        ),
+        "cannot override `fn m`, which is final in `A`"
+    );
+    // Reported as the guard rather than as a missing keyword, because adding
+    // `override` is exactly the advice that would not work.
+    assert_eq!(
+        resolve_err(
+            "class A {\n final fn m() { return 1 }\n}\nclass B extends A {\n fn m() { return 2 }\n}"
+        ),
+        "cannot override `fn m`, which is final in `A`"
+    );
+}
+
+#[test]
+fn a_constructor_is_exempt() {
+    // Every constructor in a hierarchy replaces its parent's — that is what
+    // `super.init` is for — so requiring the word would mean writing it on
+    // every subclass in the language and saying nothing when it was written.
+    resolved(
+        "class A {\n op init(n) { self.n = n }\n}\n\
+         class B extends A {\n op init() { super.init(1) }\n}",
+    );
+}
+
+#[test]
+fn an_unseen_superclass_is_not_accused() {
+    // `extends` names a binding and nothing has been evaluated, so a parent
+    // this pass cannot find is a check that declines to answer. Wrong in one
+    // direction only: it may miss an `override` that should have been written,
+    // and must never refuse one that was.
+    resolved("from shapes import Shape\nclass Circle extends Shape {\n override fn area() { return 1 }\n}");
+}
+
+#[test]
+fn a_const_method_may_not_change_state() {
+    // The three shapes a body has for changing something a caller can see.
+    assert_eq!(
+        resolve_err("class C {\n op init() { self.n = 0 }\n const fn m() { self.n = 1 }\n}"),
+        "`const fn m` may not assign to a field"
+    );
+    assert_eq!(
+        resolve_err("class C {\n op init() { self.xs = [1] }\n const fn m() { self.xs[0] = 2 }\n}"),
+        "`const fn m` may not assign through an index"
+    );
+    assert_eq!(
+        resolve_err("let n = 0\nconst fn m() { n = 1 }"),
+        "`const fn m` may not reassign a name bound outside it"
+    );
+    // An `op` is held to the same rule and reads back as one.
+    assert_eq!(
+        resolve_err("class C {\n op init() { self.n = 0 }\n const op string() { self.n = 1\n return \"\" }\n}"),
+        "`const op string` may not assign to a field"
+    );
+}
+
+#[test]
+fn a_const_method_owns_what_it_bound_itself() {
+    // Locals, parameters, and a loop variable are all bindings the call made,
+    // so writing to one changes nothing anybody outside can see. Without the
+    // depth comparison every `const fn` with a mutable local would be refused.
+    resolved("const fn m(n: int): int {\n let total = 0\n total = total + n\n n = n + 1\n return total + n\n}");
+    resolved("const fn m(xs: list): int {\n let total = 0\n for x in xs { total = total + 1 }\n return total\n}");
+    // And a nested block's binding is still the function's own.
+    resolved("const fn m(): int {\n let a = 1\n { let b = 2\n b = 3\n a = b }\n return a\n}");
+}
+
+#[test]
+fn purity_reaches_into_a_nested_function() {
+    // The opposite of what `in_init` does, and for the opposite reason: a
+    // nested `fn` closes over the receiver and the enclosing locals, so letting
+    // it mutate them would be the whole promise escaping through a closure.
+    assert_eq!(
+        resolve_err(
+            "class C {\n op init() { self.n = 0 }\n\
+             const fn m() {\n fn inner() { self.n = 1 }\n return inner }\n}"
+        ),
+        "`const fn m` may not assign to a field"
+    );
+}
+
+#[test]
+fn a_const_method_may_only_call_const_methods() {
+    assert_eq!(
+        resolve_err(
+            "class C {\n op init() { self.n = 0 }\n fn bump() { self.n = 1 }\n\
+             const fn m() { self.bump() }\n}"
+        ),
+        "`const fn m` may not call `bump`, which is not `const`"
+    );
+    resolved(
+        "class C {\n op init() { self.n = 0 }\n const fn peek(): int { return self.n }\n\
+         const fn m(): int { return self.peek() }\n}",
+    );
+    // Inherited, because a subclass's `const` method reaches its parent's
+    // methods through the same chain a call does.
+    assert_eq!(
+        resolve_err(
+            "class A {\n fn bump() { }\n}\nclass B extends A {\n const fn m() { self.bump() }\n}"
+        ),
+        "`const fn m` may not call `bump`, which is not `const`"
+    );
+    // The rule runs one way only: an ordinary `fn` may call anything.
+    resolved("class C {\n const fn peek(): int { return 1 }\n fn m(): int { return self.peek() }\n}");
+}
+
+#[test]
+fn purity_restricts_state_and_not_effects() {
+    // `print` alters no heap memory, and a rule that made debugging a `const
+    // fn` impossible is a rule people route around. `throw` and an early
+    // `return` are control flow rather than mutation.
+    resolved("const fn m(n: int): int {\n print(n)\n if n < 0 { throw Error(\"no\") }\n return n\n}");
+}
+
+#[test]
+fn a_binding_with_no_initializer_takes_its_types_default() {
+    // The three shapes that can answer: a class with no constructor, one whose
+    // constructor takes nothing, and the two builtin containers.
+    resolved("class Marker {}\nlet m: Marker");
+    resolved("class C {\n op init() { self.n = 1 }\n}\nlet c: C");
+    resolved("let xs: list[int]\nlet d: dict[string, int]");
+    // And the ones that cannot.
+    assert_eq!(
+        resolve_err("let n: int"),
+        "`int` has no default constructor, so `n` needs an initializer"
+    );
+    assert_eq!(
+        resolve_err("class C {\n op init(n) { self.n = n }\n}\nlet c: C"),
+        "`C` has no default constructor, so `c` needs an initializer"
+    );
+    // A subclass inherits the answer, whichever way it goes.
+    resolved("class A {\n op init() {}\n}\nclass B extends A {}\nlet b: B");
+    assert_eq!(
+        resolve_err("class A {\n op init(n) { self.n = n }\n}\nclass B extends A {}\nlet b: B"),
+        "`B` has no default constructor, so `b` needs an initializer"
+    );
+}
+
+#[test]
+fn no_annotation_and_no_initializer_is_still_nil() {
+    // This rule is about annotations. `let x` is the dynamic binding v0.7
+    // describes and is untouched.
+    resolved("let x\nprint(x)");
+    resolved("class C {\n let data\n}");
+}
+
+#[test]
+fn a_fields_initializer_is_resolved_in_the_scope_it_runs_in() {
+    // `Class::field_env` is the scope the methods closed over, so a name a
+    // field's initializer reads has to be given a slot against that same scope.
+    // Nothing walked these before v0.8, and reaching one panicked in `read`.
+    let program = resolved("fn f() {\n let base = 1\n class C {\n let n = base\n }\n return C()\n}");
+    let StmtKind::Class { fields, .. } = &body(&program[0]).stmts[1].kind else {
+        panic!("expected a class");
+    };
+    assert_eq!(
+        var(&fields[0].value),
+        Slot::Local { hops: 0, index: 0 },
+        "`base` is a local of the function the class was declared in"
+    );
+    // A subclass's fields run in the scope holding `super`, one deeper — the
+    // same scope its methods close over, which is what makes the hop counts and
+    // `Class::field_env` agree.
+    let program = resolved(
+        "fn f() {\n let base = 1\n class A {}\n class B extends A {\n let n = base\n }\n return B()\n}",
+    );
+    let StmtKind::Class { fields, .. } = &body(&program[0]).stmts[2].kind else {
+        panic!("expected a class");
+    };
+    assert_eq!(var(&fields[0].value), Slot::Local { hops: 1, index: 0 });
+}
+
+#[test]
+fn two_declarations_sharing_a_name_need_distinct_types() {
+    // In a scope, in a class, and in an `extend` block — the three places §3.5
+    // names, all reaching one check.
+    assert_eq!(
+        resolve_err("fn f(a: int) {}\nfn f(b: int) {}"),
+        "this scope already declares `f` with these parameter types"
+    );
+    assert_eq!(
+        resolve_err("class C {\n fn m(a: int) {}\n fn m(b: int) {}\n}"),
+        "`C` already declares `m` with these parameter types"
+    );
+    assert_eq!(
+        resolve_err("extend int {\n fn m(a: int) {}\n fn m(b: int) {}\n}"),
+        "`int` already declares `m` with these parameter types"
+    );
+    resolved("fn f(a: int) {}\nfn f(a: string) {}");
+    resolved("class C {\n fn m(a: int) {}\n fn m(a: string) {}\n}");
+}
+
+#[test]
+fn an_ambiguous_pair_is_refused_where_it_is_declared() {
+    assert_eq!(
+        resolve_err("fn f(a: float) {}\nfn f(a: int?) {}"),
+        "this scope declares a `f` this one cannot be told apart from"
+    );
+}
+
+#[test]
+fn the_first_declaration_of_a_name_binds_it_and_the_rest_join() {
+    // One slot for the name, however many declarations it has — which is what
+    // makes them one name holding several declarations rather than several
+    // names quietly shadowing each other.
+    let program = resolved("fn outer() {\n fn f(a: int) {}\n fn f(a: string) {}\n let n = 1\n}");
+    let body = body(&program[0]);
+    assert_eq!(body.slot_count, 2, "`f` and `n`");
+    let flags: Vec<bool> = body
+        .stmts
+        .iter()
+        .filter_map(|stmt| match &stmt.kind {
+            StmtKind::Fn { overload, .. } => Some(*overload),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(flags, vec![false, true]);
+}
+
+#[test]
+fn a_name_declared_once_is_not_an_overload() {
+    // The flag is what tells the evaluator to *join* rather than replace, and a
+    // REPL entry redefining a function must replace. Its scope declares the
+    // name once, so the flag is off.
+    let program = resolved("fn f(a: int) {}");
+    let StmtKind::Fn { overload, .. } = &program[0].kind else {
+        panic!("expected a function");
+    };
+    assert!(!overload);
+}
+
+#[test]
+fn an_alias_is_expanded_before_signatures_are_compared() {
+    // Why the check is here and not at the parser: `ScoreTable` and what it
+    // abbreviates are one type, and two declarations spelling it differently
+    // are one signature.
+    assert_eq!(
+        resolve_err(
+            "alias ScoreTable = dict[string, int]\n\
+             fn f(a: ScoreTable) {}\nfn f(a: dict[string, int]) {}"
+        ),
+        "this scope already declares `f` with these parameter types"
+    );
 }

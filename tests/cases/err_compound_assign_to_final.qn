@@ -1,0 +1,6 @@
+final total = 1
+
+# `n += 1` is refused wherever `n = n + 1` is: the usual `final` and `const`
+# rules apply to the compound forms unchanged.
+total += 1
+print(total)

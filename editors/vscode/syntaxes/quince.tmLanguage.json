@@ -47,7 +47,12 @@
         },
         {
           "name": "keyword.declaration.quince",
-          "match": "\\b(fn|op|class|extends|extend|let|final|complete|sealed|const|public|private|protected|is|alias)\\b"
+          "match": "\\b(fn|op|class|extends|extend|let|final|complete|sealed|const|override|explicit|public|private|protected|is|alias)\\b"
+        },
+        {
+          "comment": "The logical operators are words rather than symbols, so they are reserved and are highlighted here — but they are operators, and the scope says so.",
+          "name": "keyword.operator.word.quince",
+          "match": "\\b(and|or|not)\\b"
         },
         {
           "name": "variable.language.quince",
@@ -128,7 +133,7 @@
       "patterns": [
         {
           "name": "keyword.operator.quince",
-          "match": "(\\?\\?|\\?\\.|==|!=|<=|>=|<<|>>|//|&&|\\|\\||\\+|-|\\*|/|%|&|\\||\\^|~|=|!|<|>|\\?)"
+          "match": "(\\?\\?=|\\*\\*=|<<=|>>=|//=|\\?\\?|\\?\\.|\\*\\*|\\+\\+|--|\\+=|-=|\\*=|/=|%=|&=|\\|=|\\^=|==|!=|<=|>=|<<|>>|//|\\+|-|\\*|/|%|&|\\||\\^|~|=|<|>|\\?)"
         }
       ]
     }

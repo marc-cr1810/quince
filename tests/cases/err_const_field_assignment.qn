@@ -1,0 +1,11 @@
+class Counter {
+    op init() { self.n = 0 }
+
+    # A `const` method answers a question about the receiver. One that changes
+    # it is an ordinary `fn`.
+    const fn bump() {
+        self.n = self.n + 1
+    }
+}
+
+Counter().bump()

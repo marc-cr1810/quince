@@ -1,0 +1,10 @@
+localhost:8080 after 3000ms
+127.0.0.1:8080 after 5000ms
+api.domain.com:443 after 5000ms
+example.org:443 after 1000ms
+[1] [2] [3]
+8 101
+2 10 30
+12
+a a!
+2

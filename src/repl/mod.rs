@@ -121,7 +121,11 @@ pub fn run_repl(use_color_stdout: bool, use_color_stderr: bool) -> Result<()> {
         buffer.push_str(&line);
         buffer.push('\n');
 
-        let program = match quince::compile(&buffer) {
+        // Resolved against what the session already has bound, so an entry is
+        // checked the way a line of a file would be: a class declared earlier is
+        // a class this line can see, and a declaration that cannot be told apart
+        // from one already there is refused rather than quietly replacing it.
+        let program = match quince::compile_within(&buffer, &interp.declarations()) {
             Ok(program) => program,
             Err(err) if err.span.start as usize >= buffer.trim_end().len() => continue,
             Err(err) => {

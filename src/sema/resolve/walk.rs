@@ -6,12 +6,16 @@
 //! analysis and `override` rules, and v0.10's exhaustiveness check are each an
 //! arm or two here, over a scope stack that does not change.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::error::Result;
-use crate::syntax::ast::{self, Block, Expr, ExprKind, FnDecl, Op, Slot, Stmt, StmtKind};
+use crate::syntax::ast::{
+    self, Block, Expr, ExprKind, FieldDecl, FnDecl, Op, Slot, Stmt, StmtKind, TypeExpr, TypeName,
+};
 use crate::syntax::token::Span;
-use crate::sema::resolve::{Resolver, Scope, builtin_named, declaration};
+use crate::sema::resolve::{
+    Constness, Inherited, Resolver, Scope, builtin_named, declaration, refuse_clashes,
+};
 
 impl Resolver {
 
@@ -30,8 +34,16 @@ impl Resolver {
             StmtKind::Expr(expr) => self.expr(expr),
 
             StmtKind::Let {
-                name, value, slot, ..
+                name,
+                value,
+                slot,
+                ty,
+                defaulted,
+                ..
             } => {
+                if *defaulted {
+                    self.answers_for_itself(ty.as_ref(), &format!("`{name}`"), span)?;
+                }
                 self.expr(value)?;
                 *slot = Some(self.slot_of(name));
                 Ok(())
@@ -59,7 +71,7 @@ impl Resolver {
                 Ok(())
             }
 
-            StmtKind::Fn { decl, slot } => {
+            StmtKind::Fn { decl, slot, .. } => {
                 *slot = Some(self.slot_of(&decl.name));
                 // Unique until the evaluator starts cloning it into closures,
                 // which cannot happen before the program runs.
@@ -101,6 +113,7 @@ impl Resolver {
                 name,
                 parent,
                 methods,
+                fields,
                 slot,
                 ..
             } => {
@@ -112,11 +125,18 @@ impl Resolver {
                 }
                 *slot = Some(self.slot_of(name));
 
+                // Before the bodies, so that a class whose header is wrong is
+                // reported on the header. Nothing in here reads a scope — it is
+                // a question about two declarations — but it wants the parent's
+                // name, which the arm below moves out of reach.
+                self.overriding(name, parent.as_ref().map(|p| p.name.as_str()), methods)?;
+
                 // Methods of a subclass are resolved inside a scope holding
                 // `super`, so a reference to it is an ordinary local lookup at
                 // whatever depth it appears — including from a closure nested
                 // in a method. The evaluator builds the matching scope.
                 let Some(parent) = parent else {
+                    self.field_values(fields)?;
                     return self.methods(methods, name, None, span);
                 };
                 // Declaring no `op init` is fine and needs no check: the class
@@ -129,6 +149,7 @@ impl Resolver {
                 self.scopes.push(Scope::default());
                 let result = self
                     .declare(ast::SUPER, false, span)
+                    .and_then(|()| self.field_values(fields))
                     .and_then(|()| self.methods(methods, name, base, span));
                 self.scopes.pop();
                 result
@@ -211,6 +232,38 @@ impl Resolver {
         base: Option<&'static str>,
         span: Span,
     ) -> Result<()> {
+        // Held for the length of the bodies, because `self.m(…)` is answered by
+        // the class's own table and the walk that reaches it is several layers
+        // down. Restored rather than cleared, so a class declared inside a
+        // method of another leaves the outer one in place.
+        // §3.5's rules are about the *set* of declarations sharing a name, so
+        // they are asked before any body is walked — and here rather than at the
+        // parser because aliases have been expanded by now, which is what makes
+        // `dict[string, int]` and a `ScoreTable` the duplicate they are.
+        let mut sharing: HashMap<&str, Vec<&std::rc::Rc<FnDecl>>> = HashMap::new();
+        for decl in methods.iter() {
+            sharing.entry(decl.name.as_str()).or_default().push(decl);
+        }
+        let mut names: Vec<&&str> = sharing.keys().collect();
+        names.sort_unstable();
+        for name in names {
+            refuse_clashes(&sharing[*name], name, &format!("`{class}`"))?;
+        }
+        drop(sharing);
+
+        let enclosing = self.in_class.replace(class.to_string());
+        let result = self.method_bodies(methods, class, base, span);
+        self.in_class = enclosing;
+        result
+    }
+
+    fn method_bodies(
+        &mut self,
+        methods: &mut [std::rc::Rc<FnDecl>],
+        class: &str,
+        base: Option<&'static str>,
+        span: Span,
+    ) -> Result<()> {
         for decl in methods {
             let decl =
                 std::rc::Rc::get_mut(decl).expect("the parser hands out unshared declarations");
@@ -246,6 +299,143 @@ impl Resolver {
         Ok(())
     }
 
+    /// Refuses a declaration with no initializer whose type has no default.
+    ///
+    /// `what` names the declaration, so a field and a binding read alike. An
+    /// unannotated one is never refused: `let x` is the dynamic binding v0.7
+    /// describes and holds `nil`, and this rule is about annotations.
+    fn answers_for_itself(&self, ty: Option<&TypeExpr>, what: &str, span: Span) -> Result<()> {
+        let Some(ty) = ty else {
+            return Ok(());
+        };
+        let written = ty.written();
+        let named = match &ty.name {
+            TypeName::Named(name) if self.default_constructible(name) => return Ok(()),
+            TypeName::Named(name) => name.clone(),
+            // Not a class, so there is nothing to call. `any?` would admit
+            // `nil`, but a default that depended on the `?` would make the
+            // annotation decide whether the declaration is legal, and §3.6
+            // settles the same question the other way for a parameter.
+            TypeName::Any => written.clone(),
+        };
+        Err(declaration(
+            format!("`{named}` has no default constructor, so {what} needs an initializer"),
+            span,
+        )
+        .with_help(match self.constructors.get(&named) {
+            Some(_) => format!(
+                "`{named}` declares an `op init` that takes arguments, which is that class \
+                 saying it needs them — write `= {named}(…)`"
+            ),
+            None => format!(
+                "there is no honest default for `{written}`, so write `= …` with the value you \
+                 meant — a class with no `op init`, and `list` and `dict`, are what answer for \
+                 themselves"
+            ),
+        }))
+    }
+
+    /// Resolves the expressions a class's field declarations initialize with.
+    ///
+    /// In the scope the evaluator runs them in, which is the one the methods
+    /// close over — `Class::field_env`. Nothing declares a name here: a field is
+    /// not a slot in that scope, it is an entry on each instance.
+    fn field_values(&mut self, fields: &mut [FieldDecl]) -> Result<()> {
+        for field in fields {
+            if field.defaulted {
+                self.answers_for_itself(
+                    field.ty.as_ref(),
+                    &format!("`{}`", field.name),
+                    field.name_span,
+                )?;
+            }
+            self.expr(&mut field.value)?;
+        }
+        Ok(())
+    }
+
+    /// Holds a class's methods to what `override` and `final` claim about them.
+    ///
+    /// Three refusals, and the second is the one that makes the first worth
+    /// having: a keyword required where it is true but writable where it is not
+    /// is documentation nobody can trust, and a misspelled method name is
+    /// exactly the mistake the pair catches.
+    ///
+    /// `op init` is exempt. Every constructor in a hierarchy replaces its
+    /// parent's — that is what `super.init` is for — so requiring the word there
+    /// would mean writing it on every subclass in the language and would say
+    /// nothing when it was.
+    fn overriding(
+        &self,
+        class: &str,
+        parent: Option<&str>,
+        methods: &[std::rc::Rc<FnDecl>],
+    ) -> Result<()> {
+        for decl in methods {
+            if decl.op == Some(Op::Init) {
+                continue;
+            }
+            // How the member reads in a report — `op add` or `fn total`, which
+            // is what the program wrote and what it has to go and change.
+            let named = match decl.op {
+                Some(op) => format!("op {}", op.name()),
+                None => format!("fn {}", decl.name),
+            };
+            let found = match parent {
+                Some(parent) => self.inherited(Some(class), parent, &decl.name),
+                None => Inherited::Absent,
+            };
+            match found {
+                Inherited::Found { owner, member } => {
+                    if member.guarded {
+                        return Err(declaration(
+                            format!("cannot override `{named}`, which is final in `{owner}`"),
+                            decl.name_span,
+                        )
+                        .with_help(format!(
+                            "`{owner}` declares it `final`, which is that class saying its \
+                             implementation is the one — `{class}` can add a method under \
+                             another name, but it cannot replace this one"
+                        )));
+                    }
+                    if !decl.overrides {
+                        return Err(declaration(
+                            format!("`{named}` replaces `{}`'s and does not say so", owner),
+                            decl.name_span,
+                        )
+                        .with_help(format!(
+                            "write `override {named}` — replacing a superclass member silently \
+                             is how a rename in `{owner}` stops being an error and starts being \
+                             two methods that no longer meet"
+                        )));
+                    }
+                }
+                // A stray `override` is refused only where the chain is known
+                // all the way up. See [`Inherited`]: a parent this pass cannot
+                // see is a check that has to decline to answer.
+                Inherited::Absent if decl.overrides => {
+                    return Err(declaration(
+                        format!("`{named}` overrides nothing"),
+                        decl.name_span,
+                    )
+                    .with_help(match parent {
+                        Some(parent) => format!(
+                            "neither `{parent}` nor anything it extends declares `{}` — check \
+                             the spelling, or delete the `override`",
+                            decl.name
+                        ),
+                        None => format!(
+                            "`{class}` extends nothing, so there is no member for this to \
+                             replace — delete the `override`, or give the class a superclass"
+                        ),
+                    }));
+                }
+                Inherited::Absent | Inherited::Unknown => {}
+            }
+        }
+        Ok(())
+    }
+
     /// The builtin `parent` descends from, by name.
     ///
     /// Wrong in one direction only, and deliberately: `final S = string` followed
@@ -271,6 +461,104 @@ impl Resolver {
         }
     }
 
+    /// Refuses a mutation inside a `const fn` or `const op`.
+    ///
+    /// What `const` restricts is **state**, not effects: `print` is allowed,
+    /// because a rule that made debugging one impossible is a rule people route
+    /// around, and `throw` and an early `return` are control flow rather than
+    /// mutation. What is left is the three shapes a body has for changing
+    /// something a caller can see — a field, an element, and a name bound
+    /// outside — and each is refused here.
+    ///
+    /// Deliberately blunt about the first two. `let d = {}` followed by
+    /// `d["a"] = 1` mutates a dict this call made and nobody else can reach, and
+    /// it is refused anyway: telling the two apart is an escape analysis, and
+    /// this pass numbers slots. The restrictive answer is the one that can be
+    /// relaxed later — an error can become legal, a semantics cannot.
+    fn refuse_mutation(&self, target: &Expr) -> Result<()> {
+        let Some(constness) = &self.constness else {
+            return Ok(());
+        };
+        let named = &constness.named;
+        let (what, help) = match &target.kind {
+            ExprKind::Field { .. } => (
+                "assign to a field",
+                "a `const` method answers a question about the receiver — one that changes it \
+                 is an ordinary `fn`",
+            ),
+            ExprKind::Index { .. } => (
+                "assign through an index",
+                "this is refused even for a container the call made itself: telling those apart \
+                 is an analysis this pass does not do, and the strict answer is the one that can \
+                 be relaxed later",
+            ),
+            ExprKind::Var(var) => {
+                // A name the function bound is its own, and reassigning it is
+                // not mutation anybody outside can see. Anything shallower is,
+                // and a global is the shallowest of all.
+                let inside = match self.find(&var.name) {
+                    Some((Slot::Local { hops, .. }, _)) => {
+                        self.scopes.len() - 1 - hops as usize >= constness.base
+                    }
+                    _ => false,
+                };
+                if inside {
+                    return Ok(());
+                }
+                (
+                    "reassign a name bound outside it",
+                    "the binding belongs to whoever called this, so writing to it is exactly \
+                     the state change `const` promises not to make",
+                )
+            }
+            _ => return Ok(()),
+        };
+        Err(declaration(format!("`{named}` may not {what}"), target.span).with_help(help))
+    }
+
+    /// Refuses `self.m(…)` where `m` is not itself `const`.
+    ///
+    /// The rule that makes the first one hold: a `const fn` that could call a
+    /// mutating method on its own receiver would have promised nothing. Only
+    /// `self`, because that is the receiver `const` is a promise about — a
+    /// method called on an argument is caught by the argument being frozen, if
+    /// it was declared `const`, and is otherwise the caller's own business.
+    ///
+    /// A name no class in the chain declares is left alone. It is a field
+    /// holding a function, or a method an `extend` block added, and neither is
+    /// something this pass can read a `const` off.
+    fn refuse_impure_call(&self, callee: &Expr) -> Result<()> {
+        let Some(constness) = &self.constness else {
+            return Ok(());
+        };
+        let ExprKind::Field { target, name, .. } = &callee.kind else {
+            return Ok(());
+        };
+        if !matches!(&target.kind, ExprKind::Var(var) if var.name == ast::SELF) {
+            return Ok(());
+        }
+        let Some(class) = &self.in_class else {
+            return Ok(());
+        };
+        let Inherited::Found { owner, member } = self.inherited(None, class, name) else {
+            return Ok(());
+        };
+        if member.constant {
+            return Ok(());
+        }
+        Err(declaration(
+            format!(
+                "`{}` may not call `{name}`, which is not `const`",
+                constness.named
+            ),
+            callee.span,
+        )
+        .with_help(format!(
+            "declare `{owner}`'s `{name}` as `const` too, or make this one an ordinary `fn` — \
+             a `const` method that could reach a mutating one would be promising nothing"
+        )))
+    }
+
     pub(super) fn function(&mut self, decl: &mut FnDecl) -> Result<()> {
         // Parameters occupy the body scope's first slots, in order, which is
         // what lets a call bind them by index without consulting their names.
@@ -283,7 +571,37 @@ impl Resolver {
             .iter()
             .map(|param| (param.name.clone(), !param.receiver, param.span))
             .collect();
-        decl.body.slot_count = self.scoped(&mut decl.body.stmts, &params)?;
+
+        // A default is evaluated in the callee's *declaration* scope, so it is
+        // resolved here — before the body scope is pushed — and the hop counts
+        // it gets are the ones `Function::env` will hand it at the call. A
+        // default naming another parameter therefore does not reach it, which
+        // is the same answer §3.6 gives: the scope is the declaration's, not
+        // the call's.
+        for param in &mut decl.params {
+            if let Some(default) = &mut param.default {
+                self.expr(default)?;
+            }
+        }
+
+        // A `fn` nested inside a `const fn` stays inside it — the opposite of
+        // what `in_init` does, and for the opposite reason. A nested `fn` is not
+        // *construction*, because it can run long after the object is built; but
+        // it closes over the receiver and the enclosing locals, so letting it
+        // mutate them would be the whole promise escaping through a closure.
+        let outer = self.constness.clone();
+        if decl.constant {
+            self.constness = Some(Constness {
+                base: self.scopes.len(),
+                named: match decl.op {
+                    Some(op) => format!("const op {}", op.name()),
+                    None => format!("const fn {}", decl.name),
+                },
+            });
+        }
+        let result = self.scoped(&mut decl.body.stmts, &params);
+        self.constness = outer;
+        decl.body.slot_count = result?;
         Ok(())
     }
 
@@ -358,9 +676,10 @@ impl Resolver {
                 {
                     self.super_inits += 1;
                 }
+                self.refuse_impure_call(callee)?;
                 self.expr(callee)?;
                 for arg in args {
-                    self.expr(arg)?;
+                    self.expr(&mut arg.value)?;
                 }
                 Ok(())
             }
@@ -417,8 +736,18 @@ impl Resolver {
                 Ok(())
             }
 
-            ExprKind::Assign { target, value } => {
+            // The two write forms, checked alike: `n += 1` is refused wherever
+            // `n = n + 1` is, which is what §3.7's "the usual `final` and
+            // `const` rules apply unchanged" means when written down.
+            ExprKind::Assign { target, value }
+            | ExprKind::AssignOp { target, value, .. }
+            | ExprKind::AssignShort { target, value, .. } => {
                 self.expr(value)?;
+                // Before the `final`/`const` binding check below, because the
+                // two overlap on a reassignment inside a `const fn` and this is
+                // the more specific answer: the name is refused for being
+                // outside the function, not for how it was declared.
+                self.refuse_mutation(target)?;
                 // A `final` or `const` local is known to be immutable here, so
                 // the error arrives before the program runs. Globals keep their
                 // run-time check, since the binding may not exist yet.

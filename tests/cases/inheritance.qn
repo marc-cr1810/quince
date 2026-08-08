@@ -15,7 +15,7 @@ class Dog extends Animal {
         super.init(name)
         self.breed = breed
     }
-    fn speak() {
+    override fn speak() {
         return "woof"
     }
 }
@@ -36,7 +36,7 @@ print(a, d)
 
 # Three levels, with `super` chaining through the middle one.
 class Puppy extends Dog {
-    fn speak() {
+    override fn speak() {
         return super.speak() + "!"
     }
 }
@@ -47,7 +47,7 @@ print(type(p))
 
 # A subclass that adds no `init` uses its parent's.
 class Cat extends Animal {
-    fn speak() {
+    override fn speak() {
         return "meow"
     }
 }
@@ -55,7 +55,7 @@ print(Cat("Tom").describe())
 
 # `super.m` is a value like any other method reference, not call syntax.
 class Loud extends Dog {
-    fn speak() {
+    override fn speak() {
         let base = super.speak
         return base().upper()
     }

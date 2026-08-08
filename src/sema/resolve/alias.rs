@@ -346,7 +346,7 @@ fn substitute_expr(expr: &mut Expr, resolved: &HashMap<String, TypeExpr>) -> Res
         ExprKind::Call { callee, args } => {
             substitute_expr(callee, resolved)?;
             for arg in args {
-                substitute_expr(arg, resolved)?;
+                substitute_expr(&mut arg.value, resolved)?;
             }
         }
         ExprKind::Index { target, index } => {
@@ -360,7 +360,9 @@ fn substitute_expr(expr: &mut Expr, resolved: &HashMap<String, TypeExpr>) -> Res
             }
         }
         ExprKind::Field { target, .. } => substitute_expr(target, resolved)?,
-        ExprKind::Assign { target, value } => {
+        ExprKind::Assign { target, value }
+        | ExprKind::AssignOp { target, value, .. }
+        | ExprKind::AssignShort { target, value, .. } => {
             substitute_expr(target, resolved)?;
             substitute_expr(value, resolved)?;
         }

@@ -1,0 +1,23 @@
+# `not in` and `is not`, which are the plain operators negated and nothing more.
+let scores = {"alice": 95, "bob": 88}
+print("alice" in scores, "carol" in scores)
+print("alice" not in scores, "carol" not in scores)
+
+let names = ["ada", "grace"]
+print("ada" not in names, "linus" not in names)
+print("ad" not in "ada", "zz" not in "ada")
+
+let v: any = "hi"
+print(v is string, v is not string)
+print(v is int, v is not int)
+
+# `not` binds looser than a comparison, so the word reads as the word: this
+# asks whether the two differ, not whether the negation of one equals the other.
+print(not 1 == 2)
+print(not 3 in names)
+
+# And tighter than `and`, so a guard still means what it looks like.
+print(not "carol" in scores and "alice" in scores)
+
+# The two spellings agree, which is the reason `not` moved.
+print("carol" not in scores, not "carol" in scores)

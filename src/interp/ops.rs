@@ -12,7 +12,7 @@ use std::rc::Rc;
 
 use crate::error::{ErrorKind, QuinceError, Raised, Result};
 use crate::interp::Interp;
-use crate::interp::error::type_error;
+use crate::interp::error::{op_mismatch, type_error};
 use crate::interp::index::key_of;
 use crate::runtime::dict::Key;
 use crate::runtime::heap::{ObjId, Object};
@@ -76,6 +76,14 @@ impl Interp {
     ) -> Result<Value> {
         let span = match &method {
             Value::Function(id) => self.heap.function(*id).decl.body.span,
+            // Which candidate runs is decided by `call_method` below, from the
+            // argument the operator is passing. The span is only for the
+            // recursion limit, and the first declaration is as good a place to
+            // point at as any — they share a name and a class.
+            Value::Overload(id) => match self.heap.overload(*id).first() {
+                Some(Value::Function(first)) => self.heap.function(*first).decl.body.span,
+                other => unreachable!("an overload set holds functions, found {other:?}"),
+            },
             // `Class::builtin` fills exactly one slot from a seed table, so a
             // native in a slot is an `init` and nothing else; and `init` is not
             // among the ops that come through here — construction has its own
@@ -97,6 +105,76 @@ impl Interp {
         result
     }
 
+    /// The candidate an operator's slot supplies for these operands.
+    ///
+    /// The gate between "this class answers for the operator" and "this class
+    /// answers for the operator *here*". A slot that exists but takes other
+    /// types is not a fallback to the builtin behaviour — declaring `op mul` is
+    /// a class saying what `*` means to it — so this refuses rather than
+    /// falling through, and refuses at the expression rather than inside the
+    /// declaration.
+    pub(super) fn op_for(
+        &self,
+        op: Op,
+        method: Value,
+        receiver: &Value,
+        args: &[Value],
+        spans: (Span, Span, Span),
+    ) -> Result<Value> {
+        match self.fitting(&method, args, true) {
+            Some(chosen) => Ok(chosen),
+            None => Err(op_mismatch(
+                &self.heap,
+                op,
+                receiver,
+                args,
+                &self.signatures(&method, true),
+                spans,
+            )),
+        }
+    }
+
+    /// The same for a binary operator.
+    ///
+    /// Split from [`Interp::op_for`] for the report rather than for the rule:
+    /// `a * b` has two operands with spans of their own, so it gets exactly the
+    /// diagnostic every other binary type error gets — the same sentence, a
+    /// label on each side, and the operator itself marked in between. A reader
+    /// should not be able to tell from the shape of the report whether the class
+    /// declared the slot and refused the operand or never declared it at all;
+    /// what the class *does* take goes in the help line, which is the one thing
+    /// the ordinary report has nothing to say about.
+    pub(super) fn binary_op_for(
+        &self,
+        op: BinaryOp,
+        // Exactly what `binary_slot` produced: which slot answered, what it
+        // holds, whose class it belongs to, and the operand being passed to it —
+        // which is not always `rhs`, since a reflected `op cmp` arrives with the
+        // two swapped. They travel together because a caller that could pass one
+        // without the others would be passing a mismatched set.
+        found: (Op, Value, &Value, &Value),
+        operands: (&Value, &Value),
+        spans: (Span, Span, Span),
+    ) -> Result<Value> {
+        let (slot, method, receiver, other) = found;
+        let (lhs, rhs) = operands;
+        if let Some(chosen) = self.fitting(&method, std::slice::from_ref(other), true) {
+            return Ok(chosen);
+        }
+        let (lhs_span, rhs_span, expr_span) = spans;
+        Err(
+            type_error(&self.heap, op, lhs, rhs, lhs_span, rhs_span, expr_span).with_help(
+                format!(
+                    "`{}` declares `op {}` for: {} — convert the operand, or declare one for \
+                     these types beside the ones that are there",
+                    receiver.type_name(&self.heap),
+                    slot.name(),
+                    self.signatures(&method, true).join(", ")
+                ),
+            ),
+        )
+    }
+
     /// The error for an `op` that answered with the wrong kind of value.
     ///
     /// Reported against the op's body rather than the expression that triggered
@@ -113,6 +191,10 @@ impl Interp {
         // function — see `call_op` for why a native cannot be here.
         let span = match self.slot(receiver, op) {
             Some(Value::Function(id)) => self.heap.function(id).decl.body.span,
+            Some(Value::Overload(id)) => match self.heap.overload(id).first() {
+                Some(Value::Function(first)) => self.heap.function(*first).decl.body.span,
+                other => unreachable!("an overload set holds functions, found {other:?}"),
+            },
             other => unreachable!("`op {}` answered from {other:?}", op.name()),
         };
         QuinceError::new(
@@ -467,6 +549,7 @@ impl Interp {
         if let Some(specific) = specific
             && let Some((method, receiver, other, _)) = self.binary_slot(specific, lhs, rhs)
         {
+            let method = self.binary_op_for(op, (specific, method, &receiver, &other), (lhs, rhs), spans)?;
             let answer = self.call_op(method, &receiver, vec![other])?;
             return match answer.base(&self.heap) {
                 Value::Bool(b) => Ok(Some(Value::Bool(*b))),
@@ -485,6 +568,7 @@ impl Interp {
             }
             return Ok(None);
         };
+        let method = self.binary_op_for(op, (Op::Cmp, method, &receiver, &other), (lhs, rhs), spans)?;
         let answer = self.call_op(method, &receiver, vec![other])?;
         let ordering = match answer.base(&self.heap) {
             // Any int, read for its sign: `-1`, `0` and `1` are the convention,
@@ -587,13 +671,15 @@ impl Interp {
             BinaryOp::BitXor => Op::BitXor,
             BinaryOp::Shl => Op::BitShl,
             BinaryOp::Shr => Op::BitShr,
+            BinaryOp::Pow => Op::Pow,
             // The comparisons and `in`, which are answered above.
             _ => return Ok(None),
         };
         let Some((method, receiver, other, _)) = self.binary_slot(slot, lhs, rhs) else {
             return self.only_asks_the_left(slot, lhs, rhs, spans).map(|()| None);
         };
-        self.call_op(method, &receiver, vec![other]).map(Some)
+        let chosen = self.binary_op_for(op, (slot, method, &receiver, &other), (lhs, rhs), spans)?;
+        self.call_op(chosen, &receiver, vec![other]).map(Some)
     }
 
     /// Explains `2 - Money(3)`, where the class on the *right* is the one that
@@ -660,6 +746,13 @@ impl Interp {
         // decides for a class that does its own looking — a range that answers
         // from two numbers rather than by storing what is between them.
         if let Some(method) = self.slot(haystack, Op::Contains) {
+            let method = self.op_for(
+                Op::Contains,
+                method,
+                haystack,
+                std::slice::from_ref(needle),
+                (span, span, span),
+            )?;
             let answer = self.call_op(method, haystack, vec![needle.clone()])?;
             return match answer.base(&self.heap) {
                 Value::Bool(b) => Ok(Value::Bool(*b)),
@@ -774,6 +867,16 @@ pub(crate) fn int_op(op: BinaryOp, a: i64, b: i64, span: Span) -> Result<Value> 
             Add => Value::Int(a.checked_add(b).ok_or_else(overflow)?),
             Sub => Value::Int(a.checked_sub(b).ok_or_else(overflow)?),
             Mul => Value::Int(a.checked_mul(b).ok_or_else(overflow)?),
+            // An `int ** negative-int` answers a float, because the integer
+            // result does not exist — the same rule `/` already follows and not
+            // a new one. Overflow the other way stays checked.
+            Pow if b < 0 => Value::Float((a as f64).powf(b as f64)),
+            Pow => Value::Int(
+                u32::try_from(b)
+                    .ok()
+                    .and_then(|by| a.checked_pow(by))
+                    .ok_or_else(overflow)?,
+            ),
             // True division always leaves the integers behind, so `1 / 2` is `0.5`
             // rather than `0`. `//` is there when an int is wanted.
             Div => {
@@ -838,6 +941,7 @@ pub(crate) fn float_op(op: BinaryOp, a: f64, b: f64, span: Span) -> Result<Value
         Add => Value::Float(a + b),
         Sub => Value::Float(a - b),
         Mul => Value::Float(a * b),
+        Pow => Value::Float(a.powf(b)),
         // Kept an error rather than yielding infinity, to match integer division.
         Div if b == 0.0 => {
             return Err(

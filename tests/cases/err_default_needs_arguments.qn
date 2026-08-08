@@ -1,0 +1,10 @@
+# Declaring a constructor that takes arguments suppresses the synthesized one:
+# a class that requires an argument means it.
+class Money {
+    op init(cents: int) {
+        self.cents = cents
+    }
+}
+
+let m: Money
+print(m)

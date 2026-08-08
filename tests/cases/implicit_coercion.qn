@@ -1,0 +1,63 @@
+# An annotation naming a class that declares a single-parameter `op init` is a
+# standing offer to convert: the value is built rather than refused. Implicit by
+# default, because the classes this exists for are the ones that wrap one value
+# and mean it — and `explicit` is how a class that is not a conversion says so.
+class CustomInt {
+    private let value: int = 0
+
+    public op init(value: int) {
+        self.value = value
+    }
+
+    const op string(): string {
+        return "CustomInt(" + string(self.value) + ")"
+    }
+
+    const fn raw(): int {
+        return self.value
+    }
+}
+
+# A binding.
+let i: CustomInt = 10
+print(i, i.raw())
+
+# A parameter, at the boundary the value crosses.
+fn doubled(c: CustomInt): int {
+    return c.raw() * 2
+}
+print(doubled(21))
+
+# A return, which is the same boundary from the other side.
+fn make(): CustomInt {
+    return 7
+}
+print(make())
+
+# A field.
+class Holder {
+    let count: CustomInt = 3
+    fn total(): int { return self.count.raw() }
+}
+print(Holder().total())
+
+# A value that is already one is not rebuilt.
+let already: CustomInt = CustomInt(5)
+print(already)
+
+class DatabaseConnection {
+    private let timeout_ms: int = 0
+
+    public explicit op init(timeout_ms: int) {
+        self.timeout_ms = timeout_ms
+    }
+
+    const op string(): string {
+        return "connection(" + string(self.timeout_ms) + "ms)"
+    }
+}
+
+# `DatabaseConnection(1000)` reads as a timeout only because the call names the
+# class. The refusal of the other spelling is `err_explicit_constructor`.
+let db: DatabaseConnection = DatabaseConnection(1000)
+print(db)

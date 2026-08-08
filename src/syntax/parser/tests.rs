@@ -1,6 +1,6 @@
 use super::*;
 use crate::syntax::ast::{
-    BinaryOp, BindKind, Expr, ExprKind, FnDecl, LogicalOp, Op, Openness, UnaryOp, Visibility,
+    BindKind, Expr, ExprKind, FnDecl, Op, Openness, UnaryOp, Visibility,
 };
 use crate::syntax::lexer::Lexer;
 
@@ -38,43 +38,26 @@ use crate::syntax::lexer::Lexer;
             ExprKind::Unary { op, rhs } => {
                 let op = match op {
                     UnaryOp::Neg => "-",
-                    UnaryOp::Not => "!",
+                    UnaryOp::Not => "not",
                     UnaryOp::BitNot => "~",
                 };
                 format!("({op} {})", sexpr(rhs))
             }
             ExprKind::Binary { op, lhs, rhs } => {
-                let op = match op {
-                    BinaryOp::Add => "+",
-                    BinaryOp::Sub => "-",
-                    BinaryOp::Mul => "*",
-                    BinaryOp::Div => "/",
-                    BinaryOp::FloorDiv => "//",
-                    BinaryOp::Rem => "%",
-                    BinaryOp::Eq => "==",
-                    BinaryOp::Ne => "!=",
-                    BinaryOp::Lt => "<",
-                    BinaryOp::Le => "<=",
-                    BinaryOp::Gt => ">",
-                    BinaryOp::Ge => ">=",
-                    BinaryOp::In => "in",
-                    BinaryOp::BitAnd => "&",
-                    BinaryOp::BitOr => "|",
-                    BinaryOp::BitXor => "^",
-                    BinaryOp::Shl => "<<",
-                    BinaryOp::Shr => ">>",
-                };
-                format!("({op} {} {})", sexpr(lhs), sexpr(rhs))
+                format!("({} {} {})", op.symbol(), sexpr(lhs), sexpr(rhs))
             }
             ExprKind::Logical { op, lhs, rhs } => {
-                let op = match op {
-                    LogicalOp::And => "&&",
-                    LogicalOp::Or => "||",
-                };
-                format!("({op} {} {})", sexpr(lhs), sexpr(rhs))
+                format!("({} {} {})", op.word(), sexpr(lhs), sexpr(rhs))
             }
             ExprKind::Call { callee, args } => {
-                format!("(call {} {})", sexpr(callee), joined(args))
+                let written: Vec<String> = args
+                    .iter()
+                    .map(|arg| match &arg.name {
+                        Some((name, _)) => format!("{name}: {}", sexpr(&arg.value)),
+                        None => sexpr(&arg.value),
+                    })
+                    .collect();
+                format!("(call {} {})", sexpr(callee), written.join(" "))
             }
             ExprKind::Index { target, index } => {
                 format!("(index {} {})", sexpr(target), sexpr(index))
@@ -96,6 +79,12 @@ use crate::syntax::lexer::Lexer;
             ExprKind::Is { value, ty } => format!("(is {} {})", sexpr(value), ty.written()),
             ExprKind::Assign { target, value } => {
                 format!("(= {} {})", sexpr(target), sexpr(value))
+            }
+            ExprKind::AssignOp { target, op, value } => {
+                format!("({}= {} {})", op.symbol(), sexpr(target), sexpr(value))
+            }
+            ExprKind::AssignShort { target, op, value } => {
+                format!("({}= {} {})", op.symbol(), sexpr(target), sexpr(value))
             }
             ExprKind::Super { name, .. } => format!("(super {name})"),
         }
@@ -135,15 +124,17 @@ use crate::syntax::lexer::Lexer;
 
     #[test]
     fn logical_operators_bind_loosest() {
-        assert_eq!(expr_of("a || b && c"), "(|| a (&& b c))");
-        assert_eq!(expr_of("a == 1 && b != 2"), "(&& (== a 1) (!= b 2))");
+        assert_eq!(expr_of("a or b and c"), "(or a (and b c))");
+        assert_eq!(expr_of("a == 1 and b != 2"), "(and (== a 1) (!= b 2))");
     }
 
     #[test]
     fn unary_binds_tighter_than_arithmetic() {
         assert_eq!(expr_of("-a * b"), "(* (- a) b)");
-        assert_eq!(expr_of("!a && b"), "(&& (! a) b)");
-        assert_eq!(expr_of("--a"), "(- (- a))");
+        assert_eq!(expr_of("not a and b"), "(and (not a) b)");
+        // The space is load-bearing: `--a` munches as one `--` token and is the
+        // decrement statement, so a double negation has to be written apart.
+        assert_eq!(expr_of("- -a"), "(- (- a))");
     }
 
     #[test]
@@ -245,7 +236,7 @@ use crate::syntax::lexer::Lexer;
     fn in_parses_as_a_comparison_level_operator() {
         assert_eq!(expr_of("a in b"), "(in a b)");
         assert_eq!(expr_of("a + 1 in b"), "(in (+ a 1) b)");
-        assert_eq!(expr_of("a in b && c"), "(&& (in a b) c)");
+        assert_eq!(expr_of("a in b and c"), "(and (in a b) c)");
         // The loop form takes `in` before any expression is parsed, so the two
         // uses cannot collide.
         let stmts = parse_ok("for k in d { }");
@@ -735,4 +726,129 @@ use crate::syntax::lexer::Lexer;
         assert!(matches!(stmts[0].kind, StmtKind::Fn { .. }));
         assert!(matches!(stmts[1].kind, StmtKind::Let { .. }));
         assert!(matches!(stmts[2].kind, StmtKind::If { .. }));
+    }
+
+    #[test]
+    fn exponentiation_associates_to_the_right() {
+        // The one binary operator in the language that does not associate left,
+        // and it differs because left association would make it useless for
+        // what it is for.
+        assert_eq!(expr_of("2 ** 3 ** 2"), "(** 2 (** 3 2))");
+        assert_eq!(expr_of("2 * 3 ** 2"), "(* 2 (** 3 2))");
+        assert_eq!(expr_of("2 ** 3 * 2"), "(* (** 2 3) 2)");
+    }
+
+    #[test]
+    fn exponentiation_binds_tighter_than_unary_minus() {
+        // `-2 ** 2` is `-(2 ** 2)`, following Python and ordinary mathematical
+        // notation. The other reading is written with parentheses.
+        assert_eq!(expr_of("-2 ** 2"), "(- (** 2 2))");
+        assert_eq!(expr_of("(-2) ** 2"), "(** (- 2) 2)");
+        // The exponent is a full unary expression, so a negative one needs none.
+        assert_eq!(expr_of("2 ** -1"), "(** 2 (- 1))");
+    }
+
+    #[test]
+    fn a_compound_assignment_keeps_its_target_whole() {
+        // One node rather than a rewrite into `a = a op b`, because the rule is
+        // that the target is evaluated *once* — a tree mentioning it twice
+        // could not say that.
+        assert_eq!(expr_of("n += 1"), "(+= n 1)");
+        assert_eq!(expr_of("d[k] //= 2"), "(//= (index d k) 2)");
+        assert_eq!(expr_of("obj.total **= 2"), "(**= (. obj total) 2)");
+        // The right side is a whole expression, as it is for `=`.
+        assert_eq!(expr_of("n *= 1 + 2"), "(*= n (+ 1 2))");
+    }
+
+    #[test]
+    fn a_compound_assignment_needs_somewhere_to_write() {
+        let err = parse_err("1 += 2");
+        assert!(
+            err.message.contains("cannot assign"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn the_short_circuiting_assignments_are_their_own_node() {
+        // Not a fourteenth `AssignOp`: `a ??= b` may leave `b` unevaluated and
+        // may write nothing at all, which is not what `a = a op b` describes.
+        assert_eq!(expr_of("n ??= 0"), "(??= n 0)");
+        assert_eq!(expr_of("flag and= ready"), "(and= flag ready)");
+        assert_eq!(expr_of("flag or= ready"), "(or= flag ready)");
+        // The target may be an index or a field, as for every other assignment.
+        assert_eq!(expr_of("d[k] ??= 0"), "(??= (index d k) 0)");
+        assert_eq!(expr_of("obj.total ??= 0"), "(??= (. obj total) 0)");
+        // And the right side is a whole expression.
+        assert_eq!(expr_of("n ??= 1 + 2"), "(??= n (+ 1 2))");
+    }
+
+    #[test]
+    fn the_negated_operators_are_the_plain_ones_negated() {
+        // `not in` and `is not` build a `Not` over the node that already exists
+        // rather than a second node meaning the opposite, so every pass that
+        // understands `in` and `is` needs no change to understand these.
+        assert_eq!(expr_of("k not in d"), "(not (in k d))");
+        assert_eq!(expr_of("v is not string"), "(not (is v string))");
+        // They bind where their positive forms bind.
+        assert_eq!(expr_of("a + 1 not in b"), "(not (in (+ a 1) b))");
+        assert_eq!(expr_of("k not in d and x"), "(and (not (in k d)) x)");
+        // A `not` that is not followed by `in` is still the prefix operator —
+        // and reaches the same tree, because `not` binds looser than a
+        // comparison. The two ways of writing it agree, which is the point.
+        assert_eq!(expr_of("not a in b"), "(not (in a b))");
+        assert_eq!(expr_of("not v is string"), "(not (is v string))");
+    }
+
+    #[test]
+    fn not_binds_looser_than_a_comparison_and_tighter_than_and() {
+        // The one unary operator that is not at `UNARY_BP`. `not a == b` asks
+        // whether `a` and `b` differ, which is what it reads as — where `!` sat
+        // it would have compared the negation of `a` against `b`.
+        assert_eq!(expr_of("not a == b"), "(not (== a b))");
+        assert_eq!(expr_of("not a and b"), "(and (not a) b)");
+        assert_eq!(expr_of("not a or not b"), "(or (not a) (not b))");
+        assert_eq!(expr_of("not a + b"), "(not (+ a b))");
+        // `-` and `~` are symbols and stay where they were.
+        assert_eq!(expr_of("-a == b"), "(== (- a) b)");
+        assert_eq!(expr_of("~a & b"), "(& (~ a) b)");
+    }
+
+    #[test]
+    fn the_increments_are_statements_and_desugar_to_a_compound_assignment() {
+        // Both spellings, both meaning `n += 1`. They differ in C by what they
+        // evaluate to, and neither evaluates to anything here — so there is
+        // nothing left for the distinction to be about.
+        assert_eq!(expr_of("n++"), "(+= n 1)");
+        assert_eq!(expr_of("++n"), "(+= n 1)");
+        assert_eq!(expr_of("n--"), "(-= n 1)");
+        assert_eq!(expr_of("--n"), "(-= n 1)");
+        // Which also means the target is evaluated once for free, since that is
+        // the rule the compound assignment already carries.
+        assert_eq!(expr_of("d[k]++"), "(+= (index d k) 1)");
+        assert_eq!(expr_of("obj.total--"), "(-= (. obj total) 1)");
+    }
+
+    #[test]
+    fn an_increment_is_refused_inside_an_expression() {
+        // The whole reason they are statements: `x = i++` has no answer that is
+        // not a puzzle, so it is refused rather than given one.
+        for src in ["let x = i++", "f(i++)", "if i++ > 3 { }", "print(++i)"] {
+            let err = parse_err(src);
+            assert!(
+                err.message.contains("is a statement on its own"),
+                "`{src}` should be refused as an expression, got: {}",
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn an_increment_on_the_next_line_belongs_to_that_line() {
+        // The rule a `(` on a fresh line already follows: without it, `let a = b`
+        // followed by `++c` would silently count `b` up.
+        let stmts = parse_ok("let a = b\n++c");
+        assert_eq!(stmts.len(), 2);
+        assert!(matches!(stmts[0].kind, StmtKind::Let { .. }));
     }

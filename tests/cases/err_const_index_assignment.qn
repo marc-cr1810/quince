@@ -1,0 +1,9 @@
+class Bag {
+    op init() { self.items = [0, 0] }
+
+    const fn clear() {
+        self.items[0] = 1
+    }
+}
+
+Bag().clear()

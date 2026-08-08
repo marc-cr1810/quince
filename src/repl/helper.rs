@@ -271,8 +271,8 @@ pub(crate) fn is_input_incomplete(input: &str) -> bool {
                 | TokenKind::Le
                 | TokenKind::Gt
                 | TokenKind::Ge
-                | TokenKind::AndAnd
-                | TokenKind::OrOr
+                | TokenKind::And
+                | TokenKind::Or
                 | TokenKind::Comma
                 | TokenKind::Dot
         )

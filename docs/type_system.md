@@ -1,6 +1,6 @@
-# Quince v0.7 — Type System Reference
+# Quince v0.8.1 — Type System Reference
 
-Quince v0.7 features a gradually-typed type system that combines static editor diagnostics with fast, sound runtime boundary enforcement. Types are optional: unannotated code is dynamically typed, while annotations impose static checks in the editor and boundary enforcement at run time.
+Quince v0.8.1 features a gradually-typed type system that combines static editor diagnostics with fast, sound runtime boundary enforcement. Types are optional: unannotated code is dynamically typed, while annotations impose static checks in the editor and boundary enforcement at run time.
 
 ---
 
@@ -96,6 +96,20 @@ let config: dict[string] = {"host": "localhost", "port": 8080, "debug": true}
 config["timeout"] = 30.0       # Accepted: value is unconstrained
 ```
 
+Because it is shorthand and not silence, it is a claim like any other. A `dict[string, int]`
+is a `dict[string]` — `int` is one of the things `any?` admits — and a `dict[string]` is **not**
+a `dict[string, int]`:
+
+```quince
+fn scores(d: dict[string, int]): int { return len(d) }
+scores(config)
+# TypeError: `d` is `dict[string, int]`, but this is `dict[string]`
+```
+
+That refusal is what keeps the shorthand honest. The header a container carries is written
+once, so `config` stays a `dict[string]` however it is passed; admitting it as a
+`dict[string, int]` would leave every write through that name unchecked against `int`.
+
 ### 3.3 Dict Key Constraints
 
 Key types (`K`) are restricted to primitive hashable types: `nil`, `bool`, `int`, `float`, and `string`. Custom class instances cannot be used as dictionary keys. Declaring `dict[Point, int]` is refused at compile/resolution time.
@@ -123,6 +137,11 @@ if "bob" in scores {
 ---
 
 ## 4. `const T` Qualifiers & Value Freezing
+
+`const` is one word for one idea at three positions: on a binding the name is bound once and
+the value frozen, on a parameter or return the value is frozen as it crosses the boundary,
+and on a `fn` or `op` the body may not change state at all — see
+[`const fn`](classes_and_objects.md#6a2-const-fn-and-const-op).
 
 The `const T` qualifier enforces deep immutability at parameters and return boundaries:
 
@@ -169,21 +188,52 @@ let user_scores: ScoreTable = {"USR_01": 100}
 
 ### 6.1 The `is` Operator
 
-The `is` operator performs exact runtime type checks against values and container descriptors:
+The `is` operator asks what a value **is**, reading a container's reified header rather than
+its elements:
 
 ```quince
-let item: any? = [1, 2, 3]
+let ints: list[int] = [1, 2, 3]
 
-if item is list[int] {
-    print("Exact list[int] container match!")
+if ints is list[int] {
+    print("A list of ints.")
 }
 ```
 
-**O(1) Performance**: Because container allocations carry reified type headers, `item is list[int]` checks the header descriptor in O(1) time without performing element scans.
+**One rule, shared with annotations.** `is` compares type arguments by exactly the table §11.4
+gives, so a question and a parameter never disagree:
+
+```quince
+print(ints is list[int])       # true
+print(ints is list[any])       # true  — `any` is the top type
+print(ints is list[any?])      # true
+print(ints is list)            # true  — the same type as `list[any?]`
+print(ints is list[int?])      # false — invariant; a `nil` written through
+print(ints is list[string])    # false
+```
+
+An argument nobody wrote is `any?` (§3.2), so `list` and `list[any?]` are one type spelled two
+ways and answer alike. The same holds for `dict` and `dict[K]`.
+
+**Two things `is` does that an annotation does not**, and both come of it asking what a value
+already is rather than what it may become:
+
+```quince
+print(1 is float)              # false — an annotation widens; `1` is still an int
+print([1, 2] is list[int])     # false — nothing has said what it holds
+print([1, 2] is list[any?])    # true  — so it is the top container type
+```
+
+A container nothing has described has no element type yet. A `let` is what gives it one, so
+`let xs: list[int] = [1, 2]` is still accepted — the annotation is *deciding* the type, not
+agreeing with one. After that line `xs is list[int]` is true.
+
+**O(1) Performance**: because container allocations carry reified type headers, `ints is
+list[int]` compares the header in O(1) time. It never scans elements — which is why an
+undescribed container answers from the elided-argument rule instead of by looking.
 
 ### 6.2 Block-Scoped Smart Casting
 
-When an `if`, `while`, or `&&` condition tests a variable with `is`, Quince narrows (smart-casts) the variable's type within the guarded scope:
+When an `if`, `while`, or `and` condition tests a variable with `is`, Quince narrows (smart-casts) the variable's type within the guarded scope:
 
 ```quince
 let val: string? = fetch_input()
@@ -193,17 +243,136 @@ if val is string {
     print(val.upper()) # Reaches string methods without optional chaining
 }
 
-if val is string && len(val) > 0 {
-    # Narrowed on the right-hand side of && as well
+if val is string and len(val) > 0 {
+    # Narrowed on the right-hand side of `and` as well
     print(val)
 }
 ```
 
+`is not` does **not** narrow. What a failed type test proves is a fact about the *other*
+branch, which this pass has no way to express — so `if val is not string { }` leaves `val`
+at `string?` throughout.
+
 ---
 
-## 7. Compiler Internals & Memory Layout
+## 8. Implicit Constructor Coercion
 
-### 7.1 Value Representation (`Value`)
+An annotation naming a class that declares a **single-parameter `op init`** is a standing
+offer to convert: a value of the constructor's parameter type is built rather than refused.
+
+```quince
+class CustomInt {
+    private let value: int = 0
+    public op init(value: int) { self.value = value }
+}
+
+let i: CustomInt = 10            # implicitly CustomInt(10)
+
+fn doubled(c: CustomInt): int { … }
+print(doubled(21))               # the parameter is a boundary too
+```
+
+It applies at every boundary an annotation is checked at — a binding, a field, a parameter,
+and a return.
+
+*Rules*:
+- **Implicit by default.** A single-parameter `op init` coerces unless it says otherwise.
+- **Only single-parameter constructors coerce.** There is no rule that could pick among
+  several arguments from one value. A class declaring several constructors still offers the
+  conversion through whichever of them takes one parameter the value fits.
+- **Only one step.** Coercion does not chain: if `A` is built from a `B` and `B` from an
+  `int`, `let a: A = 1` is refused as an `int` that is not an `A`.
+- **The payload is checked first**, against the constructor's own parameter type, so a value
+  that does not hold is reported as a type error rather than failing inside the constructor.
+- **A builtin does not coerce.** `let s: string = 5` is still refused: a builtin's `init` is
+  a *conversion*, and admitting those would silently stringify every wrong argument.
+
+### 8.1 `explicit`
+
+A constructor whose argument is not a conversion says so, and the implicit form is then
+refused:
+
+```quince
+class DatabaseConnection {
+    private let timeout_ms: int = 0
+    public explicit op init(timeout_ms: int) { self.timeout_ms = timeout_ms }
+}
+
+let db: DatabaseConnection = DatabaseConnection(1000)   # accepted
+# let db: DatabaseConnection = 1000                     # TypeError: constructor is `explicit`
+```
+
+`DatabaseConnection(1000)` reads as a timeout only because the call names the class;
+`let db: DatabaseConnection = 1000` reads as nothing at all. `explicit` may be written only
+on a one-parameter `op init` — there is nothing anywhere else for it to turn off.
+
+**Why implicit by default**, which is the reverse of C++'s answer: the classes this exists
+for are the ones that wrap one value and mean it. The one-step rule is what stops conversions
+composing into a search, which is what made C++ choose otherwise.
+
+---
+
+## 9. Default Construction
+
+A declaration with no `= value` takes the default its type answers with.
+
+```quince
+let logger: Logger               # Logger()
+let items: list[int]             # []
+let config: dict[string, string] # {}
+let anything                     # nil — no annotation, no rule
+```
+
+Which types can answer:
+
+| Type | Default |
+| :--- | :--- |
+| `list`, `list[T]` | `[]` |
+| `dict`, `dict[K, V]` | `{}` |
+| A class whose first `op init` up the chain requires no arguments | that constructor |
+| A class declaring no `op init` at all | a synthesized `op init() {}` |
+| Anything else — `int`, `float`, `string`, `bool`, `any` | refused at resolution |
+
+A parameterized constructor suppresses the synthesized one: declaring `op init(val: int)`
+makes `let obj: MyClass` a `DeclarationError`, because a class that requires an argument means
+it. Declaring `op init()` beside it brings the default back.
+
+There is no honest default for an `int` — zero is a value somebody chose — which is why the
+refusal exists rather than a guess.
+
+---
+
+## 10. Default Parameters & Keyword Arguments
+
+```quince
+fn connect(host: string, port: int = 8080, timeout: int = 3000): Connection { … }
+
+connect("localhost")                                   # 8080, 3000
+connect("127.0.0.1", timeout: 5000)                    # targets one defaulted parameter
+connect(timeout: 5000, host: "api.domain.com", port: 443)   # all by name, any order
+```
+
+*Rules*:
+- **Defaulted parameters follow mandatory ones.** A mandatory parameter after a defaulted one
+  is refused: there is no call that could reach it positionally.
+- **Keyword arguments match declared parameter names**, at any position after the last
+  positional argument. A positional argument following a named one is refused — that ordering
+  has no reading that is not a guess.
+- **A parameter may be filled once.** Supplying it positionally and again by name is an error
+  naming it, rather than last-wins.
+- **Defaults are evaluated at the call**, in the callee's declaration scope, every time. So
+  `fn f(xs: list = [])` builds a fresh list per call and carries no mutation between them.
+  This is the one place Python's answer is refused outright.
+- **`?` on the type does not imply a default.** `fn f(x: int?)` requires an argument; only
+  `= nil` makes one optional.
+- **A builtin takes its arguments positionally.** `len(value: [1])` is refused: a native's
+  parameters are a static table with nothing there to default.
+
+---
+
+## 11. Compiler Internals & Memory Layout
+
+### 11.1 Value Representation (`Value`)
 
 In the interpreter runtime (`src/runtime/value.rs`), all Quince values are represented by the `Value` enum:
 
@@ -219,11 +388,11 @@ In the interpreter runtime (`src/runtime/value.rs`), all Quince values are repre
 - `Value::Native(&'static Native)`: Static descriptor for standard library C-native functions.
 - `Value::Closure(Rc<Closure>)`: Shared reference to captured lexical environment and AST function code.
 
-### 7.2 Heap Architecture & Object Handles (`ObjId`)
+### 11.2 Heap Architecture & Object Handles (`ObjId`)
 
 Compound objects (`List`, `Dict`, `Instance`) are allocated on an arena heap managed by `Heap` (`src/runtime/heap.rs`). References between objects use lightweight 32-bit `ObjId` handles instead of raw Rust pointers.
 
-### 7.3 Reified Container Descriptors
+### 11.3 Reified Container Descriptors
 
 When a container object is allocated:
 - `Object::List`: Stores both `items: Vec<Value>` and an optional reified type descriptor `elem_type: Type`.
@@ -231,13 +400,47 @@ When a container object is allocated:
 
 Because the type descriptor is stored directly in the heap header of the container, runtime operations such as `xs is list[int]` compare the stored `elem_type` descriptor in $O(1)$ constant time, avoiding full element array traversals.
 
-### 7.4 Generic Invariance Under Mutability
+### 11.4 Generic Invariance Under Mutability
 
-Container generics in Quince are **invariant**: `list[int]` is **not** a subtype of `list[any?]`.
+Container generics in Quince are **invariant**, with one exception. A value carries the type
+arguments it was built to hold — the reified descriptor of §11.3 — and that is what every
+boundary compares against:
 
-**Rationale**: If `list[int]` were treated as a subtype of `list[any?]`, a function receiving `list[any?]` could push a `string` into the list. This would corrupt the internal `list[int]` container, violating non-null integer type safety when read elsewhere.
+```quince
+let scores: dict[string, int] = {}
 
-### 7.5 Deep Freezing Mechanics
+fn flags(d: dict[string, bool]): int { return len(d) }
+flags(scores)
+# TypeError: `d` is `dict[string, bool]`, but this is `dict[string, int]`
+```
+
+Emptiness makes no difference. `let xs: list[int] = []` is a list of ints while it is empty,
+because the annotation said so — the elements are not consulted for a container that carries
+a header, and a container without one is checked by walking them.
+
+**The exception is `any`**, which is the top type and accepts whatever is there, so
+`list[any]` still means "a list of anything":
+
+```quince
+fn count(xs: list[any]): int { return len(xs) }
+let ints: list[int] = [1, 2]
+print(count(ints))          # 2
+```
+
+**Why that is safe rather than a hole**: a *write* is checked against the header, not against
+the annotation the value arrived through. So the corruption invariance exists to prevent is
+already prevented one level down:
+
+```quince
+fn grow(xs: list[any]) { xs.push("a string") }
+grow(ints)
+# TypeError: the item is `int`, but this is a string
+```
+
+Nothing else widens. A `list[int]` is not a `list[int?]`, because a `nil` written through the
+second is a `nil` read out of the first.
+
+### 11.5 Deep Freezing Mechanics
 
 Heap objects carry a `frozen: bool` flag:
 - When a value is assigned to a `const` variable or passed across a `const T` parameter boundary, the interpreter recursively marks the heap object and all nested references as `frozen`.

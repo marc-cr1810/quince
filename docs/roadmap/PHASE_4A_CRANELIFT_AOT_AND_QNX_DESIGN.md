@@ -16,6 +16,12 @@ Phase 4A implements **Native Standalone AOT Compilation (`quince build --aot`)**
 
 ## 2. Pragma Attributes (`@export`, `@inline`)
 
+**`@`-attributes are declaration syntax owned by no milestone**, per
+`BYTECODE_VM_DESIGN.md` §12. These would be the language's first two, and attribute syntax
+is deferred in v0.15 §7 as blocked on macro pass ordering. What an attribute may sit on,
+whether the set is closed, and whether a program can define one are language decisions that
+have to be made before either of these can be spelled.
+
 - **`@export`**: Exposes function signatures with standard C-ABI linkage for native binary exports.
 - **`@inline`**: Directs Cranelift code generator to inline function basic blocks into calling sites.
 

@@ -117,6 +117,16 @@ impl Interp {
             }
             Value::Function(id) => Style::MAGENTA
                 .paint(format!("<fn {}>", self.heap.function(*id).decl.name), color),
+            // The name and the count, because the candidates share the name and
+            // how many there are is the only other thing worth saying.
+            Value::Overload(id) => Style::MAGENTA.paint(
+                format!(
+                    "<fn {} and {} more>",
+                    base.callable_name(&self.heap),
+                    self.heap.overload(*id).len().saturating_sub(1)
+                ),
+                color,
+            ),
             Value::Native(native) => {
                 Style::MAGENTA.paint(format!("<builtin {}>", native.name), color)
             }

@@ -3,7 +3,7 @@ from random import choice
 
 # The generator starts at a fixed seed, so a program that does not ask for
 # unpredictability gets the same sequence every run. That is what lets this case
-# assert values rather than ranges — a test that only checks `1 <= n && n <= 6`
+# assert values rather than ranges — a test that only checks `1 <= n and n <= 6`
 # passes for a generator that returns 1 every time.
 print(random.int(1, 6), random.int(1, 6), random.int(1, 6), random.int(1, 6))
 print(random.float())

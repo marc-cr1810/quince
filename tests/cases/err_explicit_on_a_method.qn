@@ -1,0 +1,9 @@
+class Widget {
+    # `explicit` refuses the implicit coercion of `let x: T = value`, and only a
+    # one-parameter `op init` offers one to refuse.
+    explicit fn build(n: int): int {
+        return n
+    }
+}
+
+print(Widget().build(1))

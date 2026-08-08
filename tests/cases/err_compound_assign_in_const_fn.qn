@@ -1,0 +1,9 @@
+class Counter {
+    let n: int = 0
+
+    const fn bump() {
+        self.n += 1
+    }
+}
+
+Counter().bump()

@@ -1,0 +1,79 @@
+# `const` in front of a `fn` or an `op` marks the body pure and read-only, and
+# the resolver is what holds it to that. What it restricts is *state*, not
+# effects: `print` is allowed, and so are `throw` and an early `return`. The
+# refusals are the `err_const_` cases beside this one.
+class Point {
+    op init(x: float, y: float) {
+        self.x = x
+        self.y = y
+    }
+
+    const fn sum(): float {
+        return self.x + self.y
+    }
+
+    # A `const` method may call another one, and only another one.
+    const fn twice_the_sum(): float {
+        return self.sum() * 2.0
+    }
+
+    const op string(): string {
+        return "(" + string(self.x) + ", " + string(self.y) + ")"
+    }
+
+    # An ordinary `fn` is under no restriction at all, and may call a `const`
+    # one — the rule runs in one direction.
+    fn shift(by: float) {
+        print("shifting by", by, "from", self.sum())
+        self.x = self.x + by
+    }
+}
+
+let p = Point(1.0, 2.0)
+print(p.sum(), p.twice_the_sum())
+print(p)
+p.shift(1.0)
+print(p, p.sum())
+
+# A standalone pure function, depending only on its inputs.
+const fn add(a: int, b: int): int {
+    return a + b
+}
+print(add(2, 3))
+
+# Control flow is not mutation, so an early `return` and a `throw` are both
+# fine — and so is a local the call made for itself.
+const fn describe(n: int): string {
+    if n < 0 {
+        return "negative"
+    }
+    let label = "zero"
+    if n > 0 {
+        label = "positive"
+    }
+    return label
+}
+print(describe(-1), describe(0), describe(4))
+
+const fn checked(n: int): int {
+    if n < 0 {
+        throw ValueError("no negatives")
+    }
+    return n
+}
+try {
+    print(checked(-1))
+} catch e {
+    print("caught:", e.message)
+}
+print(checked(7))
+
+# A parameter is a binding the call owns, so reassigning one is not a state
+# change anybody outside can see.
+const fn clamped(n: int): int {
+    if n > 10 {
+        n = 10
+    }
+    return n
+}
+print(clamped(3), clamped(30))

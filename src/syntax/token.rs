@@ -1,5 +1,7 @@
 use std::fmt;
 
+use crate::syntax::ast::{BinaryOp, ShortAssignOp};
+
 /// A byte range into the source that produced a token or AST node.
 ///
 /// Line and column are derived from this on demand rather than stored, so the
@@ -65,6 +67,12 @@ pub enum TokenKind {
     /// Names a type. Deliberately not `type`, which is one of the language's
     /// three globals — see v0.7 §3.1.
     Alias,
+    /// Says that a member replaces one a superclass declared. Required where it
+    /// is true and refused where it is not — see [`crate::syntax::ast::FnDecl::overrides`].
+    Override,
+    /// Forbids the implicit constructor coercion a single-parameter `op init`
+    /// otherwise gives its class.
+    Explicit,
     /// Keywords rather than identifiers so that using one where it has no
     /// meaning is caught by the resolver, with a message that says why.
     SelfKw,
@@ -94,8 +102,32 @@ pub enum TokenKind {
     Slash,
     SlashSlash,
     Percent,
+    /// `**`. The one binary operator in the language that associates to the
+    /// right, and the one that binds tighter than unary minus — see v0.8 §3.7.
+    StarStar,
 
     Assign,
+    /// `+=`, `//=`, `<<=`, and the ten others, carrying the operator they
+    /// combine with.
+    ///
+    /// One variant rather than thirteen, because there is exactly one rule for
+    /// all of them — `a op= b` is `a = a op b` with the target evaluated once —
+    /// and thirteen variants would be thirteen places for that rule to be
+    /// written slightly differently. The payload is the operator the desugaring
+    /// reaches, so the lexer decides which one and nothing after it has to.
+    AssignOp(BinaryOp),
+    /// `and=`, `or=`, and `??=`, carrying which of the three it is.
+    ///
+    /// Kept apart from [`Self::AssignOp`] for the reason [`ShortAssignOp`] is
+    /// kept apart from [`BinaryOp`]: these three may not run their right side,
+    /// so `a op= b` is *not* `a = a op b` for any of them. One variant rather
+    /// than three for the same reason the compound assignments are one.
+    AssignShort(ShortAssignOp),
+    /// `++` and `--`. Statement forms rather than operators — see
+    /// [`crate::syntax::parser`] — so they carry no value and appear in no
+    /// precedence table.
+    PlusPlus,
+    MinusMinus,
     Eq,
     Ne,
     Lt,
@@ -103,13 +135,18 @@ pub enum TokenKind {
     Gt,
     Ge,
 
+    /// The three logical operators, which are words rather than symbols.
+    ///
+    /// They were `!`, `&&`, and `||` through v0.8. Words because the language
+    /// already reads `is` and `in` as operators, so these join a family rather
+    /// than starting one — and because retiring `&&` and `||` leaves `&` and `|`
+    /// meaning exactly one thing, which retires the `a & b` typo for `a && b`
+    /// along with them.
     Not,
-    AndAnd,
-    OrOr,
+    And,
+    Or,
 
-    /// The bitwise operators. `&` and `|` are the single-character forms of
-    /// `&&` and `||`, which is why the lexer used to refuse them outright with
-    /// "did you mean `&&`?" — that suggestion is now wrong and is gone.
+    /// The bitwise operators, and the only meaning `&` and `|` have.
     Amp,
     Pipe,
     Caret,
@@ -156,8 +193,9 @@ pub enum TokenKind {
 /// `import` two tokens later — and is an ordinary identifier everywhere else.
 pub const KEYWORDS: &[&str] = &[
     "fn", "op", "class", "extends", "extend", "self", "super", "let", "final", "complete",
-    "sealed", "const", "public", "private", "protected", "any", "is", "alias", "import", "if",
-    "else", "while", "for", "in", "return", "try", "catch", "throw", "true", "false", "nil",
+    "sealed", "const", "override", "explicit", "public", "private", "protected", "any", "is",
+    "alias", "import", "if", "else", "while", "for", "in", "return", "try", "catch", "throw",
+    "true", "false", "nil", "and", "or", "not",
 ];
 
 /// Built-in types that the editor grammar highlights as support types.
@@ -181,6 +219,8 @@ impl TokenKind {
             "complete" => TokenKind::Complete,
             "sealed" => TokenKind::Sealed,
             "const" => TokenKind::Const,
+            "override" => TokenKind::Override,
+            "explicit" => TokenKind::Explicit,
             "public" => TokenKind::Public,
             "private" => TokenKind::Private,
             "protected" => TokenKind::Protected,
@@ -200,6 +240,9 @@ impl TokenKind {
             "true" => TokenKind::True,
             "false" => TokenKind::False,
             "nil" => TokenKind::Nil,
+            "and" => TokenKind::And,
+            "or" => TokenKind::Or,
+            "not" => TokenKind::Not,
             _ => return None,
         };
         Some(kind)
@@ -229,7 +272,9 @@ impl TokenKind {
             TokenKind::Final => "Binds a name once. The object it names is untouched, so a `final` list still grows. Before `class`, it means no other class may extend this one.",
             TokenKind::Complete => "Before `class`: the method table is finished, so no `extend` block may add to it. Subclasses are still welcome, since a subclass adds nothing to the class it descends from.",
             TokenKind::Sealed => "Before `class`: `final` and `complete` at once — neither a subclass nor an `extend` block.",
-            TokenKind::Const => "Binds a name once and freezes the value, deeply, and through every other name that already reaches it.",
+            TokenKind::Const => "Binds a name once and freezes the value, deeply, and through every other name that already reaches it. Before `fn` or `op`, it marks the body pure: no field assignment, no index-set, no call to a method that is not itself `const`.",
+            TokenKind::Override => "Says that this member replaces one a superclass declared. Required when it is true, and refused when it is not — a typo'd method name is exactly the mistake it catches.",
+            TokenKind::Explicit => "Before `op init`, refuses the implicit coercion a single-parameter constructor otherwise gives its class: `let db: Connection = 1000` stops meaning `Connection(1000)`.",
             TokenKind::Public => "Reachable from anywhere. What a member is when no visibility is written, so it is the word to omit rather than the word to add.",
             TokenKind::Private => "Reachable only from inside methods of the class that declared it. On a top-level declaration, it is not exported to an importing module.",
             TokenKind::Protected => "Reachable from inside methods of the declaring class and of the classes that extend it, and nowhere else.",
@@ -249,6 +294,9 @@ impl TokenKind {
             TokenKind::True => "The true boolean.",
             TokenKind::False => "The false boolean.",
             TokenKind::Nil => "The absence of a value.",
+            TokenKind::And => "True when both sides are truthy. Short-circuits: the right side is not evaluated when the left already answered. Written `and` rather than `&&`, which leaves `&` meaning only the bitwise operator.",
+            TokenKind::Or => "True when either side is truthy. Short-circuits: the right side is not evaluated when the left already answered. Written `or` rather than `||`, which leaves `|` meaning only the bitwise operator.",
+            TokenKind::Not => "Negates a condition — `not found`. Also the first half of `not in`, which asks whether a collection lacks a value.",
 
             TokenKind::Int(_)
             | TokenKind::Float(_)
@@ -260,22 +308,24 @@ impl TokenKind {
             | TokenKind::Slash
             | TokenKind::SlashSlash
             | TokenKind::Percent
+            | TokenKind::StarStar
             | TokenKind::Assign
+            | TokenKind::AssignOp(_)
+            | TokenKind::AssignShort(_)
+            | TokenKind::PlusPlus
+            | TokenKind::MinusMinus
             | TokenKind::Eq
             | TokenKind::Ne
             | TokenKind::Lt
             | TokenKind::Le
             | TokenKind::Gt
             | TokenKind::Ge
-            | TokenKind::Not
             | TokenKind::Amp
             | TokenKind::Pipe
             | TokenKind::Caret
             | TokenKind::Tilde
             | TokenKind::Shl
             | TokenKind::Shr
-            | TokenKind::AndAnd
-            | TokenKind::OrOr
             | TokenKind::LParen
             | TokenKind::RParen
             | TokenKind::LBrace
@@ -315,6 +365,8 @@ impl fmt::Display for TokenKind {
             TokenKind::Complete => write!(f, "complete"),
             TokenKind::Sealed => write!(f, "sealed"),
             TokenKind::Const => write!(f, "const"),
+            TokenKind::Override => write!(f, "override"),
+            TokenKind::Explicit => write!(f, "explicit"),
             TokenKind::Public => write!(f, "public"),
             TokenKind::Private => write!(f, "private"),
             TokenKind::Protected => write!(f, "protected"),
@@ -334,6 +386,9 @@ impl fmt::Display for TokenKind {
             TokenKind::True => write!(f, "true"),
             TokenKind::False => write!(f, "false"),
             TokenKind::Nil => write!(f, "nil"),
+            TokenKind::And => write!(f, "and"),
+            TokenKind::Or => write!(f, "or"),
+            TokenKind::Not => write!(f, "not"),
 
             TokenKind::Plus => write!(f, "+"),
             TokenKind::Minus => write!(f, "-"),
@@ -341,8 +396,13 @@ impl fmt::Display for TokenKind {
             TokenKind::Slash => write!(f, "/"),
             TokenKind::SlashSlash => write!(f, "//"),
             TokenKind::Percent => write!(f, "%"),
+            TokenKind::StarStar => write!(f, "**"),
 
             TokenKind::Assign => write!(f, "="),
+            TokenKind::AssignOp(op) => write!(f, "{}=", op.symbol()),
+            TokenKind::AssignShort(op) => write!(f, "{}=", op.symbol()),
+            TokenKind::PlusPlus => write!(f, "++"),
+            TokenKind::MinusMinus => write!(f, "--"),
             TokenKind::Eq => write!(f, "=="),
             TokenKind::Ne => write!(f, "!="),
             TokenKind::Lt => write!(f, "<"),
@@ -350,15 +410,12 @@ impl fmt::Display for TokenKind {
             TokenKind::Gt => write!(f, ">"),
             TokenKind::Ge => write!(f, ">="),
 
-            TokenKind::Not => write!(f, "!"),
             TokenKind::Amp => write!(f, "&"),
             TokenKind::Pipe => write!(f, "|"),
             TokenKind::Caret => write!(f, "^"),
             TokenKind::Tilde => write!(f, "~"),
             TokenKind::Shl => write!(f, "<<"),
             TokenKind::Shr => write!(f, ">>"),
-            TokenKind::AndAnd => write!(f, "&&"),
-            TokenKind::OrOr => write!(f, "||"),
 
             TokenKind::LParen => write!(f, "("),
             TokenKind::RParen => write!(f, ")"),

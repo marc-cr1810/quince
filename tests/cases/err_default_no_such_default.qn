@@ -1,0 +1,7 @@
+class Report {
+    # `float` is not one of the types that can answer what its default is, and
+    # zero would be a value somebody chose rather than one the language knows.
+    private let total: float
+}
+
+print(Report())

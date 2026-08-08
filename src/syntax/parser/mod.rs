@@ -20,6 +20,7 @@ mod tests;
 use crate::error::{ErrorKind, QuinceError, Raised, Result};
 use crate::syntax::ast::{Block, Stmt, StmtKind, Visibility};
 use crate::syntax::doc::Doc;
+use crate::syntax::parser::decl::Member;
 use crate::syntax::token::{Span, Token, TokenKind};
 
 /// An error for text that does not parse.
@@ -50,6 +51,85 @@ pub(super) struct Modifiers {
     /// `None` when none was written, which is the same reach and not the same
     /// thing to point at.
     pub vis_span: Option<Span>,
+    /// The v0.8 words, each `Some` at the span it was written at.
+    ///
+    /// Spans rather than bools because every one of them can be refused —
+    /// `explicit` on something that is not a constructor, `override` at the top
+    /// level — and a refusal has to underline the word rather than the
+    /// declaration under it. Whether one was written is `is_some()`.
+    pub constant: Option<Span>,
+    pub overrides: Option<Span>,
+    pub guarded: Option<Span>,
+    pub explicit: Option<Span>,
+}
+
+impl Modifiers {
+    /// The bundle a declaration form that takes none of them hands on.
+    fn plain(doc: Option<Doc>, visibility: Visibility, vis_span: Option<Span>) -> Modifiers {
+        Modifiers {
+            doc,
+            visibility,
+            vis_span,
+            constant: None,
+            overrides: None,
+            guarded: None,
+            explicit: None,
+        }
+    }
+}
+
+/// Where a `fn` or an `op` is being declared, which is what decides whether its
+/// modifiers mean anything.
+///
+/// The three differ in exactly two properties — whether there is a receiver, and
+/// whether there is something above the declaration for `override` and `final`
+/// to be about — so it is one parameter rather than two bools that can disagree.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Site {
+    /// A plain `fn`, at the top level or inside a block: no receiver, and
+    /// nothing above it.
+    Free,
+    /// A member of a class body.
+    Member,
+    /// A method an `extend` block adds. It takes a receiver like a member and
+    /// still has nothing above it: an extension may not shadow, so what it adds
+    /// is never an override, and no subclass reaches it through the class table
+    /// for `final` to guard.
+    Extension,
+}
+
+impl Site {
+    /// Whether the parser inserts `self` as the first parameter.
+    fn takes_receiver(self) -> bool {
+        !matches!(self, Site::Free)
+    }
+
+    /// Whether `override` and `final` can be true here.
+    fn inherits(self) -> bool {
+        matches!(self, Site::Member)
+    }
+
+    /// What to call it in the report that refuses a modifier.
+    fn what(self) -> &'static str {
+        match self {
+            Site::Free => "a plain function",
+            Site::Member => "a class member",
+            Site::Extension => "a method added by `extend`",
+        }
+    }
+}
+
+/// Whether `kind` is one of the words that may precede `fn` or `op`.
+///
+/// Read by [`Parser::declaration_modifiers`] to know when to stop, and by the
+/// class body to look *past* them: `final` and `const` introduce a field as well
+/// as qualifying a method, so which of the two a member is cannot be decided
+/// until the first word that is neither.
+fn is_member_modifier(kind: &TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Const | TokenKind::Override | TokenKind::Final | TokenKind::Explicit
+    )
 }
 
 pub struct Parser {
@@ -123,6 +203,7 @@ impl Parser {
                 | TokenKind::Let
                 | TokenKind::Final
                 | TokenKind::Const
+                | TokenKind::Override
                 | TokenKind::For
                 | TokenKind::If
                 | TokenKind::While
@@ -146,12 +227,32 @@ impl Parser {
     // -- statements --------------------------------------------------------
     fn statement(&mut self) -> Result<Stmt> {
         match self.peek().kind {
-            // One token of lookahead, and only here: `final` is the one modifier
-            // that is also a binding form, so the class case has to be recognised
-            // before `let_stmt` consumes the keyword and demands a name.
-            // `complete` and `sealed` need none — they introduce nothing else.
-            TokenKind::Final if self.next_is(&TokenKind::Class) => self.class_stmt(),
-            TokenKind::Let | TokenKind::Final | TokenKind::Const => self.let_stmt(),
+            // Four words that open more than one form. `final` is a binding, a
+            // class modifier, and a member guard; `const` is a binding and a
+            // purity marker; `override` and `explicit` only ever precede a
+            // method, and are dispatched here so that one written anywhere else
+            // is refused by the form that knows why rather than falling through
+            // to be parsed as an expression.
+            TokenKind::Let
+            | TokenKind::Final
+            | TokenKind::Const
+            | TokenKind::Override
+            | TokenKind::Explicit => match self.member_kind() {
+                Member::Method => self.fn_stmt(),
+                Member::Class => self.class_stmt(),
+                Member::Field => self.let_stmt(),
+                Member::Neither => {
+                    let (word, span) = (self.peek().kind.clone(), self.peek().span);
+                    Err(declaration(
+                        format!("`{word}` does not declare anything on its own"),
+                        span,
+                    )
+                    .with_help(
+                        "it is a word in front of a declaration — a `let`, a `fn`, an `op`, or \
+                         a `class`",
+                    ))
+                }
+            },
             TokenKind::Complete | TokenKind::Sealed => self.class_stmt(),
             TokenKind::Fn => self.fn_stmt(),
             // A visibility word says what an importing module sees, so it is a
@@ -179,6 +280,11 @@ impl Parser {
             TokenKind::Return => self.return_stmt(),
             TokenKind::Try => self.try_stmt(),
             TokenKind::Throw => self.throw_stmt(),
+            // `++i` and `--i`. Dispatched here rather than in the precedence
+            // climb because that is what makes them statements: the climb never
+            // accepts one, so `f(++i)` is refused with the reason rather than
+            // parsed into something with a value.
+            TokenKind::PlusPlus | TokenKind::MinusMinus => self.incr_stmt(),
             TokenKind::LBrace => {
                 let block = self.block()?;
                 Ok(Stmt {
@@ -206,28 +312,28 @@ impl Parser {
         }
 
         // The word is left where it is: each declaration form reads its own
-        // modifiers, so dispatching is all this has to do. One token along says
-        // which form it is, and two are needed for `final` alone — a binding
-        // form and a class modifier both, which is the same ambiguity
-        // `statement` resolves for an unexported declaration.
+        // modifiers, so dispatching is all this has to do. `member_kind` reads
+        // past the whole run of words to whatever they qualify, which is the
+        // same ambiguity `statement` resolves for an unexported declaration and
+        // is resolved the same way.
         let after = self.tokens[self.pos + 1].kind.clone();
-        let then_class = matches!(
-            self.tokens.get(self.pos + 2).map(|token| &token.kind),
-            Some(TokenKind::Class)
-        );
         match after {
-            TokenKind::Fn => self.fn_stmt(),
-            TokenKind::Alias => self.alias_stmt(),
-            TokenKind::Class | TokenKind::Complete | TokenKind::Sealed => self.class_stmt(),
-            TokenKind::Final if then_class => self.class_stmt(),
-            TokenKind::Let | TokenKind::Final | TokenKind::Const => self.let_stmt(),
-            TokenKind::Op => Err(declaration(
-                "`op` is only valid inside a class body",
-                self.tokens[self.pos + 1].span,
-            )
-            .with_help("use `fn` for a function that is called by name")),
-            other => Err(declaration(
-                format!("expected a declaration after `{word}`, found {other}"),
+            TokenKind::Alias => return self.alias_stmt(),
+            TokenKind::Op => {
+                return Err(declaration(
+                    "`op` is only valid inside a class body",
+                    self.tokens[self.pos + 1].span,
+                )
+                .with_help("use `fn` for a function that is called by name"));
+            }
+            _ => {}
+        }
+        match self.member_kind() {
+            Member::Method => self.fn_stmt(),
+            Member::Class => self.class_stmt(),
+            Member::Field => self.let_stmt(),
+            Member::Neither => Err(declaration(
+                format!("expected a declaration after `{word}`, found {after}"),
                 span.to(self.tokens[self.pos + 1].span),
             )
             .with_help(
@@ -247,11 +353,52 @@ impl Parser {
     pub(super) fn modifiers(&mut self, what: &str) -> Result<Modifiers> {
         let header = self.peek().clone();
         let (visibility, vis_span) = self.visibility_word();
-        Ok(Modifiers {
-            doc: Self::doc_of(&header, what)?,
+        Ok(Modifiers::plain(
+            Self::doc_of(&header, what)?,
             visibility,
             vis_span,
-        })
+        ))
+    }
+
+    /// The same, plus the v0.8 words a `fn` or an `op` may carry.
+    ///
+    /// The canonical order is visibility first — `public const fn` — and every
+    /// other order is accepted and normalized, because there is nothing an
+    /// ordering rule would catch that is a mistake rather than a habit. What is
+    /// refused is writing one *twice*, which is a copy-and-paste and reads as
+    /// though it meant something the second time.
+    pub(super) fn declaration_modifiers(&mut self, what: &str) -> Result<Modifiers> {
+        let mut modifiers = self.modifiers(what)?;
+        loop {
+            let token = self.peek();
+            if !is_member_modifier(&token.kind) {
+                break;
+            }
+            let (word, span) = (token.kind.clone(), token.span);
+            let slot = match word {
+                TokenKind::Const => &mut modifiers.constant,
+                TokenKind::Override => &mut modifiers.overrides,
+                TokenKind::Final => &mut modifiers.guarded,
+                _ => &mut modifiers.explicit,
+            };
+            if slot.is_some() {
+                return Err(declaration(format!("`{word}` is written twice"), span)
+                    .with_help("one of them says nothing the other did not — delete it"));
+            }
+            *slot = Some(span);
+            self.advance();
+            // A visibility word after one of these is still a visibility word.
+            // Accepting it here is what makes `const public fn` parse, and the
+            // documentation still comes off the first token of the header.
+            if modifiers.vis_span.is_none() {
+                let (visibility, vis_span) = self.visibility_word();
+                if vis_span.is_some() {
+                    modifiers.visibility = visibility;
+                    modifiers.vis_span = vis_span;
+                }
+            }
+        }
+        Ok(modifiers)
     }
 
     /// Eats a visibility word if the next token is one.
@@ -296,17 +443,6 @@ impl Parser {
         self.peek().kind == TokenKind::Eof
     }
 
-    /// Whether the token *after* the current one is `kind`.
-    ///
-    /// The only lookahead in the parser, and it exists for one word: `final`
-    /// introduces a binding unless a `class` follows it. Past the end is `false`
-    /// rather than a panic, since the token after `Eof` is nothing at all.
-    fn next_is(&self, kind: &TokenKind) -> bool {
-        self.tokens
-            .get(self.pos + 1)
-            .is_some_and(|token| std::mem::discriminant(&token.kind) == std::mem::discriminant(kind))
-    }
-
     /// Whether the statement starting here is `from <module> import …`.
     ///
     /// The deeper of the parser's two lookaheads, and it exists for one word.
@@ -344,6 +480,17 @@ impl Parser {
         token
     }
 
+    /// The token after the current one.
+    ///
+    /// Wanted by the two operators written as two words — `not in` and `is not`
+    /// — whose first word means something else on its own, so which form is
+    /// being read cannot be decided without the second in hand.
+    fn peek_ahead(&self) -> &TokenKind {
+        self.tokens
+            .get(self.pos + 1)
+            .map_or(&TokenKind::Eof, |token| &token.kind)
+    }
+
     /// Compares only the variant, so `Ident("a")` matches any `Ident`.
     fn check(&self, kind: &TokenKind) -> bool {
         std::mem::discriminant(&self.peek().kind) == std::mem::discriminant(kind)
@@ -363,6 +510,13 @@ impl Parser {
             return Ok(self.advance());
         }
         let found = self.peek();
+        // A `++` still sitting here is always the same mistake: `expr_stmt` took
+        // every one that ends a statement, so this one is inside an expression —
+        // `f(i++)`, `if i++ > 3`. Naming the rule beats naming the token, and
+        // the token is what the generic message below would name.
+        if matches!(found.kind, TokenKind::PlusPlus | TokenKind::MinusMinus) {
+            return Err(stmt::incr_outside_statement(found));
+        }
         Err(syntax(
             format!("expected `{kind}` {context}, found `{}`", found.kind),
             found.span,
@@ -399,6 +553,11 @@ impl Parser {
             return Ok(());
         }
         let token = self.peek();
+        // `let x = i++`: the `++` reached the end of a statement it is not the
+        // end *of*, because the assignment already claimed the expression.
+        if matches!(token.kind, TokenKind::PlusPlus | TokenKind::MinusMinus) {
+            return Err(stmt::incr_outside_statement(token));
+        }
         // A `{` at the start of a statement always opens a block, so a bare dict
         // literal gets parsed as one and fails here on its first `:`. Saying so
         // is far more use than naming the token.
