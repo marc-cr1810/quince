@@ -45,7 +45,11 @@ impl Interp {
                 slot,
             } => {
                 let initializer = value;
-                let mut value = self.eval(initializer, env)?;
+                // With the annotation's arguments in hand, so `let s:
+                // Stack[int] = Stack()` binds `T` before the constructor runs
+                // rather than after — v0.9 §3.1, and see `evaluated_as` for why
+                // "after" would be too late.
+                let mut value = self.evaluated_as(ty.as_ref(), initializer, env)?;
                 // Against the annotation before the name is bound, so a refused
                 // value is never observable under the name that refused it.
                 // The initializer goes too, so a report about one element of a

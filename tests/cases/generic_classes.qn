@@ -88,6 +88,29 @@ let tight = Box[int]()
 tight.set(7)
 print(tight.value)
 
+# §3.1 — inferred from the annotation. Writing the arguments twice is noise,
+# and the annotation is the more reliable of the two places to put them.
+let inferred: Stack[int] = Stack()
+inferred.push(1)
+print(inferred is Stack[int])
+print(inferred is Stack[string])
+
+# It reaches a declaration with no initializer at all, where the default is
+# whatever the bound argument answers with.
+class Holder[T] {
+    public let held: T
+}
+
+let counted: Holder[int]
+print(counted.held)
+let named: Holder[string]
+print(named.held == "")
+
+# And a written argument list wins outright, because a disagreement is
+# something to report rather than a gap to fill.
+let p2: Pair[int, string] = Pair[int, string](7, "b")
+print(p2)
+
 # A type parameter reaches into a container in the annotation, not just to it:
 # `list[T]` on a `Stack[int]` is a `list[int]`, and the list refuses a string on
 # the strength of the header the field crossed.

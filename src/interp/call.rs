@@ -848,7 +848,15 @@ impl Interp {
                 // Taken, not read: a `Stack[int](Point())` evaluates its
                 // argument inside this call, and the `Point` it builds must not
                 // inherit the header meant for the `Stack`.
-                if let Some(header) = self.pending.take() {
+                //
+                // And taken only if it is about *this* class. An inferred
+                // header travels from an annotation to the initializer beside
+                // it, and what runs in between is arbitrary — the name is what
+                // says the header arrived where it was aimed.
+                if self.pending.as_ref().is_some_and(|header| {
+                    matches!(&header.name, TypeName::Named(named) if *named == self.heap.class(id).name)
+                }) {
+                    let header = self.pending.take().expect("just checked");
                     self.heap.describe(instance_id, header);
                 }
 
@@ -1605,7 +1613,15 @@ impl Interp {
                             None => self.eval(&field.value, env)?,
                         }
                     }
-                    false => self.eval(&field.value, env)?,
+                    // A field's annotation infers for its initializer exactly as
+                    // a binding's does: `let inner: Stack[int] = Stack()` means
+                    // the same thing on a class body as at the top level.
+                    // Substituted first, so an outer `T` is settled before it
+                    // is lent inward.
+                    false => {
+                        let annotation = field.ty.as_ref().map(|ty| substituted(ty, &bindings));
+                        self.evaluated_as(annotation.as_ref(), &field.value, env)?
+                    }
                 };
                 if let Some(ty) = field.ty.clone() {
                     let ty = substituted(&ty, &bindings);

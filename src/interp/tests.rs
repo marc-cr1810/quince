@@ -1924,3 +1924,87 @@ fn brackets_before_a_call_are_a_subscript_when_the_target_is_not_a_class() {
     );
     assert_eq!(global(&interp, "n"), Some(Value::Int(1)));
 }
+
+#[test]
+fn an_annotation_binds_the_parameters_of_the_construction_beside_it() {
+    // §3.1's inference. It has to reach the construction *before* the fields
+    // run, because a field annotated `list[T]` is stamped as it crosses — an
+    // annotation applied afterwards would arrive to find the list already
+    // described as holding anything.
+    let program = crate::compile(
+        "class Stack[T] {\n\
+         \x20   private let items: list[T] = []\n\
+         \x20   public fn push(item: T) { self.items.push(item) }\n\
+         }\n\
+         let s: Stack[int] = Stack()\n\
+         s.push(\"no\")\n",
+    )
+    .expect("the program parses");
+    let mut interp = Interp::with_output(Box::new(Vec::new()));
+    let err = interp.run(&program).expect_err("`T` came from the annotation");
+    assert_eq!(err.message, "`item` is `int`, but this is a string");
+
+    // And the header is what `is` reads back, so the inference is not a
+    // check-time fiction.
+    let interp = run(
+        "class Stack[T] { public op init() {} }\n\
+         let s: Stack[int] = Stack()\n\
+         let a = s is Stack[int]\n\
+         let b = s is Stack[string]\n",
+    );
+    assert_eq!(global(&interp, "a"), Some(Value::Bool(true)));
+    assert_eq!(global(&interp, "b"), Some(Value::Bool(false)));
+}
+
+#[test]
+fn a_written_argument_list_wins_over_the_annotation() {
+    // A disagreement is something to report, not a gap to fill.
+    let program = crate::compile(
+        "class Stack[T] { public op init() {} }\n\
+         let s: Stack[int] = Stack[string]()\n",
+    )
+    .expect("the program parses");
+    let mut interp = Interp::with_output(Box::new(Vec::new()));
+    let err = interp.run(&program).expect_err("the two disagree");
+    assert_eq!(err.message, "`s` is `Stack[int]`, but this is `Stack[string]`");
+}
+
+#[test]
+fn inference_does_not_reach_through_an_unrelated_call() {
+    // The rule is syntactic and narrow on purpose: an annotation silently
+    // reconfiguring a construction several calls down is not inference. Only a
+    // bare construction of the very class named takes the lent header.
+    let interp = run(
+        "class Stack[T] { public op init() {} }\n\
+         fn wrap(s): any { return s }\n\
+         let loose: any = wrap(Stack())\n\
+         let a = loose is Stack[int]\n\
+         let b = loose is Stack[string]\n",
+    );
+    // Nothing described it, so it reads as every argument elided — a
+    // `Stack[any?]`, the top type of its family, which is neither of these two
+    // under the invariance v0.7 §4.1 settles. Unconstrained is a *state*, not a
+    // wildcard: `is` answers about what a value is known to hold, and this one
+    // is known to hold anything.
+    assert_eq!(global(&interp, "a"), Some(Value::Bool(false)));
+    assert_eq!(global(&interp, "b"), Some(Value::Bool(false)));
+
+    // Which is what an annotation buys wherever one is written. Note the second
+    // of these: the header comes from *crossing the return annotation*, which is
+    // v0.7 §3.9's rule and not this milestone's — a value describes itself at
+    // every annotated boundary it passes, and a generic instance is no
+    // different from the list that rule was written for.
+    for source in [
+        "class Stack[T] { public op init() {} }\n\
+         let told: Stack[int] = Stack()\n",
+        "class Stack[T] { public op init() {} }\n\
+         fn make(): Stack[int] { return Stack() }\n\
+         let told = make()\n",
+    ] {
+        let interp = run(&format!(
+            "{source}let a = told is Stack[int]\nlet b = told is Stack[string]\n"
+        ));
+        assert_eq!(global(&interp, "a"), Some(Value::Bool(true)), "{source}");
+        assert_eq!(global(&interp, "b"), Some(Value::Bool(false)), "{source}");
+    }
+}

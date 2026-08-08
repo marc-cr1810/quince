@@ -26,7 +26,7 @@ use crate::error::{ErrorKind, QuinceError, Result};
 use crate::interp::Interp;
 use crate::runtime::heap::{ObjId, Object};
 use crate::runtime::value::Value;
-use crate::syntax::ast::{CallArg, Expr, TypeExpr, TypeName};
+use crate::syntax::ast::{CallArg, Expr, ExprKind, TypeExpr, TypeName};
 use crate::syntax::token::Span;
 
 /// A type parameter and what it was bound to, in the order the class declared
@@ -104,6 +104,37 @@ impl Interp {
         let reified = self.heap.class(class).reified(bound);
         let restore = self.pending.replace(Rc::new(reified));
         let built = self.call_evaluated(Value::Class(class), args, env, span);
+        self.pending = restore;
+        built
+    }
+
+    /// Evaluates an initializer with the annotation's arguments in hand.
+    ///
+    /// v0.9 §3.1's inference: `let s: Stack[int] = Stack()` binds `T` to `int`
+    /// from the left-hand side, because writing it twice is noise and the
+    /// annotation is the more reliable of the two places to put it.
+    ///
+    /// Why it has to happen *here* rather than when the value is checked
+    /// against the annotation a moment later: the fields are initialized inside
+    /// the construction, and a field annotated `list[T]` is stamped as it
+    /// crosses. By the time `coerced_from` sees the instance the list inside it
+    /// already exists and is already described. The annotation has to arrive
+    /// before the constructor runs or it arrives too late to mean anything.
+    ///
+    /// Restores whatever was pending, so a construction nested inside the
+    /// initializer of another cannot see the outer one's header — the same
+    /// reason [`Interp::built_generic`] restores rather than clears.
+    pub(super) fn evaluated_as(
+        &mut self,
+        ty: Option<&TypeExpr>,
+        value: &Expr,
+        env: ObjId,
+    ) -> Result<Value> {
+        let Some(header) = inferred_header(ty, value) else {
+            return self.eval(value, env);
+        };
+        let restore = self.pending.replace(Rc::new(header));
+        let built = self.eval(value, env);
         self.pending = restore;
         built
     }
@@ -292,6 +323,51 @@ impl Interp {
             })
             .collect()
     }
+}
+
+/// The header an annotation lends to the initializer beside it, if any.
+///
+/// Deliberately *syntactic*, and narrow: the annotation must carry arguments,
+/// and the initializer must be a bare construction of the very class it names.
+/// `let s: Stack[int] = Stack()` qualifies and almost nothing else does.
+///
+/// The alternative considered was to pend the header for any initializer and
+/// let construction take it if the class name matched. That reaches further —
+/// `let s: Stack[int] = wrap(Stack())` would bind the inner one — and it
+/// reaches further than anyone can predict, which is the objection: an
+/// annotation on the left silently reconfiguring a construction three calls
+/// down is not inference, it is spooky action. §3.1 writes the rule as one
+/// sentence about one shape, and this is that shape.
+///
+/// A written argument list wins outright — `let s: Stack[int] = Stack[string]()`
+/// is a disagreement to report and not a gap to fill, and
+/// [`Interp::built_generic`] is what reports it, having pended its own header
+/// over this one.
+fn inferred_header(ty: Option<&TypeExpr>, value: &Expr) -> Option<TypeExpr> {
+    let ty = ty?;
+    if ty.args.is_empty() {
+        return None;
+    }
+    let TypeName::Named(named) = &ty.name else {
+        return None;
+    };
+    let ExprKind::Call { callee, .. } = &value.kind else {
+        return None;
+    };
+    let ExprKind::Var(var) = &callee.kind else {
+        return None;
+    };
+    if &var.name != named {
+        return None;
+    }
+    // Stripped of the qualifiers, which describe the *binding* and not what the
+    // instance holds: `const Stack[int]` freezes what crosses the annotation,
+    // and a header saying `const` would freeze every later reader of it.
+    Some(TypeExpr {
+        nullable: false,
+        frozen: false,
+        ..ty.clone()
+    })
 }
 
 /// The type an unbound parameter stands for: `any?`, the top type.
