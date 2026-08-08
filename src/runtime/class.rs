@@ -18,7 +18,7 @@ use crate::builtins::types::{BOOL, CLASS, DICT, FLOAT, FUNCTION, INT, LIST, MODU
 use crate::runtime::dict::Dict;
 use crate::runtime::heap::{Heap, ObjId};
 use crate::runtime::value::{Native, Value};
-use crate::syntax::ast::{FieldDecl, OPS, Op, Openness, TypeExpr, Visibility};
+use crate::syntax::ast::{FieldDecl, OPS, Op, Openness, TypeExpr, TypeParam, Visibility};
 
 /// A type built into the language.
 ///
@@ -308,9 +308,10 @@ pub struct Class {
     /// The type parameters the declaration wrote — `class Stack[T]`'s `T`, by
     /// name and in order. Empty for a class taking none.
     ///
-    /// Names and not [`TypeParam`](crate::syntax::ast::TypeParam)s: a span is a
-    /// fact about the source, and everything the run time does with a parameter
-    /// is match it against the argument in the same position.
+    /// Declarations and not bare names, since v0.9 §3.2 gave a parameter a
+    /// bound and the bound has to be here for `Stack[int]()` to be checked
+    /// against it — an explicit argument list is an expression, and the
+    /// resolver never sees it as a type.
     ///
     /// Not inherited. A subclass of a generic class declares its own list or
     /// takes none, the same way it declares its own `openness`.
@@ -322,7 +323,7 @@ pub struct Class {
     /// stops. What an instance was built to hold is recorded on the *instance*,
     /// in v0.7 §3.9's reified header, which is where every other "what does this
     /// container hold" already lives.
-    pub params: Vec<String>,
+    pub params: Vec<TypeParam>,
 }
 
 impl Class {

@@ -1,0 +1,68 @@
+# v0.9 §3.2 — bounds.
+#
+# A bound is an ordinary type, and satisfying it is ordinary matching: the same
+# §4.1 table, including `float` accepting an `int`. There is no second subtyping
+# relation, which is half of what this section exists to say.
+
+class NumberBox[T: float] {
+    private let value: T
+
+    public op init(value: T) {
+        self.value = value
+    }
+
+    public const fn get(): T {
+        return self.value
+    }
+}
+
+let exact = NumberBox[float](1.5)
+print(exact.get())
+
+# `int` widens to `float`, so it satisfies the bound — the same rule that makes
+# `let x: float = 3` legal, and not a second one.
+let widened = NumberBox[int](10)
+print(widened.get())
+
+# The bound holds through the annotation form too.
+let inferred: NumberBox[float] = NumberBox(2.5)
+print(inferred.get())
+
+# A subclass satisfies a bound naming its parent, for the reason
+# `let a: Animal = Dog()` is legal.
+class Animal {
+    public const fn speak(): string { return "..." }
+}
+
+class Dog extends Animal {
+    public const override fn speak(): string { return "woof" }
+}
+
+class Pen[T: Animal] {
+    public let occupant: T? = nil
+
+    public fn put(a: T) {
+        self.occupant = a
+    }
+}
+
+let kennel = Pen[Dog]()
+kennel.put(Dog())
+print(kennel.occupant.speak())
+
+# An unbounded parameter is bounded by `any?` — the top type, constraining
+# nothing, which is what makes `[T]` and `[T: any?]` the same declaration.
+class Anything[T] {
+    public let held: T? = nil
+}
+
+let a1 = Anything[int]()
+let a2 = Anything[string]()
+let a3 = Anything[Dog]()
+print(a1 is Anything[int], a2 is Anything[string], a3 is Anything[Dog])
+
+# Bounds do not add members: `T: Animal` constrains which arguments are
+# accepted, and the method below reaches `speak` through the *value*, which is
+# an `Animal` because the bound made it one. Nothing here is member lookup
+# through a parameter — that needs interfaces, and waits for v0.11.
+print(Pen[Animal]() is Pen[Animal])

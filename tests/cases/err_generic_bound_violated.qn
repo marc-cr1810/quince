@@ -1,0 +1,7 @@
+# §5 — a type argument that violates its parameter's bound, refused at
+# resolution, on the argument's own span rather than the declaration's.
+class NumberBox[T: float] {
+    public op init() {}
+}
+
+let bad: NumberBox[string] = NumberBox()

@@ -565,7 +565,14 @@ impl Parser {
                     "rename one of them — a mention of `{name}` cannot reach both"
                 )));
             }
-            params.push(TypeParam { name, span });
+            // `[T: float]`. The same `:` every annotation in the language is
+            // introduced by, and what follows is an ordinary type — v0.9 §3.2
+            // is emphatic that a bound is not a second kind of thing.
+            let bound = match self.eat(&TokenKind::Colon) {
+                true => Some(self.type_expr()?),
+                false => None,
+            };
+            params.push(TypeParam { name, span, bound });
             if !self.eat(&TokenKind::Comma) {
                 break;
             }

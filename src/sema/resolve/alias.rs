@@ -15,7 +15,8 @@ use crate::error::{QuinceError, Raised, Result};
 use crate::error::ErrorKind;
 use crate::runtime::dict::KEY_TYPES;
 use crate::sema::resolve::Prior;
-use crate::syntax::ast::{Expr, ExprKind, Stmt, StmtKind, TypeExpr, TypeName};
+use crate::sema::types::{bound_help, satisfies};
+use crate::syntax::ast::{Expr, ExprKind, Stmt, StmtKind, TypeExpr, TypeName, TypeParam};
 use crate::syntax::token::Span;
 
 /// Expands every alias in `program`, in place.
@@ -27,13 +28,16 @@ use crate::syntax::token::Span;
 pub(super) fn expand(program: &mut [Stmt], prior: &Prior) -> Result<()> {
     // The prior world first, so a class this entry redeclares takes its own
     // parameter list rather than the one it had a line ago.
-    let mut arities: HashMap<String, usize> = prior
-        .classes
-        .iter()
-        .filter(|(_, class)| !class.params.is_empty())
-        .map(|(name, class)| (name.clone(), class.params.len()))
-        .collect();
-    parameterised(program, &mut arities);
+    let mut classes = Classes::default();
+    for (name, class) in &prior.classes {
+        if !class.params.is_empty() {
+            classes.params.insert(name.clone(), class.params.clone());
+        }
+        if let Some(parent) = &class.parent {
+            classes.parents.insert(name.clone(), parent.clone());
+        }
+    }
+    parameterised(program, &mut classes);
     let mut declared = HashMap::new();
     // In declaration order, kept beside the map. Which alias a cycle is
     // reported at has to be the same on every run, and a `HashMap`'s iteration
@@ -54,7 +58,7 @@ pub(super) fn expand(program: &mut [Stmt], prior: &Prior) -> Result<()> {
 
     let ctx = Expansion {
         resolved: &resolved,
-        arities: &arities,
+        classes: &classes,
     };
     for stmt in program {
         substitute_stmt(stmt, &ctx)?;
@@ -62,22 +66,67 @@ pub(super) fn expand(program: &mut [Stmt], prior: &Prior) -> Result<()> {
     Ok(())
 }
 
-/// How many type parameters each class in the program declares.
+/// What this pass knows about the program's classes.
 ///
-/// Only the ones that declare any: an absent entry means "takes none", which is
-/// every class written before v0.9 and most written after.
+/// Two questions, and both are about a *type argument*: how many of them a class
+/// takes, and what each has to satisfy. The hierarchy is here because §3.2's
+/// bounds are ordinary matching and ordinary matching admits a subclass — so
+/// `Box[Dog]` satisfies `T: Animal`, and answering that needs to know what
+/// `Dog` extends.
+#[derive(Default)]
+struct Classes {
+    /// The parameters each class declares, for the ones declaring any. An
+    /// absent entry means "takes none", which is every class written before
+    /// v0.9 and most written after.
+    params: HashMap<String, Vec<TypeParam>>,
+    /// What each class extends, for the ones extending anything.
+    parents: HashMap<String, String>,
+}
+
+impl Classes {
+    /// Whether `name`'s class descends from `ancestor`, by name.
+    ///
+    /// Bounded rather than tracked with a visited set: `class A extends B` and
+    /// `class B extends A` is refused at run time, not here, so a cycle is a
+    /// shape this has to survive rather than diagnose. The same trade
+    /// [`Types::declares_method`](crate::sema::infer::Types::declares_method)
+    /// makes.
+    fn descends(&self, name: &str, ancestor: &str) -> bool {
+        let mut current = name;
+        for _ in 0..64 {
+            if current == ancestor {
+                return true;
+            }
+            match self.parents.get(current) {
+                Some(up) => current = up.as_str(),
+                None => return false,
+            }
+        }
+        false
+    }
+}
+
+/// Collects every class's parameters and parent.
 ///
-/// Collected from the whole tree rather than the top level, unlike the aliases
-/// above, because a class may be declared inside a function and its parameter
-/// list is no less real there. What that costs is that two classes of one name
-/// in two scopes share an entry — a pre-existing limit of every by-name table in
-/// this pass, and not one generics introduce.
-fn parameterised(stmts: &[Stmt], into: &mut HashMap<String, usize>) {
+/// From the whole tree rather than the top level, unlike the aliases above,
+/// because a class may be declared inside a function and its parameter list is
+/// no less real there. What that costs is that two classes of one name in two
+/// scopes share an entry — a pre-existing limit of every by-name table in this
+/// pass, and not one generics introduce.
+fn parameterised(stmts: &[Stmt], into: &mut Classes) {
     for stmt in stmts {
         match &stmt.kind {
-            StmtKind::Class { name, params, .. } => {
+            StmtKind::Class {
+                name,
+                params,
+                parent,
+                ..
+            } => {
                 if !params.is_empty() {
-                    into.insert(name.clone(), params.len());
+                    into.params.insert(name.clone(), params.clone());
+                }
+                if let Some(parent) = parent {
+                    into.parents.insert(name.clone(), parent.name.clone());
                 }
             }
             StmtKind::Fn { decl, .. } => parameterised(&decl.body.stmts, into),
@@ -108,8 +157,8 @@ fn parameterised(stmts: &[Stmt], into: &mut HashMap<String, usize>) {
 struct Expansion<'a> {
     /// Each alias, expanded to a form naming no alias.
     resolved: &'a HashMap<String, TypeExpr>,
-    /// How many arguments each generic class takes. See [`parameterised`].
-    arities: &'a HashMap<String, usize>,
+    /// What the program's classes declare. See [`Classes`].
+    classes: &'a Classes,
 }
 
 /// Gathers every `alias` declaration, refusing a second one for a name.
@@ -237,7 +286,7 @@ fn cycles(path: &[String], span: Span) -> Raised {
 ///
 /// A head that is neither is still left alone when it takes no arguments. It may
 /// not be a type at all, and *that* is checked where the annotation is applied.
-pub(super) fn check_arguments(ty: &TypeExpr, arities: &HashMap<String, usize>) -> Result<()> {
+fn check_arguments(ty: &TypeExpr, classes: &Classes) -> Result<()> {
     let TypeName::Named(head) = &ty.name else {
         // `any` takes no arguments and the parser gives it none.
         return Ok(());
@@ -246,8 +295,8 @@ pub(super) fn check_arguments(ty: &TypeExpr, arities: &HashMap<String, usize>) -
     let arity = match head {
         "list" => 1..=1,
         "dict" => 1..=2,
-        _ if arities.contains_key(head) => {
-            let count = arities[head];
+        _ if classes.params.contains_key(head) => {
+            let count = classes.params[head].len();
             count..=count
         }
         // Not a container and not a class that declared parameters, so it takes
@@ -294,6 +343,30 @@ pub(super) fn check_arguments(ty: &TypeExpr, arities: &HashMap<String, usize>) -
                 }
             ),
         }));
+    }
+
+    // §3.2's bounds, checked where the argument is written — which is the whole
+    // point of them being checked at resolution: the declaration is right and
+    // is somewhere else, so the caret belongs on the word the program chose.
+    if let Some(params) = classes.params.get(head) {
+        for (param, arg) in params.iter().zip(args) {
+            let Some(bound) = &param.bound else {
+                continue;
+            };
+            if satisfies(bound, arg, &|name, ancestor| classes.descends(name, ancestor)) {
+                continue;
+            }
+            return Err(refused(
+                format!(
+                    "`{}` does not satisfy bound `{}`",
+                    arg.written(),
+                    bound.written()
+                ),
+                arg.span,
+            )
+            .with_label(param.span, "declared here")
+            .with_help(bound_help(head, &param.name, bound)));
+        }
     }
 
     // The key is the first argument, for both `dict[K, V]` and the `dict[K]`
@@ -504,5 +577,5 @@ fn substitute(ty: &mut TypeExpr, ctx: &Expansion<'_>) -> Result<()> {
             span: ty.span,
         };
     }
-    check_arguments(ty, ctx.arities)
+    check_arguments(ty, ctx.classes)
 }

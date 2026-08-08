@@ -1,0 +1,8 @@
+# The same rule, met the other way in. An explicit argument list is an
+# expression, so the resolver never sees it as a type — it is checked where the
+# construction happens, which is the only place it can be.
+class NumberBox[T: float] {
+    public op init() {}
+}
+
+let bad = NumberBox[string]()

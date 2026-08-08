@@ -530,6 +530,80 @@ fn admits((want, has): (&TypeExpr, &TypeExpr)) -> bool {
     }
 }
 
+/// Whether a type argument satisfies the bound its parameter declared —
+/// v0.9 §3.2.
+///
+/// **Not [`admits`].** That one asks whether a container built to hold `has` may
+/// be *asked for* as `want`, and it is invariant because a `list[int]` handed
+/// out as a `list[int?]` would let a `nil` be written into it. A bound asks
+/// something weaker and older: whether this type is one of those. `int` widens
+/// to `float` here for the same reason `let x: float = 3` does, and a subclass
+/// satisfies a bound naming its parent for the same reason `let a: Animal =
+/// Dog()` does. Both are §4.1, and neither is a new relation.
+///
+/// The two are separate functions because they gave different answers to
+/// `(float, int)` and both answers were right.
+///
+/// `descends` answers whether its first argument's class descends from its
+/// second's, which is a question about a hierarchy that this file cannot see —
+/// the resolver knows it by name, the evaluator by handle, and they are given
+/// as a closure rather than picking one.
+pub fn satisfies(
+    bound: &TypeExpr,
+    arg: &TypeExpr,
+    descends: &dyn Fn(&str, &str) -> bool,
+) -> bool {
+    // An argument that admits `nil` satisfies only a bound that does. `T:
+    // float` is a promise about what a `T` is, and `nil` is not a float
+    // whatever else it is.
+    if arg.nullable && !bound.nullable {
+        return false;
+    }
+    let bound_name = match &bound.name {
+        // The unbounded `[T]`, spelled. `any?` constrains nothing and `any`
+        // constrains only absence, which the check above has already made.
+        TypeName::Any => return true,
+        TypeName::Named(name) => name.as_str(),
+    };
+    let TypeName::Named(arg_name) = &arg.name else {
+        // `any` as an *argument* satisfies only an `any` bound, which the arm
+        // above already answered. Anything narrower is a claim the argument
+        // does not make.
+        return false;
+    };
+    if arg_name == bound_name {
+        // Same head, so the question moves to the arguments, where invariance
+        // *is* the rule: `Box[list[int]]` does not satisfy `T: list[any]`.
+        return arguments_admit(bound, &arg.args);
+    }
+    // §4.1's one widening, and the hierarchy.
+    if bound_name == "float" && arg_name == "int" {
+        return true;
+    }
+    descends(arg_name, bound_name)
+}
+
+/// What to say when [`satisfies`] answers no.
+///
+/// Beside the rule rather than at the two places that report it, for the reason
+/// [`refusal`] sits beside [`holds`]: the resolver and the evaluator both raise
+/// this, and a message assembled twice is a message that drifts.
+///
+/// The widening is named only where it could apply. "and `int` where it says
+/// `float`" under a bound of `Animal` is true of the language and irrelevant to
+/// the reader, which is the kind of help that teaches people to stop reading
+/// help.
+pub fn bound_help(whose: &str, param: &str, bound: &TypeExpr) -> String {
+    let written = bound.written();
+    let widens = match &bound.name {
+        TypeName::Named(name) if name == "float" => ", and `int`, which widens to it",
+        _ => "",
+    };
+    format!(
+        "`{whose}`\u{2019}s `{param}` accepts `{written}`, a class descending from it{widens}"
+    )
+}
+
 /// Whether `value`'s class is `name` or descends from it.
 fn descends_from(heap: &Heap, value: &Value, name: &str) -> bool {
     let mut current = Some(value.class(heap));
@@ -731,5 +805,61 @@ mod tests {
         assert_eq!(ints.clone().join(strings), Type::Unknown);
         assert_eq!(ints.clone().join(bare), Type::Unknown);
         assert_eq!(ints.clone().join(ints.clone()), ints);
+    }
+
+    #[test]
+    fn a_bound_is_ordinary_matching_and_not_a_second_relation() {
+        // No hierarchy: every case here is decidable without one.
+        let flat = |_: &str, _: &str| false;
+        let holds = |bound: &str, arg: &str| {
+            satisfies(&annotation(bound), &annotation(arg), &flat)
+        };
+
+        assert!(holds("float", "float"));
+        // §4.1's one widening, and it is the reason `satisfies` is not
+        // `admits`: that one answers `false` here, correctly, because a
+        // `list[int]` handed out as a `list[float]` could be written into.
+        assert!(holds("float", "int"));
+        assert!(!holds("int", "float"));
+        assert!(!holds("float", "string"));
+
+        // An unbounded parameter is `any?`, which constrains nothing.
+        assert!(holds("_?", "int"));
+        assert!(holds("_?", "string"));
+        assert!(holds("_?", "int?"));
+        // `any` is the top type *minus* absence, so it still rules one thing out.
+        assert!(holds("_", "int"));
+        assert!(!holds("_", "int?"));
+
+        // A bound that does not admit `nil` is not satisfied by an argument
+        // that does — `T: float` promises what a `T` is, and `nil` is not one.
+        assert!(!holds("float", "float?"));
+        assert!(holds("float?", "float"));
+
+        // Same head, so the question moves to the arguments, where invariance
+        // is the rule.
+        assert!(holds("list[int]", "list[int]"));
+        assert!(!holds("list[int]", "list[string]"));
+        assert!(holds("list[any?]", "list[int]"));
+    }
+
+    #[test]
+    fn a_bound_admits_a_subclass_of_what_it_names() {
+        // The hierarchy is the caller's to know: the resolver reads it by name
+        // and the evaluator by handle, and this file sees neither.
+        let chain = |name: &str, ancestor: &str| (name, ancestor) == ("Dog", "Animal");
+        assert!(satisfies(&annotation("Animal"), &annotation("Dog"), &chain));
+        assert!(!satisfies(&annotation("Dog"), &annotation("Animal"), &chain));
+        assert!(!satisfies(&annotation("Animal"), &annotation("int"), &chain));
+    }
+
+    #[test]
+    fn the_bound_help_names_the_widening_only_where_it_applies() {
+        // Help that is true of the language and irrelevant to the reader is how
+        // people learn to stop reading help.
+        let float = bound_help("NumberBox", "T", &annotation("float"));
+        assert!(float.contains("`int`, which widens to it"), "{float}");
+        let animal = bound_help("Pen", "T", &annotation("Animal"));
+        assert!(!animal.contains("int"), "{animal}");
     }
 }

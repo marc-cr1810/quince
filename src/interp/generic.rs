@@ -26,6 +26,7 @@ use crate::error::{ErrorKind, QuinceError, Result};
 use crate::interp::Interp;
 use crate::runtime::heap::{ObjId, Object};
 use crate::runtime::value::Value;
+use crate::sema::types::{bound_help, satisfies};
 use crate::syntax::ast::{CallArg, Expr, ExprKind, TypeExpr, TypeName};
 use crate::syntax::token::Span;
 
@@ -88,13 +89,37 @@ impl Interp {
                 span,
             )
             .with_kind(ErrorKind::Type)
-            .with_help(format!("`{name}` declares `[{}]`", params.join(", "))));
+            .with_help(format!("`{name}` declares `[{}]`", written_params(&params))));
         }
 
         let values = self.eval_seq(type_args, env)?;
         let mut bound = Vec::with_capacity(values.len());
         for (index, value) in values.iter().enumerate() {
-            bound.push(self.as_type_argument(value, &name, &params[index], type_args[index].span)?);
+            let at = type_args[index].span;
+            let arg = self.as_type_argument(value, &name, &params[index].name, at)?;
+            // §3.2's bound, checked here as well as at resolution — not instead
+            // of it. An explicit argument list is an *expression*, so the
+            // resolver never sees it as a type and cannot check it; an
+            // annotation is a type, and checking it here would mean waiting for
+            // a construction to report a mistake the source already showed.
+            // Two places, because there are genuinely two ways in.
+            if let Some(bound) = &params[index].bound
+                && !satisfies(bound, &arg, &|name, ancestor| {
+                    self.descends_by_name(name, ancestor)
+                })
+            {
+                return Err(QuinceError::new(
+                    format!(
+                        "`{}` does not satisfy bound `{}`",
+                        arg.written(),
+                        bound.written()
+                    ),
+                    at,
+                )
+                .with_kind(ErrorKind::Type)
+                .with_help(bound_help(&name, &params[index].name, bound)));
+            }
+            bound.push(arg);
         }
 
         // Construction is the ordinary one. What the brackets bought is the
@@ -201,6 +226,26 @@ impl Interp {
                  `= …`, or annotate it `?` so it starts absent"
             ))
         })
+    }
+
+    /// Whether the class called `name` is `ancestor` or descends from it.
+    ///
+    /// By name, because a bound is written as a name and the argument arrives
+    /// as one. The hierarchy is real class objects here, unlike the resolver's
+    /// by-name approximation of it — but the question and the answer are the
+    /// same, which is what lets [`satisfies`] be one function.
+    fn descends_by_name(&self, name: &str, ancestor: &str) -> bool {
+        let Some(Value::Class(id)) = self.heap.globals(self.globals).get(name) else {
+            return false;
+        };
+        let mut current = Some(*id);
+        while let Some(id) = current {
+            if self.heap.class(id).name == ancestor {
+                return true;
+            }
+            current = self.heap.class(id).parent;
+        }
+        false
     }
 
     /// `Stack[int]` written where a value goes.
@@ -319,7 +364,7 @@ impl Interp {
                     .and_then(|ty| ty.args.get(index))
                     .cloned()
                     .unwrap_or_else(unconstrained);
-                (param.clone(), arg)
+                (param.name.clone(), arg)
             })
             .collect()
     }
@@ -428,6 +473,18 @@ pub(super) fn substituted(ty: &TypeExpr, bindings: &Bindings) -> TypeExpr {
     replaced.nullable = replaced.nullable || ty.nullable;
     replaced.frozen = replaced.frozen || ty.frozen;
     replaced
+}
+
+/// A parameter list as the declaration wrote it — `T, U: float`.
+fn written_params(params: &[crate::syntax::ast::TypeParam]) -> String {
+    params
+        .iter()
+        .map(|param| match &param.bound {
+            Some(bound) => format!("{}: {}", param.name, bound.written()),
+            None => param.name.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn plural(count: usize, word: &str) -> String {

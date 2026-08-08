@@ -25,7 +25,7 @@ use std::rc::Rc;
 use crate::error::{ErrorKind, QuinceError, Raised, Result};
 use crate::runtime::class::BUILTINS;
 use crate::sema::overload;
-use crate::syntax::ast::{FnDecl, ImportNames, Op, Slot, Stmt, StmtKind};
+use crate::syntax::ast::{FnDecl, ImportNames, Op, Slot, Stmt, StmtKind, TypeParam};
 use crate::syntax::token::Span;
 
 /// An error for a program that parses and still is not one.
@@ -92,12 +92,12 @@ pub struct PriorClass {
     /// The methods the class's own body declared — not the ones it inherited,
     /// which belong to whichever class wrote them and are found by walking.
     pub methods: Vec<Rc<FnDecl>>,
-    /// The type parameters it declared, by name — v0.9 §3.1.
+    /// The type parameters it declared, with their bounds — v0.9 §3.1, §3.2.
     ///
     /// Here for the same reason `parent` is: `Holder[int]` on one REPL line is
     /// checked against a `class Holder[T]` declared on another, and a pass that
     /// only saw the current entry would read it as a class taking no arguments.
-    pub params: Vec<String>,
+    pub params: Vec<TypeParam>,
 }
 
 /// The builtin type called `name`, if there is one.

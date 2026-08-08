@@ -200,14 +200,21 @@ impl BindKind {
 /// `T()` because a parameter names a type and not a value, and there is no
 /// binding here for one to be found in.
 ///
-/// The `bound` v0.9 §3.2 writes as `[T: Bound]` is tranche 3 and is not here
-/// yet. It is a field on this struct when it lands rather than a second
-/// parameter form, because a bound qualifies a parameter the way `?` qualifies
-/// a type — the thing is the same thing either way.
+/// A `bound` is a field here rather than a second parameter form, because it
+/// qualifies a parameter the way `?` qualifies a type — the thing is the same
+/// thing either way. v0.9 §3.2.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TypeParam {
     pub name: String,
     pub span: Span,
+    /// What an argument for this parameter must satisfy — `[T: float]`'s
+    /// `float`. `None` is the unbounded `[T]`, which §3.2 says means `any?`:
+    /// the top type, constraining nothing.
+    ///
+    /// An ordinary [`TypeExpr`], because a bound is an ordinary type and
+    /// satisfying it is ordinary matching. There is no second subtyping
+    /// relation in the language and §3.2 exists partly to say so.
+    pub bound: Option<TypeExpr>,
 }
 
 /// A type as the program wrote it.
