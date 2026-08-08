@@ -8,7 +8,7 @@
 use crate::error::Result;
 use crate::syntax::ast::{
     self, BindKind, Expr, ExprKind, FieldDecl, FnDecl, ImportName, ImportNames, Op, Openness, Param,
-    Stmt, StmtKind, TypeExpr, TypeName, TypeParam, Var,
+    ConstArg, ParamKind, Stmt, StmtKind, TypeExpr, TypeName, TypeParam, Var,
 };
 use crate::syntax::doc::Doc;
 use crate::syntax::parser::{Modifiers, Parser, Site, declaration, is_member_modifier, syntax};
@@ -332,6 +332,8 @@ impl Parser {
                 // `any` is wider than the contract, so it is a claim that the op
                 // may answer with something it may not.
                 TypeName::Any => true,
+                // A value is not the type the contract names, whatever it is.
+                TypeName::Const(_) => true,
                 TypeName::Named(name) => name != contract,
             };
             // `op string(): string?` is refused too: the contract is a string,
@@ -520,6 +522,30 @@ impl Parser {
         }
         let mut params: Vec<TypeParam> = Vec::new();
         loop {
+            // `const N: int` — a value parameter rather than a type one. §3.3.
+            // Read first, because `const` is the word that says which form this
+            // is and everything after it is read differently.
+            if self.check(&TokenKind::Const) {
+                let start = self.advance().span;
+                let (name, span) = self.expect_ident("after `const`")?;
+                Self::refuse_duplicate_param(&params, &name, span, whose)?;
+                self.expect(TokenKind::Colon, "after a const parameter's name")?;
+                let ty = self.type_expr()?;
+                Self::check_const_param_type(&ty)?;
+                params.push(TypeParam {
+                    name,
+                    span: start.to(ty.span),
+                    kind: ParamKind::Const { ty },
+                });
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
+                if self.check(&TokenKind::RBracket) {
+                    break;
+                }
+                continue;
+            }
+
             // A parameter is a bare name and nothing else.
             let (name, span) = match self.peek().kind.clone() {
                 TokenKind::Ident(word) => {
@@ -553,26 +579,25 @@ impl Parser {
                      `class {whose}[T]`, and `{name}` where `{whose}` is used"
                 )));
             }
-            // Two parameters of one name make every mention of it ambiguous,
-            // and there is no reading of the second that is right.
-            if let Some(earlier) = params.iter().find(|seen| seen.name == name) {
-                return Err(declaration(
-                    format!("`{whose}` already declares a type parameter `{name}`"),
-                    span,
-                )
-                .with_label(earlier.span, "the first one")
-                .with_help(format!(
-                    "rename one of them — a mention of `{name}` cannot reach both"
-                )));
-            }
+            Self::refuse_duplicate_param(&params, &name, span, whose)?;
             // `[T: float]`. The same `:` every annotation in the language is
             // introduced by, and what follows is an ordinary type — v0.9 §3.2
             // is emphatic that a bound is not a second kind of thing.
+            //
+            // Not to be confused with `const N: int` above, which shares the
+            // token and means the other thing: a bound says which types the
+            // argument may be, and a const parameter's type says what the
+            // *value* is. `const` is what tells them apart, which is why it
+            // leads the form rather than trailing it.
             let bound = match self.eat(&TokenKind::Colon) {
                 true => Some(self.type_expr()?),
                 false => None,
             };
-            params.push(TypeParam { name, span, bound });
+            params.push(TypeParam {
+                name,
+                span,
+                kind: ParamKind::Type { bound },
+            });
             if !self.eat(&TokenKind::Comma) {
                 break;
             }
@@ -583,6 +608,63 @@ impl Parser {
         }
         self.expect(TokenKind::RBracket, "after the type parameters")?;
         Ok(params)
+    }
+
+    /// Refuses a second parameter of a name already taken.
+    ///
+    /// Two of them make every mention ambiguous, and there is no reading of the
+    /// second that is right. Shared by both parameter forms, because a `T` and
+    /// a `const T` collide exactly as two `T`s would.
+    fn refuse_duplicate_param(
+        params: &[TypeParam],
+        name: &str,
+        span: Span,
+        whose: &str,
+    ) -> Result<()> {
+        let Some(earlier) = params.iter().find(|seen| seen.name == name) else {
+            return Ok(());
+        };
+        Err(declaration(
+            format!("`{whose}` already declares a type parameter `{name}`"),
+            span,
+        )
+        .with_label(earlier.span, "the first one")
+        .with_help(format!(
+            "rename one of them — a mention of `{name}` cannot reach both"
+        )))
+    }
+
+    /// Holds a `const` parameter to the three types a constant may have.
+    ///
+    /// `float` is excluded, and it is the only interesting exclusion: two
+    /// constants that compare equal can have different bit patterns, so
+    /// `Buffer[0.1 + 0.2]` and `Buffer[0.3]` would be the same type or two
+    /// types depending on the rounding, and nobody wants to debug that. §3.3.
+    fn check_const_param_type(ty: &TypeExpr) -> Result<()> {
+        let named = match &ty.name {
+            TypeName::Named(name) => name.as_str(),
+            _ => "",
+        };
+        if matches!(named, "int" | "bool" | "string") && !ty.nullable && ty.args.is_empty() {
+            return Ok(());
+        }
+        let written = ty.written();
+        Err(
+            declaration(format!("a const parameter cannot be `{written}`"), ty.span).with_help(
+                match named {
+                    "float" => "a const parameter is `int`, `bool`, or `string` — `float` is \
+                                excluded because two constants that compare equal can have \
+                                different bit patterns, and a type identity that turns on which \
+                                is not one anyone can debug"
+                        .to_string(),
+                    _ => format!(
+                        "a const parameter is `int`, `bool`, or `string` — a value of any other \
+                         type has no spelling a type argument could carry, and `{written}` is \
+                         one of them"
+                    ),
+                },
+            ),
+        )
     }
 
     /// A type: `int`, `int?`, `list[string]`, `any`, `_`, `const dict[string, int]`.
@@ -610,6 +692,31 @@ impl Parser {
             TokenKind::Ident(word) => {
                 self.advance();
                 TypeName::Named(word)
+            }
+            // A value where a type goes — `Array[int, 16]`'s `16`. Legal only
+            // in an argument position, which this function cannot see; the
+            // check that a const argument reached a const parameter is made
+            // where the parameter list is in hand. §3.3.
+            //
+            // A negative one is a unary minus applied to a literal, and this
+            // reads no expressions — so `Buffer[-1]` is refused here rather
+            // than silently meaning something. A capacity is not negative and
+            // the day one needs to be, this is where it is allowed.
+            TokenKind::Int(n) => {
+                self.advance();
+                TypeName::Const(ConstArg::Int(n))
+            }
+            TokenKind::Str(text) => {
+                self.advance();
+                TypeName::Const(ConstArg::Str(text))
+            }
+            TokenKind::True => {
+                self.advance();
+                TypeName::Const(ConstArg::Bool(true))
+            }
+            TokenKind::False => {
+                self.advance();
+                TypeName::Const(ConstArg::Bool(false))
             }
             other => {
                 return Err(syntax(

@@ -1,0 +1,68 @@
+# v0.9 §3.3 — const generic value parameters.
+#
+# A generic parameter can be a compile-time *value* rather than a type. `const N:
+# int` shares its colon with §3.2's `T: Bound` and means the other thing: a bound
+# says which types the argument may be, and this says what the value is. `const`
+# is what tells them apart, which is why it leads the form.
+
+class FixedBuffer[T, const CAP: int] {
+    private let items: list[T] = []
+
+    public op init() {}
+
+    # `CAP` is in scope in the body as a value, read-only.
+    public const fn capacity(): int {
+        return CAP
+    }
+
+    public const fn size(): int {
+        return len(self.items)
+    }
+
+    public fn push(item: T) {
+        if len(self.items) >= CAP {
+            throw Error("FixedBuffer is full")
+        }
+        self.items.push(item)
+    }
+}
+
+let buf: FixedBuffer[float, 16] = FixedBuffer()
+print(buf.capacity())
+buf.push(1.5)
+print(buf.size())
+
+# Explicit instantiation reaches the same place.
+let small = FixedBuffer[int, 2]()
+print(small.capacity())
+small.push(1)
+small.push(2)
+try {
+    small.push(3)
+} catch e {
+    print(e.message)
+}
+
+# Reified, like everything else — and the *value* is part of the identity, so
+# two capacities are two types.
+print(small is FixedBuffer[int, 2])
+print(small is FixedBuffer[int, 4])
+print(small is FixedBuffer[string, 2])
+
+# A `const` binding is a constant, so it may be written as an argument.
+const WIDTH = 8
+let sized = FixedBuffer[int, WIDTH]()
+print(sized.capacity())
+print(sized is FixedBuffer[int, 8])
+
+# The other two types a constant may have.
+class Tagged[const NAME: string, const ON: bool] {
+    public op init() {}
+    public const fn tag(): string { return NAME }
+    public const fn on(): bool { return ON }
+}
+
+let t = Tagged["alpha", true]()
+print(t.tag(), t.on())
+print(t is Tagged["alpha", true])
+print(t is Tagged["beta", true])

@@ -16,7 +16,7 @@ use crate::error::ErrorKind;
 use crate::runtime::dict::KEY_TYPES;
 use crate::sema::resolve::Prior;
 use crate::sema::types::{bound_help, satisfies};
-use crate::syntax::ast::{Expr, ExprKind, Stmt, StmtKind, TypeExpr, TypeName, TypeParam};
+use crate::syntax::ast::{Expr, ExprKind, ParamKind, Stmt, StmtKind, TypeExpr, TypeName, TypeParam};
 use crate::syntax::token::Span;
 
 /// Expands every alias in `program`, in place.
@@ -350,7 +350,61 @@ fn check_arguments(ty: &TypeExpr, classes: &Classes) -> Result<()> {
     // is somewhere else, so the caret belongs on the word the program chose.
     if let Some(params) = classes.params.get(head) {
         for (param, arg) in params.iter().zip(args) {
-            let Some(bound) = &param.bound else {
+            // §3.3 — a const parameter wants a value and a type parameter wants
+            // a type, and an annotation is the one place both are spelled the
+            // same way. Which was meant is a fact about the declaration, so the
+            // report quotes the declaration.
+            let written = arg.written();
+            match (&param.kind, &arg.name) {
+                (ParamKind::Const { ty }, TypeName::Const(value)) => {
+                    let wanted = match &ty.name {
+                        TypeName::Named(name) => name.as_str(),
+                        _ => "",
+                    };
+                    if value.type_name() != wanted {
+                        return Err(refused(
+                            format!(
+                                "`{head}`\u{2019}s `{}` is `{wanted}`, but `{written}` is `{}`",
+                                param.name,
+                                value.type_name()
+                            ),
+                            arg.span,
+                        )
+                        .with_label(param.span, "declared here"));
+                    }
+                }
+                (ParamKind::Const { .. }, _) => {
+                    return Err(refused(
+                        format!(
+                            "`{head}`\u{2019}s `{}` takes a value, and `{written}` is a type",
+                            param.name
+                        ),
+                        arg.span,
+                    )
+                    .with_label(param.span, "declared here")
+                    .with_help(format!(
+                        "the declaration writes `{}` — the argument in that position is a \
+                         literal, or a name declared `const`",
+                        param.written()
+                    )));
+                }
+                (ParamKind::Type { .. }, TypeName::Const(_)) => {
+                    return Err(refused(
+                        format!(
+                            "`{head}`\u{2019}s `{}` takes a type, and `{written}` is a value",
+                            param.name
+                        ),
+                        arg.span,
+                    )
+                    .with_label(param.span, "declared here")
+                    .with_help(format!(
+                        "write `const {}: …` in the declaration if it was meant to take one",
+                        param.name
+                    )));
+                }
+                (ParamKind::Type { .. }, _) => {}
+            }
+            let Some(bound) = param.bound() else {
                 continue;
             };
             if satisfies(bound, arg, &|name, ancestor| classes.descends(name, ancestor)) {

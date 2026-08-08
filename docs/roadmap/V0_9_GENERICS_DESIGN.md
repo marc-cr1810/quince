@@ -621,6 +621,20 @@ elementwise index resolution.
 **Tranche 5 — const generic parameters.** After packs, because the parameter-list grammar
 should stop moving before a fourth parameter form joins it.
 
+> **Done third, not fifth.** The argument above is about the *grammar*, and the grammar was
+> the cheap half. What decides the order is the **representation**: a const argument makes a
+> type argument a type-or-value, and every reader of that shape has to answer for the new
+> case. Tranche 4 adds a great many readers — pack expansion, elementwise index resolution,
+> `tuple`'s whole checking path — so paying for the widening first costs less than
+> retrofitting it through them afterwards. The grammar moving once more under tranche 4 is
+> the smaller price.
+>
+> The widening was also far cheaper than expected, for a reason worth recording: a const
+> argument went where an argument's *name* goes — a `TypeName::Const` variant — rather than
+> beside it as a third shape of `TypeExpr::args`. `args` is walked by every pass in the
+> compiler and the evaluator; what a name *means* is asked in about a dozen places. Twelve
+> match arms instead of a change to every walk.
+
 **Tranche 6 — `extend list[T]` and generic aliases.** The two small ones.
 
 **Tranche 7 — function types and literals.** Independent of every tranche above it, and

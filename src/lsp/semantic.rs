@@ -7,7 +7,7 @@
 
 use lsp_types::{SemanticToken, SemanticTokens};
 
-use quince::syntax::ast::{Expr, ExprKind, Stmt, StmtKind, TypeExpr, TypeName};
+use quince::syntax::ast::{ConstArg, Expr, ExprKind, Stmt, StmtKind, TypeExpr, TypeName};
 use quince::syntax::token::Span;
 use crate::lsp::DocumentState;
 use crate::lsp::navigate::find_name_range;
@@ -97,6 +97,18 @@ pub(crate) fn collect_type_expr_semantic_tokens(
         }
         TypeName::Any => {
             push_raw_token(source, ty.span, "any", 6, 0, raw_tokens);
+        }
+        // A const argument is a literal and is highlighted as one — `16` in
+        // `Buffer[int, 16]` should look like the `16` two lines down, because
+        // it is the same thing standing in a different place. Token type 5 is
+        // `number`; a string or a bool argument takes its own.
+        TypeName::Const(value) => {
+            let (kind, written) = match value {
+                ConstArg::Int(n) => (5, n.to_string()),
+                ConstArg::Bool(b) => (6, b.to_string()),
+                ConstArg::Str(s) => (4, format!("{s:?}")),
+            };
+            push_raw_token(source, ty.span, &written, kind, 0, raw_tokens);
         }
     }
     for arg in &ty.args {

@@ -344,7 +344,11 @@ impl Resolver {
             // `nil`, but a default that depended on the `?` would make the
             // annotation decide whether the declaration is legal, and §3.6
             // settles the same question the other way for a parameter.
-            TypeName::Any => written.clone(),
+            //
+            // A const argument is here only if someone annotated a binding with
+            // a bare value — `let x: 16` — which is not a type and has no
+            // default for the same reason.
+            TypeName::Any | TypeName::Const(_) => written.clone(),
         };
         Err(declaration(
             format!("`{named}` has no default constructor, so {what} needs an initializer"),

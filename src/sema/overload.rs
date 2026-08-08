@@ -204,6 +204,9 @@ fn matched(param: &Param, rep: &str) -> Option<u8> {
     };
     match &ty.name {
         TypeName::Any => Some(fit::ANYTHING),
+        // A value where a type goes, which no argument fits. See
+        // `Interp::fits`, which scores the same question at run time.
+        TypeName::Const(_) => None,
         TypeName::Named(named) if named == rep => Some(match ty.nullable {
             // Reaching a `T?` with a `T` is a widening, not an exact match:
             // the annotation admits more than the value is. That difference is

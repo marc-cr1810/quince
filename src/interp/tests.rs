@@ -2008,3 +2008,92 @@ fn inference_does_not_reach_through_an_unrelated_call() {
         assert_eq!(global(&interp, "b"), Some(Value::Bool(false)), "{source}");
     }
 }
+
+#[test]
+fn a_const_argument_is_part_of_the_type() {
+    // §3.3. The value is half of a type identity, so two capacities are two
+    // types — and it is O(1) against the header, like every other `is`.
+    let interp = run(
+        "class Buffer[T, const CAP: int] { public op init() {} }\n\
+         let small = Buffer[int, 2]()\n\
+         let a = small is Buffer[int, 2]\n\
+         let b = small is Buffer[int, 4]\n\
+         let c = small is Buffer[string, 2]\n",
+    );
+    assert_eq!(global(&interp, "a"), Some(Value::Bool(true)));
+    assert_eq!(global(&interp, "b"), Some(Value::Bool(false)));
+    assert_eq!(global(&interp, "c"), Some(Value::Bool(false)));
+}
+
+#[test]
+fn a_const_parameter_is_a_value_in_the_body() {
+    // Read-only falls out rather than being enforced: there is no slot to
+    // assign to, so `CAP = 5` never reaches the evaluator at all.
+    let interp = run(
+        "class Buffer[const CAP: int] {\n\
+         \x20   public op init() {}\n\
+         \x20   public const fn capacity(): int { return CAP }\n\
+         }\n\
+         let n = Buffer[16]().capacity()\n",
+    );
+    assert_eq!(global(&interp, "n"), Some(Value::Int(16)));
+
+    // Reached through the annotation form too, which is where the header comes
+    // from inference rather than from a written argument list.
+    let interp = run(
+        "class Buffer[const CAP: int] {\n\
+         \x20   public op init() {}\n\
+         \x20   public const fn capacity(): int { return CAP }\n\
+         }\n\
+         let b: Buffer[8] = Buffer()\n\
+         let n = b.capacity()\n",
+    );
+    assert_eq!(global(&interp, "n"), Some(Value::Int(8)));
+}
+
+#[test]
+fn a_const_parameter_shadows_a_global_of_the_same_name() {
+    // The class header is the nearer declaration, and the nearer declaration
+    // wins — the same rule a parameter shadowing a global follows, reached by a
+    // different road.
+    let interp = run(
+        "let CAP = 99\n\
+         class Buffer[const CAP: int] {\n\
+         \x20   public op init() {}\n\
+         \x20   public const fn inner(): int { return CAP }\n\
+         }\n\
+         let n = Buffer[16]().inner()\n\
+         let outside = CAP\n",
+    );
+    assert_eq!(global(&interp, "n"), Some(Value::Int(16)));
+    // And only inside the body: the global is untouched everywhere else.
+    assert_eq!(global(&interp, "outside"), Some(Value::Int(99)));
+}
+
+#[test]
+fn a_const_argument_has_to_be_constant() {
+    // Not about the value — about how it was written. A type argument becomes
+    // part of a type identity, and a type that could differ between two
+    // evaluations of one line is not a type.
+    let program = crate::compile(
+        "class Buffer[const N: int] { public op init() {} }\n\
+         let size = 4\n\
+         let b = Buffer[size]()\n",
+    )
+    .expect("the program parses");
+    let mut interp = Interp::with_output(Box::new(Vec::new()));
+    let err = interp.run(&program).expect_err("`size` can be reassigned");
+    assert!(err.message.contains("needs a constant"), "{}", err.message);
+
+    // A name bound once is constant enough: §3.3 says "a `const` binding", and
+    // a `final` one is no less fixed.
+    for word in ["const", "final"] {
+        let interp = run(&format!(
+            "class Buffer[const N: int] {{ public op init() {{}} }}\n\
+             {word} size = 4\n\
+             let b = Buffer[size]()\n\
+             let ok = b is Buffer[4]\n"
+        ));
+        assert_eq!(global(&interp, "ok"), Some(Value::Bool(true)), "{word}");
+    }
+}

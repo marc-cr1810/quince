@@ -1,0 +1,7 @@
+# A type written where a const parameter goes. An annotation is the one place
+# the two are spelled alike, so which was meant is read off the declaration.
+class Buffer[const N: int] {
+    public op init() {}
+}
+
+let b: Buffer[int]

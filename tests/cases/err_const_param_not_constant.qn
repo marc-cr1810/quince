@@ -1,0 +1,9 @@
+# §3.3 — the argument must be a literal or a name bound once. A value worked
+# out when the line runs could differ between two readings of the same source,
+# and a type that does that is not a type.
+class Buffer[const N: int] {
+    public op init() {}
+}
+
+let size = 4
+let b = Buffer[size]()

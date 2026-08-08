@@ -13,8 +13,8 @@ pub mod decl;
 pub mod op;
 
 pub use decl::{
-    BindKind, FieldDecl, FnDecl, ImportName, ImportNames, Openness, Param, SELF, SUPER, TypeExpr,
-    TypeName, TypeParam, Visibility,
+    BindKind, ConstArg, FieldDecl, FnDecl, ImportName, ImportNames, Openness, Param, ParamKind,
+    SELF, SUPER, TypeExpr, TypeName, TypeParam, Visibility,
 };
 pub use op::{BinaryOp, LogicalOp, OPS, Op, Reflect, ShortAssignOp, UnaryOp};
 

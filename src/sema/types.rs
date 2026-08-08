@@ -372,6 +372,12 @@ pub(crate) fn binary(op: BinaryOp, lhs: &Type, rhs: &Type) -> Type {
 pub fn stated(ty: &TypeExpr) -> Type {
     match &ty.name {
         TypeName::Any => Type::Unknown,
+        // A value, not a type. The inference pass has no representation for one
+        // and does not need it yet: `Buffer[int, 16]` and `Buffer[int, 32]`
+        // differ where it matters — in the header `is` reads — and this pass
+        // only ever reports a type back to an editor. §3.3, and it is the one
+        // place a const argument is answered less precisely than it is checked.
+        TypeName::Const(_) => Type::Unknown,
         TypeName::Named(name) => {
             let stated = Type::generic(name, ty.args.iter().map(stated).collect());
             match ty.nullable {
@@ -418,6 +424,11 @@ pub fn holds(ty: &TypeExpr, value: &Value, heap: &Heap) -> bool {
     let name = match &ty.name {
         // Anything that is not `nil`, and `nil` was answered above.
         TypeName::Any => return true,
+        // A const argument names no class, so no value is an instance of it.
+        // Unreachable in practice — the parser only produces one inside an
+        // argument list, and this is asked of the head — but "no value holds as
+        // `16`" is the honest answer if it ever is.
+        TypeName::Const(_) => return false,
         TypeName::Named(name) => name.as_str(),
     };
 
@@ -526,7 +537,12 @@ fn admits((want, has): (&TypeExpr, &TypeExpr)) -> bool {
         // `any` does not admit `nil`, so it does not admit a container that may
         // hold one either. `any?` is the spelling for that.
         TypeName::Any => want.nullable || !has.nullable,
-        TypeName::Named(_) => want.same_as(has),
+        // A const argument compares by equality, which `same_as` already does:
+        // `TypeName` derives `PartialEq` and `Const(Int(16))` is not
+        // `Const(Int(32))`. That single line is the whole of §3.3's promise
+        // that the two are different types, and it is why a const argument was
+        // put where a name goes rather than beside it.
+        TypeName::Named(_) | TypeName::Const(_) => want.same_as(has),
     }
 }
 
@@ -563,6 +579,10 @@ pub fn satisfies(
         // The unbounded `[T]`, spelled. `any?` constrains nothing and `any`
         // constrains only absence, which the check above has already made.
         TypeName::Any => return true,
+        // A bound is a type and a const argument is a value, so the only way to
+        // be here is a const argument reaching a *type* parameter — which is
+        // the mismatch `built_generic` reports in its own words.
+        TypeName::Const(_) => return false,
         TypeName::Named(name) => name.as_str(),
     };
     let TypeName::Named(arg_name) = &arg.name else {
@@ -636,7 +656,9 @@ pub fn refusal(ty: &TypeExpr, value: &Value, heap: &Heap, what: &str) -> (String
                 // `any` is the stated top type *minus* `nil`, so the fix is the
                 // same character and the resulting type has its own name.
                 TypeName::Any => "write `any?` for the type that admits everything".to_string(),
-                TypeName::Named(_) => format!("write `{written}?` if it may be absent"),
+                TypeName::Named(_) | TypeName::Const(_) => {
+                    format!("write `{written}?` if it may be absent")
+                }
             }),
         );
     }

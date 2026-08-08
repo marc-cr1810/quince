@@ -368,6 +368,9 @@ impl Interp {
         }
         match &ty.name {
             TypeName::Any => Some(2),
+            // A value where a type goes. Never a parameter's annotation, so no
+            // argument can score against it.
+            TypeName::Const(_) => None,
             // A `nil` reaching a nullable is a widening: the annotation admits
             // more than the value is.
             TypeName::Named(_) if matches!(value, Value::Nil) => Some(1),
@@ -1253,7 +1256,7 @@ impl Interp {
     ) -> Option<Raised> {
         let name = match &ty.name {
             TypeName::Named(name) => name.as_str(),
-            TypeName::Any => return None,
+            TypeName::Any | TypeName::Const(_) => return None,
         };
         match (name, value.base(&self.heap).clone()) {
             ("list", Value::List(id)) => {
@@ -1329,7 +1332,7 @@ impl Interp {
     fn widen_elements(&mut self, ty: &TypeExpr, value: Value, span: Span) -> Result<Value> {
         let name = match &ty.name {
             TypeName::Named(name) => name.as_str(),
-            TypeName::Any => return Ok(value),
+            TypeName::Any | TypeName::Const(_) => return Ok(value),
         };
         match (name, value.base(&self.heap).clone()) {
             ("list", Value::List(id)) => {
@@ -1490,6 +1493,8 @@ impl Interp {
         }
         let name = match &ty.name {
             TypeName::Any => return true,
+            // No value is an instance of a value. See `types::holds`.
+            TypeName::Const(_) => return false,
             TypeName::Named(name) => name.as_str(),
         };
 

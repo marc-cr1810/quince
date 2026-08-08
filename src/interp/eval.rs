@@ -430,7 +430,28 @@ impl Interp {
         .with_help("a declaration takes effect from its own line, so move it above the use")
                 })
             }
-            Slot::Global => self
+            Slot::Global => {
+                // A const generic parameter is in scope in the body as a value,
+                // read-only — v0.9 §3.3. It has no slot, because it is not a
+                // binding anything declared: it is part of the receiver's
+                // *type*, and which value it holds depends on which instance
+                // the method was called on. So the resolver, seeing no
+                // declaration, calls it a global, and this is where it stops
+                // being one.
+                //
+                // Before the globals, because the class header is the nearer
+                // declaration and the nearer declaration wins — the same rule a
+                // parameter shadowing a global follows, reached by a different
+                // road. The guard is what keeps that off the hot path: every
+                // read of a global name would otherwise pay for a feature it is
+                // not using, and `type_bindings` is empty in every frame of
+                // every program that declares no generic class.
+                if !self.type_bindings.is_empty()
+                    && let Some(value) = self.const_binding(&var.name)
+                {
+                    return Ok(value);
+                }
+                self
                 .heap
                 .globals(env::module_of(&self.heap, env))
                 .get(&var.name)
@@ -458,7 +479,8 @@ impl Interp {
                         err = err.with_help(format!("did you mean `{suggestion}`?"));
                     }
                     err
-                }),
+                })
+            }
         }
     }
 

@@ -200,21 +200,70 @@ impl BindKind {
 /// `T()` because a parameter names a type and not a value, and there is no
 /// binding here for one to be found in.
 ///
-/// A `bound` is a field here rather than a second parameter form, because it
-/// qualifies a parameter the way `?` qualifies a type — the thing is the same
-/// thing either way. v0.9 §3.2.
+/// Which of the parameter forms a declaration wrote — v0.9 §3.3 lists them.
+///
+/// An enum rather than a bound field beside a const field, because exactly one
+/// applies and a pair of `Option`s would make "both" and "neither" expressible
+/// states that mean nothing. Tranche 4's pack is a third variant here.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ParamKind {
+    /// `[T]`, or `[T: Bound]`.
+    Type {
+        /// What an argument must satisfy. `None` is the unbounded `[T]`, which
+        /// §3.2 says means `any?`: the top type, constraining nothing.
+        ///
+        /// An ordinary [`TypeExpr`], because a bound is an ordinary type and
+        /// satisfying it is ordinary matching. There is no second subtyping
+        /// relation in the language and §3.2 exists partly to say so.
+        bound: Option<TypeExpr>,
+    },
+    /// `[const N: int]` — a compile-time *value* parameter. §3.3.
+    Const {
+        /// The type of the value, not a bound on a type. `int`, `bool`, or
+        /// `string`; the parser refuses everything else, `float` most
+        /// pointedly.
+        ///
+        /// This is the distinction the shared `:` hides: `T: int` constrains
+        /// which type may be written, `const N: int` says `N` *is* an int.
+        ty: TypeExpr,
+    },
+}
+
+/// A type parameter a declaration introduces — `class Stack[T]`'s `T`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TypeParam {
     pub name: String,
     pub span: Span,
-    /// What an argument for this parameter must satisfy — `[T: float]`'s
-    /// `float`. `None` is the unbounded `[T]`, which §3.2 says means `any?`:
-    /// the top type, constraining nothing.
+    pub kind: ParamKind,
+}
+
+impl TypeParam {
+    /// The bound, for the parameters that can have one.
     ///
-    /// An ordinary [`TypeExpr`], because a bound is an ordinary type and
-    /// satisfying it is ordinary matching. There is no second subtyping
-    /// relation in the language and §3.2 exists partly to say so.
-    pub bound: Option<TypeExpr>,
+    /// `None` for a const parameter, which is not a wrong answer standing in
+    /// for a right one: a value parameter has no bound, it has a *type*, and
+    /// the two are checked by different rules.
+    pub fn bound(&self) -> Option<&TypeExpr> {
+        match &self.kind {
+            ParamKind::Type { bound } => bound.as_ref(),
+            ParamKind::Const { .. } => None,
+        }
+    }
+
+    pub fn is_const(&self) -> bool {
+        matches!(self.kind, ParamKind::Const { .. })
+    }
+
+    /// How the declaration wrote it, for a report quoting the list back.
+    pub fn written(&self) -> String {
+        match &self.kind {
+            ParamKind::Type { bound: None } => self.name.clone(),
+            ParamKind::Type { bound: Some(bound) } => {
+                format!("{}: {}", self.name, bound.written())
+            }
+            ParamKind::Const { ty } => format!("const {}: {}", self.name, ty.written()),
+        }
+    }
 }
 
 /// A type as the program wrote it.
@@ -242,11 +291,63 @@ pub struct TypeExpr {
     pub span: Span,
 }
 
+/// A compile-time value standing where a type argument goes — `Buffer[int, 16]`'s
+/// `16`. v0.9 §3.3.
+///
+/// `float` is deliberately absent. Two constants that compare equal can have
+/// different bit patterns, and a type identity that depends on which is not one
+/// anyone wants to debug — §3.3 says so and this enum is where it is enforced.
+///
+/// `Eq` and `Hash` are the point: this is half of a *type identity*, so
+/// `Buffer[float, 16]` and `Buffer[float, 32]` have to be tellable apart by the
+/// same comparison that tells `list[int]` from `list[string]`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ConstArg {
+    Int(i64),
+    Bool(bool),
+    Str(String),
+}
+
+impl ConstArg {
+    /// How it is written, both in an annotation and in a report.
+    pub fn written(&self) -> String {
+        match self {
+            ConstArg::Int(n) => n.to_string(),
+            ConstArg::Bool(b) => b.to_string(),
+            // Quoted, so `Tagged["16"]` and `Buffer[16]` do not read alike.
+            ConstArg::Str(s) => format!("{s:?}"),
+        }
+    }
+
+    /// The type a value of this shape has, for checking it against the
+    /// parameter's declared one.
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            ConstArg::Int(_) => "int",
+            ConstArg::Bool(_) => "bool",
+            ConstArg::Str(_) => "string",
+        }
+    }
+}
+
 /// What an annotation names.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TypeName {
     /// A class: `int`, `string`, `list`, or one the program declared.
     Named(String),
+    /// A value, not a type — `Buffer[int, 16]`'s `16`. v0.9 §3.3.
+    ///
+    /// Here rather than as a third shape of [`TypeExpr::args`], which was the
+    /// obvious alternative and is the more expensive one: `args` is walked by
+    /// every pass in the compiler, and making its element a type-or-value would
+    /// change all of them. A const argument *occupies an argument position*, so
+    /// putting it where the argument's name goes leaves every walk intact and
+    /// touches only the handful of places that ask what a name means.
+    ///
+    /// A [`TypeExpr`] carrying one of these has no `args` and is never
+    /// `nullable` — the parser produces neither, since `16[…]` and `16?` are
+    /// not forms.
+    Const(ConstArg),
     /// `any`, or `_`, which are two spellings of one type.
     ///
     /// One variant and not two, because the difference is only how it was
@@ -306,6 +407,7 @@ impl TypeExpr {
         }
         match &self.name {
             TypeName::Named(name) => text.push_str(name),
+            TypeName::Const(value) => text.push_str(&value.written()),
             TypeName::Any => text.push_str("any"),
         }
         if !self.args.is_empty() {

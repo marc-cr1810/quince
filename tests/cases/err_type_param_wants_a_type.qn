@@ -1,0 +1,6 @@
+# And the other way round.
+class Box[T] {
+    public op init() {}
+}
+
+let b: Box[16]

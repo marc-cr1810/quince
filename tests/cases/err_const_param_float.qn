@@ -1,0 +1,6 @@
+# §3.3 — `float` is excluded. Two constants that compare equal can have
+# different bit patterns, and a type identity that turns on which is not one
+# anyone wants to debug.
+class Buffer[const SIZE: float] {
+    public op init() {}
+}

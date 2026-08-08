@@ -27,7 +27,9 @@ use crate::interp::Interp;
 use crate::runtime::heap::{ObjId, Object};
 use crate::runtime::value::Value;
 use crate::sema::types::{bound_help, satisfies};
-use crate::syntax::ast::{CallArg, Expr, ExprKind, TypeExpr, TypeName};
+use crate::syntax::ast::{
+    CallArg, ConstArg, Expr, ExprKind, ParamKind, Slot, TypeExpr, TypeName, TypeParam, Var,
+};
 use crate::syntax::token::Span;
 
 /// A type parameter and what it was bound to, in the order the class declared
@@ -96,14 +98,14 @@ impl Interp {
         let mut bound = Vec::with_capacity(values.len());
         for (index, value) in values.iter().enumerate() {
             let at = type_args[index].span;
-            let arg = self.as_type_argument(value, &name, &params[index].name, at)?;
+            let arg = self.as_argument(value, &type_args[index], &name, &params[index], env, at)?;
             // §3.2's bound, checked here as well as at resolution — not instead
             // of it. An explicit argument list is an *expression*, so the
             // resolver never sees it as a type and cannot check it; an
             // annotation is a type, and checking it here would mean waiting for
             // a construction to report a mistake the source already showed.
             // Two places, because there are genuinely two ways in.
-            if let Some(bound) = &params[index].bound
+            if let Some(bound) = params[index].bound()
                 && !satisfies(bound, &arg, &|name, ancestor| {
                     self.descends_by_name(name, ancestor)
                 })
@@ -283,36 +285,174 @@ impl Interp {
             })
     }
 
-    /// A value written between the brackets, read as the type it names.
+    /// One thing written between the brackets, read as what its parameter wants.
     ///
-    /// Only a class names one. Everything else is the mistake this reports, and
-    /// v0.9 §3.3's `const N: int` is the one that will stop being a mistake —
-    /// which is why the report says what was found rather than only what was
-    /// wanted.
-    fn as_type_argument(
+    /// Two parameter forms and so two rules, and the point of doing both here is
+    /// that a program writes them in one list: `Buffer[float, 16]` has a type in
+    /// the first position and a value in the second, and which is wanted is a
+    /// fact about the *declaration*, not about what was written. So a mismatch
+    /// either way reports what the parameter is, which is the thing the reader
+    /// has to look up otherwise.
+    fn as_argument(
         &self,
         value: &Value,
+        expr: &Expr,
         whose: &str,
-        param: &str,
+        param: &TypeParam,
+        env: ObjId,
         span: Span,
     ) -> Result<TypeExpr> {
-        match value {
-            // No arguments of its own: `Stack[list[int]]` would need `list[int]`
-            // to be an expression, and it is not one. The annotation form is
-            // what reaches a nested argument, as it is for `?`.
-            Value::Class(id) => Ok(self.heap.class(*id).reified(Vec::new())),
-            other => Err(QuinceError::new(
+        match &param.kind {
+            ParamKind::Const { ty } => {
+                self.as_const_argument(value, expr, whose, param, ty, env, span)
+            }
+            ParamKind::Type { .. } => match value {
+                // No arguments of its own: `Stack[list[int]]` would need
+                // `list[int]` to be an expression, and it is not one. The
+                // annotation form is what reaches a nested argument, as it is
+                // for `?`.
+                Value::Class(id) => Ok(self.heap.class(*id).reified(Vec::new())),
+                other => Err(QuinceError::new(
+                    format!(
+                        "`{whose}`\u{2019}s `{}` is a type parameter, and {} is not a type",
+                        param.name,
+                        an(other.type_name(&self.heap))
+                    ),
+                    span,
+                )
+                .with_kind(ErrorKind::Type)
+                .with_help(format!(
+                    "a type argument names a type — `Stack[int]`, `Stack[Point]`. Write \
+                     `const {}: …` in the declaration if it was meant to take a value",
+                    param.name
+                ))),
+            },
+        }
+    }
+
+    /// The `16` in `Buffer[float, 16]` — v0.9 §3.3.
+    ///
+    /// Two things have to be true, and they are different questions. The value
+    /// has to have the type the parameter declared, which is ordinary checking.
+    /// And it has to be *constant*, which is not about the value at all: it is
+    /// about how the expression was written, because a type argument becomes
+    /// part of a type identity and a type that could differ between two
+    /// evaluations of the same source is not a type.
+    ///
+    /// Constant means a literal, or a name bound once — `final` or `const`.
+    /// §3.3 says "a `const` binding"; a `final` one is no less fixed, and the
+    /// difference between the two words is about what they freeze, which a
+    /// const argument does not care about since it reads the value out and
+    /// keeps a copy.
+    fn as_const_argument(
+        &self,
+        value: &Value,
+        expr: &Expr,
+        whose: &str,
+        param: &TypeParam,
+        ty: &TypeExpr,
+        env: ObjId,
+        span: Span,
+    ) -> Result<TypeExpr> {
+        let constant = match &expr.kind {
+            ExprKind::Int(_) | ExprKind::Str(_) | ExprKind::Bool(_) => true,
+            ExprKind::Var(var) => self.is_fixed(var, env),
+            _ => false,
+        };
+        if !constant {
+            return Err(QuinceError::new(
                 format!(
-                    "`{whose}`\u{2019}s `{param}` is a type parameter, and {} is not a type",
-                    an(other.type_name(&self.heap))
+                    "`{whose}`\u{2019}s `{}` needs a constant, and this is worked out when it runs",
+                    param.name
                 ),
                 span,
             )
             .with_kind(ErrorKind::Type)
-            .with_help(
-                "a type argument names a type — `Stack[int]`, `Stack[Point]` — and a value \
-                 cannot stand in for one",
-            )),
+            .with_help(format!(
+                "`{}` is part of the type, so it has to be the same every time the line is \
+                 read — write a literal, or a name declared `const`",
+                param.name
+            )));
+        }
+
+        let held = match value {
+            Value::Int(n) => Some(ConstArg::Int(*n)),
+            Value::Bool(b) => Some(ConstArg::Bool(*b)),
+            Value::Str(text) => Some(ConstArg::Str(text.to_string())),
+            _ => None,
+        };
+        // The declared type, checked against what the constant actually is. The
+        // three that can be constants are exactly the three a `const` parameter
+        // may be declared as, so a value outside them fails this and needs no
+        // separate report.
+        let wanted = match &ty.name {
+            TypeName::Named(name) => name.as_str(),
+            _ => "",
+        };
+        match held {
+            Some(held) if held.type_name() == wanted => Ok(TypeExpr {
+                name: TypeName::Const(held),
+                args: Vec::new(),
+                nullable: false,
+                frozen: false,
+                span,
+            }),
+            _ => Err(QuinceError::new(
+                format!(
+                    "`{whose}`\u{2019}s `{}` is `{wanted}`, but this is {}",
+                    param.name,
+                    an(value.type_name(&self.heap))
+                ),
+                span,
+            )
+            .with_kind(ErrorKind::Type)
+            .with_help(format!(
+                "the declaration writes `{}`, so the argument in that position is {} value",
+                param.written(),
+                an(wanted)
+            ))),
+        }
+    }
+
+    /// The value a const generic parameter holds in the body now running.
+    ///
+    /// `None` for every name in every frame of a program that declares no const
+    /// parameter, which is what makes this safe to ask on the failing path of a
+    /// global read — see [`Interp::read`]. v0.9 §3.3's "`N` is in scope in the
+    /// body as a value, read-only".
+    ///
+    /// Read-only falls out rather than being enforced: there is no slot to
+    /// assign to, so `N = 5` is the resolver's "cannot assign to an undeclared
+    /// name" and never reaches here.
+    pub(super) fn const_binding(&self, name: &str) -> Option<Value> {
+        let (_, bound) = self.bindings().iter().find(|(param, _)| param == name)?;
+        let TypeName::Const(value) = &bound.name else {
+            // A *type* parameter of that name. `T` names a type and not a
+            // value, which is §3.1's rule and the reason `T()` is refused —
+            // answering with anything here would be inventing one.
+            return None;
+        };
+        Some(match value {
+            ConstArg::Int(n) => Value::Int(*n),
+            ConstArg::Bool(b) => Value::Bool(*b),
+            ConstArg::Str(text) => Value::from(text.as_str()),
+        })
+    }
+
+    /// Whether a name is bound once and never reassigned.
+    ///
+    /// Both scopes, because a `const` at the top level and one inside a
+    /// function are the same promise reached two different ways.
+    fn is_fixed(&self, var: &Var, env: ObjId) -> bool {
+        match crate::interp::resolved(&var.slot) {
+            Slot::Local { hops, index } => {
+                let scope = crate::runtime::env::ancestor(&self.heap, env, hops);
+                !self.heap.env(scope).bind_kind(index).mutable()
+            }
+            Slot::Global => self
+                .heap
+                .globals(crate::runtime::env::module_of(&self.heap, env))
+                .is_fixed(&var.name),
         }
     }
 
@@ -479,7 +619,7 @@ pub(super) fn substituted(ty: &TypeExpr, bindings: &Bindings) -> TypeExpr {
 fn written_params(params: &[crate::syntax::ast::TypeParam]) -> String {
     params
         .iter()
-        .map(|param| match &param.bound {
+        .map(|param| match param.bound() {
             Some(bound) => format!("{}: {}", param.name, bound.written()),
             None => param.name.clone(),
         })

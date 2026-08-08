@@ -222,6 +222,17 @@ impl Globals {
         self.vars.get(name).map(|binding| &binding.value)
     }
 
+    /// Whether `name` is bound once and never reassigned — `final` or `const`.
+    ///
+    /// What a const type argument needs to know, and it asks about the
+    /// *binding* rather than the word: v0.9 §3.3 says "a literal or a `const`
+    /// binding", and a `final` one is no less fixed. The distinction between
+    /// the two is about what they freeze, which a const argument does not care
+    /// about — it reads a value out and keeps a copy.
+    pub fn is_fixed(&self, name: &str) -> bool {
+        self.vars.get(name).is_some_and(|binding| !binding.mutable)
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (&str, &Value)> {
         self.vars
             .iter()
