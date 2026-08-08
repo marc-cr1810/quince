@@ -56,6 +56,7 @@ pub(crate) struct Infer<'a> {
     pub(crate) function_returns: HashMap<String, Type>,
     /// The declaration behind each of those, for anything wanting parameters.
     pub(crate) fn_decls: HashMap<String, Rc<FnDecl>>,
+    pub(crate) all_fn_decls: HashMap<String, Vec<Rc<FnDecl>>>,
     /// Which builtin each imported name stands for.
     pub(crate) natives: HashMap<String, &'static crate::runtime::value::Native>,
     pub(crate) method_returns: HashMap<(String, String), Type>,
@@ -89,6 +90,7 @@ impl<'a> Infer<'a> {
             fields: HashMap::new(),
             function_returns: HashMap::new(),
             fn_decls: HashMap::new(),
+            all_fn_decls: HashMap::new(),
             natives: HashMap::new(),
             method_returns: HashMap::new(),
             exprs: HashMap::new(),
@@ -109,6 +111,11 @@ impl<'a> Infer<'a> {
         for stmt in stmts {
             match &stmt.kind {
                 StmtKind::Fn { decl, overload, .. } => {
+                    self.all_fn_decls
+                        .entry(decl.name.clone())
+                        .or_default()
+                        .push(Rc::clone(decl));
+                    self.fn_decls.insert(decl.name.clone(), Rc::clone(decl));
                     // An overloaded name has no single declaration to answer
                     // about — which parameters it takes and what it returns
                     // depend on the call. `Unknown` is the honest answer, and
@@ -135,12 +142,20 @@ impl<'a> Infer<'a> {
                     openness,
                     ..
                 } => {
+                    let mut all_methods: HashMap<String, Vec<Rc<FnDecl>>> = HashMap::new();
+                    for decl in methods {
+                        all_methods
+                            .entry(decl.name.clone())
+                            .or_default()
+                            .push(Rc::clone(decl));
+                    }
                     let info = ClassInfo {
                         parent: parent.as_ref().map(|var| var.name.clone()),
                         // A name several methods share is left out, for the
                         // reason a `fn` is: there is no one declaration to
                         // answer about.
                         methods: overloading(methods),
+                        all_methods,
                         overloaded: overloaded_names(methods),
                         fields: fields
                             .iter()
@@ -168,6 +183,7 @@ impl<'a> Infer<'a> {
                         .or_insert_with(|| ClassInfo {
                             parent: None,
                             methods: HashMap::new(),
+                            all_methods: HashMap::new(),
                             overloaded: HashSet::new(),
                             fields: HashMap::new(),
                             openness: crate::syntax::ast::Openness::Open,
@@ -178,6 +194,10 @@ impl<'a> Infer<'a> {
                         info.methods
                             .entry(decl.name.clone())
                             .or_insert_with(|| Rc::clone(decl));
+                        info.all_methods
+                            .entry(decl.name.clone())
+                            .or_default()
+                            .push(Rc::clone(decl));
                     }
                 }
                 StmtKind::If { then, otherwise, .. } => {
@@ -350,6 +370,10 @@ impl<'a> Infer<'a> {
                 self.function_returns
                     .insert(decl.name.clone(), returns.clone());
                 self.fn_decls.insert(decl.name.clone(), Rc::clone(decl));
+                let entry = self.all_fn_decls.entry(decl.name.clone()).or_default();
+                if !entry.iter().any(|d| Rc::ptr_eq(d, decl)) {
+                    entry.push(Rc::clone(decl));
+                }
                 self.bind_symbol(symbol_for(decl, Kind::Function, returns), scope);
             }
             StmtKind::Class { name, methods, fields, doc, .. } => {
@@ -412,6 +436,7 @@ impl<'a> Infer<'a> {
                             classes: module_types.classes.clone(),
                             functions: module_types.functions.clone(),
                             fn_decls: module_types.fn_decls.clone(),
+                            all_fn_decls: module_types.all_fn_decls.clone(),
                             methods: module_types.methods.clone(),
                             fields: module_types.fields.clone(),
                         };
@@ -489,6 +514,10 @@ impl<'a> Infer<'a> {
                                         {
                                             self.function_returns
                                                 .insert(name.name.clone(), retty.clone());
+                                        }
+                                        if let Some(decls) = module_info.all_fn_decls.get(&name.name) {
+                                            self.all_fn_decls
+                                                .insert(name.name.clone(), decls.clone());
                                         }
                                         if let Some(decl) = module_info.fn_decls.get(&name.name) {
                                             self.functions

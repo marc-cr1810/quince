@@ -59,6 +59,7 @@ pub struct ClassInfo {
     /// or not at all.
     pub parent: Option<String>,
     pub methods: HashMap<String, Rc<FnDecl>>,
+    pub all_methods: HashMap<String, Vec<Rc<FnDecl>>>,
     /// The names [`overloading`] left out of `methods` because the class
     /// declared them more than once.
     ///
@@ -142,6 +143,7 @@ pub struct ModuleInfo {
     pub classes: HashMap<String, ClassInfo>,
     pub functions: HashMap<String, Type>,
     pub fn_decls: HashMap<String, Rc<FnDecl>>,
+    pub all_fn_decls: HashMap<String, Vec<Rc<FnDecl>>>,
     pub methods: HashMap<(String, String), Type>,
     pub fields: HashMap<String, HashMap<String, Type>>,
 }
@@ -191,6 +193,7 @@ pub struct Types {
     /// this is read only when something wants the *parameters* — which nothing
     /// did until the static check started looking at calls.
     pub(crate) fn_decls: HashMap<String, Rc<FnDecl>>,
+    pub(crate) all_fn_decls: HashMap<String, Vec<Rc<FnDecl>>>,
     /// Which builtin each imported name stands for — `from math import floor`
     /// makes `floor` a name for one, and a call through it should be checked
     /// exactly as `math.floor` is.
@@ -284,6 +287,29 @@ impl Types {
         self.fn_decls.get(name)
     }
 
+    /// All `fn` declarations under `name`, including overloads.
+    pub fn functions_named(&self, name: &str) -> Vec<Rc<FnDecl>> {
+        if let Some(decls) = self.all_fn_decls.get(name) {
+            if !decls.is_empty() {
+                return decls.clone();
+            }
+        }
+        if let Some(decl) = self.fn_decls.get(name) {
+            return vec![Rc::clone(decl)];
+        }
+        for module in self.modules.values() {
+            if let Some(decls) = module.all_fn_decls.get(name) {
+                if !decls.is_empty() {
+                    return decls.clone();
+                }
+            }
+            if let Some(decl) = module.fn_decls.get(name) {
+                return vec![Rc::clone(decl)];
+            }
+        }
+        Vec::new()
+    }
+
     /// Looks up class info across current document classes and imported modules.
     pub fn class_info(&self, class: &str) -> Option<&ClassInfo> {
         if let Some(info) = self.classes.get(class) {
@@ -314,6 +340,38 @@ impl Types {
             }
             current = info.parent.as_deref()?;
         }
+    }
+
+    /// All method declarations under `name` on `class`, searching its ancestors.
+    pub fn all_methods_of(&self, class: &str, name: &str) -> Vec<Rc<FnDecl>> {
+        let mut results = Vec::new();
+        let mut current = class;
+        let mut seen = 0;
+        loop {
+            let Some(info) = self.class_info(current) else {
+                break;
+            };
+            if let Some(decls) = info.all_methods.get(name) {
+                for d in decls {
+                    if !results.iter().any(|existing: &Rc<FnDecl>| Rc::ptr_eq(existing, d)) {
+                        results.push(Rc::clone(d));
+                    }
+                }
+            } else if let Some(decl) = info.methods.get(name) {
+                if !results.iter().any(|existing: &Rc<FnDecl>| Rc::ptr_eq(existing, decl)) {
+                    results.push(Rc::clone(decl));
+                }
+            }
+            seen += 1;
+            if seen > 64 {
+                break;
+            }
+            match info.parent.as_deref() {
+                Some(parent) => current = parent,
+                None => break,
+            }
+        }
+        results
     }
 
     /// Whether `class` or an ancestor declares `name` at all, overloads
@@ -702,6 +760,7 @@ pub fn infer_with_resolver(program: &[Stmt], resolver: &dyn ModuleResolver) -> T
         fields: pass.fields,
         functions: pass.function_returns,
         fn_decls: pass.fn_decls,
+        all_fn_decls: pass.all_fn_decls,
         natives: pass.natives,
         methods: pass.method_returns,
         modules: pass.modules,

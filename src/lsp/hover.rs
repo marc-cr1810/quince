@@ -84,6 +84,68 @@ pub(crate) fn get_signature_help(state: Option<&DocumentState>, pos: Position) -
     let (callee, receiver, active) = find_call_context(&state.text, pos)?;
     let offset = position_to_offset(&state.text, pos);
 
+    if let Some(types) = &state.types {
+        let decls = match &receiver {
+            Some(before) => {
+                let rec_ty = types.of_name(before, offset);
+                rec_ty
+                    .class_name()
+                    .map(|class| types.all_methods_of(class, &callee))
+                    .unwrap_or_default()
+            }
+            None => types.functions_named(&callee),
+        };
+        if decls.len() > 1 {
+            let signatures: Vec<SignatureInformation> = decls
+                .iter()
+                .map(|decl| {
+                    let params: Vec<ParameterInformation> = decl
+                        .params
+                        .iter()
+                        .filter(|p| !p.receiver)
+                        .map(|param| ParameterInformation {
+                            documentation: decl.doc.as_ref().and_then(|doc| {
+                                doc.params
+                                    .iter()
+                                    .find(|p| p.name == param.name)
+                                    .map(|p| lsp_types::Documentation::String(p.text.clone()))
+                            }),
+                            label: ParameterLabel::Simple(match &param.ty {
+                                Some(ty) => format!("{}: {}", param.name, ty.written()),
+                                None => param.name.clone(),
+                            }),
+                        })
+                        .collect();
+
+                    let param_labels: Vec<String> = params
+                        .iter()
+                        .map(|p| match &p.label {
+                            ParameterLabel::Simple(l) => l.clone(),
+                            _ => String::new(),
+                        })
+                        .collect();
+
+                    let label = format!("fn {}({})", decl.name, param_labels.join(", "));
+                    SignatureInformation {
+                        label,
+                        documentation: decl
+                            .doc
+                            .as_ref()
+                            .map(|doc| lsp_types::Documentation::String(doc.summary.clone())),
+                        parameters: Some(params),
+                        active_parameter: Some(active),
+                    }
+                })
+                .collect();
+
+            return Some(SignatureHelp {
+                signatures,
+                active_signature: Some(0),
+                active_parameter: Some(active),
+            });
+        }
+    }
+
     // Where to look for the name depends on what is in front of it, exactly as
     // it does for a completion. A method is found on its receiver's class; a
     // bare name is found in scope, and failing that among the globals.

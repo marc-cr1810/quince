@@ -47,8 +47,10 @@ use crate::sema::infer::Types;
 use crate::sema::types::{Type, builtin_ancestor, stated};
 use crate::runtime::value::Native;
 use crate::sema::types::builtin_method;
+use std::rc::Rc;
+
 use crate::syntax::ast::{
-    BindKind, Block, CallArg, Expr, ExprKind, FieldDecl, Param, Stmt, StmtKind, TypeExpr, TypeName,
+    BindKind, Block, CallArg, Expr, ExprKind, FieldDecl, FnDecl, Param, Stmt, StmtKind, TypeExpr, TypeName,
 };
 
 /// Every type mistake decidable from the source, in source order.
@@ -826,17 +828,25 @@ fn expression(expr: &Expr, types: &Types, bound: &Bindings, found: &mut Vec<Rais
                 "there is no value a function can be constructed from".to_string(),
                 expr.span,
             ));
-        } else if let Some(decl) = types.function(&var.name) {
-            arguments(&decl.params, args, expr.span, types, found);
-        } else if let Some(native) = types.native(&var.name) {
-            native_arguments(native, args, expr.span, types, found);
-        } else if let Some(cname) = receiver_type(callee, types).class_name() {
-            if matches!(cname, "int" | "float" | "bool" | "nil") {
-                found.push(refusal(
-                    format!("{} is not callable", an(cname)),
-                    "only functions, methods, and classes can be called".to_string(),
-                    callee.span,
-                ));
+        } else {
+            let candidates = types.functions_named(&var.name);
+            if !candidates.is_empty() {
+                check_call_overloads(&candidates, args, false, expr.span, types, found);
+            } else if let Some(native) = types.native(&var.name) {
+                native_arguments(native, args, expr.span, types, found);
+            } else {
+                let init_candidates = types.all_methods_of(&var.name, "init");
+                if !init_candidates.is_empty() {
+                    check_call_overloads(&init_candidates, args, true, expr.span, types, found);
+                } else if let Some(cname) = receiver_type(callee, types).class_name() {
+                    if matches!(cname, "int" | "float" | "bool" | "nil") {
+                        found.push(refusal(
+                            format!("{} is not callable", an(cname)),
+                            "only functions, methods, and classes can be called".to_string(),
+                            callee.span,
+                        ));
+                    }
+                }
             }
         }
     }
@@ -848,11 +858,24 @@ fn expression(expr: &Expr, types: &Types, bound: &Bindings, found: &mut Vec<Rais
     // A method call: the program's own, or the library's.
     let receiver = receiver_type(target, types);
     if let Some(class) = receiver.class_name() {
-        if let Some(decl) = types.method_of(class, name) {
-            // The receiver is `params[0]` and nobody writes it.
-            arguments(decl.params.get(1..).unwrap_or(&[]), args, expr.span, types, found);
+        let candidates = types.all_methods_of(class, name);
+        if !candidates.is_empty() {
+            check_call_overloads(&candidates, args, true, expr.span, types, found);
         } else if let Some(native) = builtin_method(class, name) {
             native_arguments(native, args, expr.span, types, found);
+        }
+    } else if let Type::Module(mod_name) = &receiver {
+        if let Some(module_info) = types.modules.get(&**mod_name) {
+            let candidates = if let Some(decls) = module_info.all_fn_decls.get(name) {
+                decls.clone()
+            } else if let Some(decl) = module_info.fn_decls.get(name) {
+                vec![Rc::clone(decl)]
+            } else {
+                Vec::new()
+            };
+            if !candidates.is_empty() {
+                check_call_overloads(&candidates, args, false, expr.span, types, found);
+            }
         }
     }
 
@@ -879,6 +902,152 @@ fn expression(expr: &Expr, types: &Types, bound: &Bindings, found: &mut Vec<Rais
     let held = receiver_type(target, types);
     if let ("push", Some(item)) = (name.as_str(), args.first().map(|arg| &arg.value)) {
         check_element(&held, "list", 0, item, "the item", types, found);
+    }
+}
+
+/// Refuses arguments against candidate declarations, handling overloading.
+fn check_call_overloads(
+    candidates: &[Rc<FnDecl>],
+    args: &[CallArg],
+    is_method: bool,
+    span: crate::syntax::token::Span,
+    types: &Types,
+    found: &mut Vec<Raised>,
+) {
+    if candidates.len() == 1 {
+        let decl = &candidates[0];
+        let params = if is_method {
+            decl.params.get(1..).unwrap_or(&[])
+        } else {
+            &decl.params
+        };
+        arguments(params, args, span, types, found);
+        return;
+    }
+
+    let is_named = args.iter().any(|arg| arg.name.is_some());
+
+    let mut arity_matches: Vec<(&Rc<FnDecl>, &[Param])> = Vec::new();
+    for decl in candidates {
+        let params = if is_method {
+            decl.params.get(1..).unwrap_or(&[])
+        } else {
+            &decl.params
+        };
+
+        let is_arity_ok = if !is_named {
+            let required = params.iter().filter(|p| p.default.is_none()).count();
+            args.len() >= required && args.len() <= params.len()
+        } else {
+            let positional_len = args.iter().take_while(|arg| arg.name.is_none()).count();
+            if positional_len > params.len() {
+                false
+            } else {
+                let mut filled = vec![false; params.len()];
+                for i in 0..positional_len {
+                    filled[i] = true;
+                }
+                let mut ok = true;
+                for arg in args.iter().skip(positional_len) {
+                    if let Some((written, _)) = &arg.name {
+                        if let Some(idx) = params.iter().position(|p| &p.name == written) {
+                            if filled[idx] {
+                                ok = false;
+                                break;
+                            }
+                            filled[idx] = true;
+                        } else {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                if ok {
+                    for (i, p) in params.iter().enumerate() {
+                        if !filled[i] && p.default.is_none() {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                ok
+            }
+        };
+
+        if is_arity_ok {
+            arity_matches.push((decl, params));
+        }
+    }
+
+    if arity_matches.is_empty() {
+        let name = &candidates[0].name;
+        let signatures: Vec<String> = candidates
+            .iter()
+            .map(|decl| {
+                let params = if is_method {
+                    decl.params.get(1..).unwrap_or(&[])
+                } else {
+                    &decl.params
+                };
+                let param_strs: Vec<String> = params
+                    .iter()
+                    .map(|p| match &p.ty {
+                        Some(ty) => format!("{}: {}", p.name, ty.written()),
+                        None => p.name.clone(),
+                    })
+                    .collect();
+                format!("({})", param_strs.join(", "))
+            })
+            .collect();
+
+        let help = format!("the declarations under that name take: {}", signatures.join(", "));
+        found.push(refusal(
+            format!("expected arguments matching an overload of `{name}`, got {}", args.len()),
+            help,
+            span,
+        ));
+        return;
+    }
+
+    let mut best_candidate: Option<(&Rc<FnDecl>, &[Param], usize)> = None;
+    for (decl, params) in arity_matches {
+        let mut type_errors = 0;
+        if !is_named {
+            for (param, arg) in params.iter().zip(args) {
+                if let Some(want_ty) = &param.ty {
+                    let have_ty = types.of_expr(arg.value.span);
+                    if let Some(want_class) = stated(want_ty).class_name() {
+                        if let Some(have_class) = have_ty.class_name() {
+                            if have_class != "nil" && is_a_type(types, want_class) {
+                                if !fits(types, &Type::class(want_class), &have_ty) {
+                                    type_errors += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if type_errors == 0 {
+            let mut temp_found = Vec::new();
+            arguments(params, args, span, types, &mut temp_found);
+            if temp_found.is_empty() {
+                return;
+            }
+        }
+
+        match &best_candidate {
+            None => best_candidate = Some((decl, params, type_errors)),
+            Some((_, _, min_errors)) if type_errors < *min_errors => {
+                best_candidate = Some((decl, params, type_errors));
+            }
+            _ => {}
+        }
+    }
+
+    if let Some((_, params, _)) = best_candidate {
+        arguments(params, args, span, types, found);
     }
 }
 

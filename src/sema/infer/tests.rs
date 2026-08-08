@@ -1134,6 +1134,52 @@ fn overloaded_cmp_still_permits_le() {
     assert_eq!(all_errors(src), Vec::<String>::new());
 }
 
+#[test]
+fn overloaded_functions_by_arity_are_resolved_without_false_positive_diagnostics() {
+    let src = "fn parse_json(source: string): string {\n    return source\n}\n\
+               fn parse_json(source: string, fallback: string): string {\n    return source\n}\n\
+               let r1 = parse_json(\"hello\")\n\
+               let r2 = parse_json(\"hello\", \"fallback\")\n";
+    assert_eq!(all_errors(src), Vec::<String>::new());
+}
+
+#[test]
+fn overloaded_methods_by_arity_are_resolved_without_false_positive_diagnostics() {
+    let src = "class JsonParser {\n\
+                   op init() {}\n\
+                   fn parse(source: string): string { return source }\n\
+                   fn parse(source: string, fallback: string): string { return source }\n\
+               }\n\
+               let parser = JsonParser()\n\
+               let r1 = parser.parse(\"hello\")\n\
+               let r2 = parser.parse(\"hello\", \"fallback\")\n";
+    assert_eq!(all_errors(src), Vec::<String>::new());
+}
+
+#[test]
+fn overloaded_functions_called_inside_function_body_and_constructor_overloads() {
+    let src = "class JsonParser {\n\
+                   op init(source: string) {}\n\
+                   op init(source: string, fallback: string) {}\n\
+                   fn parse(): string { return \"\" }\n\
+               }\n\
+               fn parse_json(source: string): string {\n\
+                   return JsonParser(source).parse()\n\
+               }\n\
+               fn parse_json(source: string, fallback: string): string {\n\
+                   try {\n\
+                       return JsonParser(source).parse()\n\
+                   } catch err {\n\
+                       return fallback\n\
+                   }\n\
+               }\n\
+               let r1 = parse_json(\"input\")\n\
+               let r2 = parse_json(\"input\", \"fallback\")\n\
+               let p1 = JsonParser(\"input\")\n\
+               let p2 = JsonParser(\"input\", \"default\")\n";
+    assert_eq!(all_errors(src), Vec::<String>::new());
+}
+
 
 
 
