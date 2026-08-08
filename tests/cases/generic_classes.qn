@@ -42,10 +42,12 @@ let empty = Stack[string]()
 print(empty is Stack[string])
 print(empty is Stack[int])
 
-# More than one parameter, bound positionally.
+# More than one parameter, bound positionally. The fields need no initializer:
+# a type parameter's default is whatever its argument's is, decided at the
+# construction that binds it.
 class Pair[A, B] {
-    public final first: A? = nil
-    public final second: B? = nil
+    public final first: A
+    public final second: B
 
     public op init(first: A, second: B) {
         self.first = first
@@ -73,6 +75,7 @@ class Box[T] {
         self.value = v
     }
 }
+
 
 let loose = Box()
 loose.set(42)

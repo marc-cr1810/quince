@@ -408,33 +408,64 @@ impl Parser {
     /// What a declaration with no `= value` holds.
     ///
     /// `nil` where nothing was annotated, which is the dynamic binding v0.7
-    /// already describes; otherwise a call to the annotated type with no
-    /// arguments, which is exactly what `let logger: Logger` means. Built as an
-    /// ordinary [`ExprKind::Call`] rather than as a node of its own, so that the
-    /// resolver gives its callee a slot and the evaluator constructs it through
-    /// the path every other construction takes.
+    /// already describes; otherwise the value the annotated type answers with.
     ///
-    /// The *base* name, so `list[int]` reaches `list()`. What the arguments say
-    /// is enforced afterwards, when the annotation is checked against the value
-    /// — which is also what stamps the descriptor on the empty list.
+    /// **A builtin answers with a literal**, not with a call: `int` is `0`,
+    /// `string` is `""`, `list` is `[]`. v0.8 §3.4 already gave the two
+    /// containers theirs this way, and the scalars join them — an `int` field a
+    /// constructor is about to overwrite should not have to be written `= 0`,
+    /// and a language that synthesizes `[]` and refuses `0` is drawing the line
+    /// somewhere nobody can predict.
     ///
-    /// A type this cannot name gets `nil`, and the resolver refuses the
-    /// declaration before the expression can run. `any` is the case: it is not
-    /// a class and there is nothing to call.
+    /// v0.7 §3.3 argued the other way — "zero is a value somebody chose" — and
+    /// what changed is generics: a field annotated `T` cannot be written with an
+    /// initializer that suits every argument, so a type parameter with no
+    /// default would make `class Pair[A, B]` unwritable. The line moved to where
+    /// it can be defended: a *class* still says what it needs, because a class
+    /// can, and `any` has no default because it names no representation.
+    ///
+    /// A class answers with a call to itself, built as an ordinary
+    /// [`ExprKind::Call`] so the resolver gives its callee a slot and the
+    /// evaluator constructs it through the path every other construction takes.
+    /// The *base* name, so a user's `Stack[int]` reaches `Stack()` — what the
+    /// arguments say is enforced afterwards, when the annotation is checked
+    /// against the value, which is also what stamps the descriptor.
+    ///
+    /// A nullable annotation answers `nil` whatever it names. `int?` is a
+    /// declaration that the absent case is real, and `0` is not the absent case.
     pub(super) fn default_for(ty: Option<&TypeExpr>, span: Span) -> Expr {
-        let named = match ty.map(|ty| &ty.name) {
-            Some(TypeName::Named(name)) => name.clone(),
-            _ => return Expr { kind: ExprKind::Nil, span },
+        let nil = Expr { kind: ExprKind::Nil, span };
+        let Some(ty) = ty else { return nil };
+        if ty.nullable {
+            return nil;
+        }
+        let TypeName::Named(named) = &ty.name else {
+            // `any` and `_`. Not a class, so there is nothing to call, and no
+            // representation to have a zero of — the resolver refuses the
+            // declaration before this can run.
+            return nil;
         };
-        Expr {
-            kind: ExprKind::Call {
-                callee: Box::new(Expr {
-                    kind: ExprKind::Var(Var::new(named)),
-                    span,
-                }),
-                args: Vec::new(),
+        let literal = match named.as_str() {
+            "int" => Some(ExprKind::Int(0)),
+            "float" => Some(ExprKind::Float(0.0)),
+            "string" => Some(ExprKind::Str(String::new())),
+            "bool" => Some(ExprKind::Bool(false)),
+            "list" => Some(ExprKind::List(Vec::new())),
+            "dict" => Some(ExprKind::Dict(Vec::new())),
+            _ => None,
+        };
+        match literal {
+            Some(kind) => Expr { kind, span },
+            None => Expr {
+                kind: ExprKind::Call {
+                    callee: Box::new(Expr {
+                        kind: ExprKind::Var(Var::new(named.clone())),
+                        span,
+                    }),
+                    args: Vec::new(),
+                },
+                span,
             },
-            span,
         }
     }
 

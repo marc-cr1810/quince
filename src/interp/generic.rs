@@ -24,7 +24,7 @@ use std::rc::Rc;
 
 use crate::error::{ErrorKind, QuinceError, Result};
 use crate::interp::Interp;
-use crate::runtime::heap::ObjId;
+use crate::runtime::heap::{ObjId, Object};
 use crate::runtime::value::Value;
 use crate::syntax::ast::{CallArg, Expr, TypeExpr, TypeName};
 use crate::syntax::token::Span;
@@ -106,6 +106,70 @@ impl Interp {
         let built = self.call_evaluated(Value::Class(class), args, env, span);
         self.pending = restore;
         built
+    }
+
+    /// The value a type answers with when a declaration gives none.
+    ///
+    /// The run-time half of
+    /// [`Parser::default_for`](crate::syntax::parser::Parser::default_for), and
+    /// it exists for one case: a field annotated with a type parameter, whose
+    /// default cannot be baked at parse time because what `T` stands for is not
+    /// known until an instance is built. Every other declaration's default was
+    /// settled by the parser and never reaches here.
+    ///
+    /// **This is where `Test[NoDefault]()` is refused** — the deferral the
+    /// resolver makes when it meets a `T`. The report names the argument rather
+    /// than the parameter, because `NoDefault` is what the caller wrote and `T`
+    /// is a name inside somebody else's declaration.
+    pub(super) fn default_of(
+        &mut self,
+        ty: &TypeExpr,
+        field: &str,
+        span: Span,
+    ) -> Result<Value> {
+        // The absent case is real and `0` is not the absent case — the same
+        // rule the parser applies, spelled once more because this arrives with
+        // a type rather than with an annotation.
+        if ty.nullable {
+            return Ok(Value::Nil);
+        }
+        let TypeName::Named(name) = &ty.name else {
+            return Ok(Value::Nil);
+        };
+        let zero = match name.as_str() {
+            "int" => Some(Value::Int(0)),
+            "float" => Some(Value::Float(0.0)),
+            "string" => Some(Value::from("")),
+            "list" => Some(Value::List(self.heap.alloc(Object::List(Vec::new())))),
+            "dict" => Some(Value::Dict(
+                self.heap.alloc(Object::Dict(crate::runtime::dict::Dict::new())),
+            )),
+            "bool" => Some(Value::Bool(false)),
+            _ => None,
+        };
+        if let Some(zero) = zero {
+            return Ok(zero);
+        }
+        // A class, which answers with itself when it can be built from nothing.
+        let Some(Value::Class(id)) = self.heap.globals(self.globals).get(name).cloned() else {
+            return Err(self.no_such_type(name, span));
+        };
+        // The arity error a bare `NoDefault()` would raise is true and is the
+        // wrong thing to lead with: the program never wrote that call, the
+        // evaluator did. The message is replaced rather than annotated, so the
+        // first line names the declaration the reader can actually change.
+        self.call(Value::Class(id), Vec::new(), span).map_err(|_| {
+            QuinceError::new(
+                format!("`{name}` has no default, so `{field}` has nothing to hold"),
+                span,
+            )
+            .with_kind(ErrorKind::Type)
+            .with_help(format!(
+                "`{field}` is annotated with a type parameter and this instance bound it to \
+                 `{name}`, which declares an `op init` that takes arguments — give `{field}` an \
+                 `= …`, or annotate it `?` so it starts absent"
+            ))
+        })
     }
 
     /// `Stack[int]` written where a value goes.

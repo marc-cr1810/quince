@@ -1,1 +1,0 @@
-`int` has no default constructor, so `x` needs an initializer

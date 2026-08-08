@@ -318,8 +318,11 @@ A declaration with no `= value` takes the default its type answers with.
 
 ```quince
 let logger: Logger               # Logger()
+let count: int                   # 0
+let name: string                 # ""
 let items: list[int]             # []
 let config: dict[string, string] # {}
+let maybe: int?                  # nil — `?` says the absent case is real
 let anything                     # nil — no annotation, no rule
 ```
 
@@ -327,18 +330,37 @@ Which types can answer:
 
 | Type | Default |
 | :--- | :--- |
+| `int`, `float`, `string`, `bool` | `0`, `0.0`, `""`, `false` |
 | `list`, `list[T]` | `[]` |
 | `dict`, `dict[K, V]` | `{}` |
+| Any `T?` | `nil` |
 | A class whose first `op init` up the chain requires no arguments | that constructor |
 | A class declaring no `op init` at all | a synthesized `op init() {}` |
-| Anything else — `int`, `float`, `string`, `bool`, `any` | refused at resolution |
+| A type parameter | whatever it was bound to answers — decided at construction |
+| `any`, `function`, `class` | refused |
 
 A parameterized constructor suppresses the synthesized one: declaring `op init(val: int)`
 makes `let obj: MyClass` a `DeclarationError`, because a class that requires an argument means
 it. Declaring `op init()` beside it brings the default back.
 
-There is no honest default for an `int` — zero is a value somebody chose — which is why the
-refusal exists rather than a guess.
+**This changed in v0.9.** Through v0.8 the scalars were refused too, on the grounds that there
+is no honest default for an `int` — zero is a value somebody chose. Generics is what moved the
+line: a field annotated with a type *parameter* cannot be written with an initializer that
+suits every argument, so under the old rule `class Pair[A, B]` had no legal way to declare
+`first: A`. The line now sits where it can still be defended — a *class* says what it needs,
+because a class can, and `any` has no default because it names no representation.
+
+A type parameter is the one annotation that cannot be decided where it is written. `T` has a
+default exactly when whatever it was bound to has one, so the question waits for construction:
+
+```quince
+class Holder[T] {
+    public let held: T
+}
+
+let fine = Holder[int]()        # held is 0
+let bad = Holder[NoDefault]()   # TypeError, at the construction that decided it
+```
 
 ---
 

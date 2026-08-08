@@ -1,0 +1,62 @@
+# Every builtin with a representation answers what its default is.
+#
+# v0.7 §3.3 admitted only `list` and `dict`, on the grounds that zero is a value
+# somebody chose. v0.9 moved the line: a field annotated with a type *parameter*
+# cannot be given an initializer that suits every argument, so the old rule made
+# `class Pair[A, B]` unwritable. The line now sits where it can be defended — a
+# class still says what it needs, because a class can.
+
+let n: int
+let f: float
+let s: string
+let b: bool
+let xs: list[int]
+let d: dict[string, int]
+
+print(n)
+print(f)
+print(s == "")
+print(b)
+print(xs)
+print(d)
+
+# A nullable annotation is a declaration that the absent case is real, and `0`
+# is not the absent case.
+let maybe: int?
+print(maybe)
+
+# Fields answer the same way, before `op init` runs.
+class Counters {
+    public let hits: int
+    public let ratio: float
+    public let label: string
+    public let seen: list[string]
+}
+
+let c = Counters()
+print(c.hits, c.ratio, c.label == "", c.seen)
+
+# Which is what lets a generic class declare a field of its parameter's type
+# and leave the constructor to fill it in.
+class Pair[A, B] {
+    public final first: A
+    public final second: B
+
+    public op init(first: A, second: B) {
+        self.first = first
+        self.second = second
+    }
+
+    public const op string(): string {
+        return "(" + string(self.first) + ", " + string(self.second) + ")"
+    }
+}
+
+print(Pair[int, string](101, "Alice"))
+print(Pair[float, bool](1.5, true))
+
+# A class still says what it needs, and a class with no constructor still
+# answers for itself.
+class Marker {}
+let m: Marker
+print(m is Marker)

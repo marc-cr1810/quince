@@ -645,9 +645,17 @@ impl Resolver {
     /// refuse. Declaring `op init(val: int)` suppresses that: a class that
     /// requires an argument means it.
     ///
-    /// Only `list` and `dict` answer among the builtins, and they answer with
-    /// `[]` and `{}`. There is no honest default for an `int` — zero is a value
-    /// somebody chose — which is the whole reason v0.7 refused the form.
+    /// **Every builtin with a representation answers**, with the zero of it:
+    /// `0`, `0.0`, `""`, `false`, `[]`, `{}`. v0.7 §3.3 admitted only the two
+    /// containers, on the grounds that zero is a value somebody chose — and
+    /// v0.9 moved the line, because a field annotated with a type *parameter*
+    /// cannot be written with an initializer that suits every argument, so the
+    /// old rule made `class Pair[A, B]` unwritable. See
+    /// [`Parser::default_for`](crate::syntax::parser::Parser::default_for).
+    ///
+    /// The two that still refuse are the two that cannot answer rather than the
+    /// two nobody liked: `function` and `class` have no zero, which is the same
+    /// reason they are the two builtins that refuse to be constructed at all.
     ///
     /// Answers `true` for a class this pass cannot see, for the reason
     /// [`Inherited::Unknown`] exists: a check that has evaluated nothing must be
@@ -660,7 +668,7 @@ impl Resolver {
                 return true;
             }
             if let Some(builtin) = builtin_named(name) {
-                return matches!(builtin, "list" | "dict");
+                return !matches!(builtin, "function" | "class" | "module" | "nil");
             }
             if !self.members.contains_key(name) {
                 return true;

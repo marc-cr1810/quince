@@ -667,6 +667,17 @@ effect of tuples landing.
 ## 9. Decisions taken
 
 - **This is one milestone, with no cut line.** §7, and the reason is at the top of the file.
+- **Every builtin with a representation now has a default** — `0`, `0.0`, `""`, `false`,
+  beside `list`'s `[]` and `dict`'s `{}`. v0.7 §3.3 refused the scalars because zero is a
+  value somebody chose, and that argument does not survive contact with a type parameter:
+  a field annotated `A` cannot be written with an initializer suiting every argument, so
+  the old rule left `class Pair[A, B]` in §4.3 with no legal way to declare `first: A`.
+  The line moved to where it can still be defended — a class says what it needs, because
+  a class can. `any`, `function`, and `class` still refuse, being the three that name no
+  representation to have a zero of.
+- **A type parameter's default is decided at construction**, not at the declaration, since
+  `T` has one exactly when its argument does. This is §3.6's rule reused: the check that
+  cannot be made where the code is written is made where the binding is.
 - **Generics are invariant**, following v0.7 §4.1 rather than defining anything new.
 - **Bounds are ordinary types, checked by ordinary matching.** No second subtyping
   relation, and no member access through a parameter. §3.2.

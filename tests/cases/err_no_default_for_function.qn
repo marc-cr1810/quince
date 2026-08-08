@@ -1,0 +1,3 @@
+# The two builtins with no representation to have a zero of are the same two
+# that refuse to be constructed at all.
+let f: function

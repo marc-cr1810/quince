@@ -680,15 +680,21 @@ fn purity_restricts_state_and_not_effects() {
 
 #[test]
 fn a_binding_with_no_initializer_takes_its_types_default() {
-    // The three shapes that can answer: a class with no constructor, one whose
-    // constructor takes nothing, and the two builtin containers.
+    // A class with no constructor, one whose constructor takes nothing, and the
+    // builtins — every one of which has a zero since v0.9 moved the line. v0.7
+    // §3.3 admitted only the two containers, on the grounds that zero is a value
+    // somebody chose; what changed is that a field annotated with a type
+    // *parameter* cannot be written with an initializer suiting every argument,
+    // so the old rule made `class Pair[A, B]` unwritable.
     resolved("class Marker {}\nlet m: Marker");
     resolved("class C {\n op init() { self.n = 1 }\n}\nlet c: C");
     resolved("let xs: list[int]\nlet d: dict[string, int]");
-    // And the ones that cannot.
+    resolved("let n: int\nlet f: float\nlet s: string\nlet b: bool");
+    // The two builtins with no representation to have a zero of, which are the
+    // same two that refuse to be constructed at all.
     assert_eq!(
-        resolve_err("let n: int"),
-        "`int` has no default constructor, so `n` needs an initializer"
+        resolve_err("let f: function"),
+        "`function` has no default constructor, so `f` needs an initializer"
     );
     assert_eq!(
         resolve_err("class C {\n op init(n) { self.n = n }\n}\nlet c: C"),

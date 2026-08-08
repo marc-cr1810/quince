@@ -1,6 +1,16 @@
-# §3.1 — constructing from a bare type parameter is refused. A field with no
-# initializer is a call to its annotated type, and `T()` is the one such call
-# that names no class.
+# §3.1 — a field annotated with a type parameter has a default exactly when
+# whatever the parameter was bound to has one. Nothing at the declaration knows
+# what that is, so the question is deferred to construction, which is the only
+# place it can be answered.
+class NoDefault {
+    public op init(n: int) {}
+}
+
 class Holder[T] {
     public let held: T
 }
+
+let fine = Holder[int]()
+print(fine.held)
+
+let bad = Holder[NoDefault]()

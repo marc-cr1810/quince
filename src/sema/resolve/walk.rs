@@ -324,26 +324,19 @@ impl Resolver {
         };
         let written = ty.written();
         let named = match &ty.name {
-            // A type parameter names a type and not a value, so there is nothing
-            // to call — v0.9 §3.1. Its own report, and before the
-            // default-constructor question, because "`T` has no default
-            // constructor" invites the reader to go and give it one.
+            // A type parameter is the one annotation this cannot decide. `T`
+            // has a default exactly when whatever it was bound to has one, and
+            // nothing here knows what that is — so the question is deferred to
+            // construction, where the binding is. §3.6 settles the same
+            // question the same way: one mistake reporting from two places at
+            // two times is worse than reporting late.
             //
-            // This is also what the *synthesised* initializer would hit: a field
-            // with no `= …` becomes a call to its annotated type, and `T()` is
-            // the one such call that names no class. Refused here, so the
-            // reader is told which rule they met rather than "undefined
-            // variable `T`" from a name the parser invented.
+            // This is also what the *synthesised* initializer would otherwise
+            // hit. A field with no `= …` becomes a call to its annotated type,
+            // and `T()` names no class — so the evaluator builds the default
+            // from the *substituted* type instead. See `Interp::init_fields`.
             TypeName::Named(name) if self.type_params.iter().any(|param| param == name) => {
-                return Err(declaration(
-                    format!("`{name}` is a type parameter, so {what} cannot be built from it"),
-                    span,
-                )
-                .with_help(format!(
-                    "`{name}` stands for whatever type the class was given, and nothing \
-                     promises that has a constructor taking no arguments — write `= …`, or \
-                     annotate `{name}?`, which holds `nil` until something sets it"
-                )));
+                return Ok(());
             }
             TypeName::Named(name) if self.default_constructible(name) => return Ok(()),
             TypeName::Named(name) => name.clone(),

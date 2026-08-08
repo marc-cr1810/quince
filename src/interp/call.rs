@@ -1538,7 +1538,7 @@ impl Interp {
     }
 
     /// Reports an annotation naming something that is not a type.
-    fn no_such_type(&self, name: &str, span: Span) -> crate::error::Raised {
+    pub(super) fn no_such_type(&self, name: &str, span: Span) -> crate::error::Raised {
         let mut known: Vec<&str> = BUILTIN_TYPES.iter().map(|builtin| builtin.name()).collect();
         let declared: Vec<String> = self
             .heap
@@ -1591,7 +1591,22 @@ impl Interp {
                 false => Vec::new(),
             };
             for field in declared {
-                let mut value = self.eval(&field.value, env)?;
+                // A field annotated with a type parameter and given no
+                // initializer: the parser baked a call to `T`, which names no
+                // class, so the default comes from what `T` was *bound to*
+                // instead. The one declaration whose default cannot be built
+                // until there is an instance to build it for — v0.9 §3.1, and
+                // the reason the resolver defers this rather than refusing it.
+                let mut value = match field.defaulted && !bindings.is_empty() {
+                    true => {
+                        let ty = field.ty.as_ref().map(|ty| substituted(ty, &bindings));
+                        match &ty {
+                            Some(ty) => self.default_of(ty, &field.name, field.value.span)?,
+                            None => self.eval(&field.value, env)?,
+                        }
+                    }
+                    false => self.eval(&field.value, env)?,
+                };
                 if let Some(ty) = field.ty.clone() {
                     let ty = substituted(&ty, &bindings);
                     let named = format!("`{}`", field.name);
