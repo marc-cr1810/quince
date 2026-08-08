@@ -586,6 +586,7 @@ impl Interp {
                         PriorClass {
                             parent: class.parent.map(|up| self.heap.class(up).name.clone()),
                             methods,
+                            params: class.params.clone(),
                         },
                     );
                 }

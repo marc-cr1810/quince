@@ -484,3 +484,35 @@ fn redefining_is_still_what_a_repl_is_for() {
         Some(Value::Int(7))
     );
 }
+
+#[test]
+fn a_generic_class_keeps_its_parameters_across_entries() {
+    // A parameter list is read where an annotation is checked, and at a prompt
+    // the class was declared by an earlier entry — so without carrying it,
+    // `Holder[int]` on line two reads as a class taking no arguments and the
+    // refusal is "`Holder` takes no type arguments".
+    let mut interp = Interp::new();
+    let mut answered = Vec::new();
+    for line in [
+        "class Holder[T] { public let held: T }",
+        "let h = Holder[int]()",
+        "h is Holder[int]",
+        "h is Holder[string]",
+    ] {
+        let program = quince::compile_within(line, &interp.declarations())
+            .unwrap_or_else(|err| panic!("`{line}` should compile: {}", err.message));
+        if let Some(value) = interp.run_repl(&program).expect("it runs") {
+            answered.push(format!("{value:?}"));
+        }
+    }
+    assert_eq!(answered, ["Bool(true)", "Bool(false)"]);
+
+    // The arity is still checked — carrying the list is not waiving the rule.
+    assert_eq!(
+        refused(&[
+            "class Holder[T] { public let held: T }",
+            "let h: Holder[int, string] = Holder()",
+        ]),
+        "`Holder` takes 1 argument, but 2 were written"
+    );
+}

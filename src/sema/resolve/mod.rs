@@ -58,8 +58,10 @@ pub fn resolve(program: &mut [Stmt]) -> Result<()> {
 /// raised half way through still bound what it got to. What is in the globals is
 /// what the next line can actually reach, and it is the only honest answer.
 pub fn resolve_within(program: &mut [Stmt], prior: &Prior) -> Result<()> {
-    // Before anything reads a type, so no later pass ever sees an alias.
-    alias::expand(program)?;
+    // Before anything reads a type, so no later pass ever sees an alias. Told
+    // the prior world for one reason: a class's parameter list is read here, and
+    // at a prompt the class was declared by an earlier entry.
+    alias::expand(program, prior)?;
     let mut resolver = Resolver::default();
     resolver.seed(prior);
     // The top level has no scope, so `scoped` never runs over it — which is why
@@ -90,6 +92,12 @@ pub struct PriorClass {
     /// The methods the class's own body declared — not the ones it inherited,
     /// which belong to whichever class wrote them and are found by walking.
     pub methods: Vec<Rc<FnDecl>>,
+    /// The type parameters it declared, by name — v0.9 §3.1.
+    ///
+    /// Here for the same reason `parent` is: `Holder[int]` on one REPL line is
+    /// checked against a `class Holder[T]` declared on another, and a pass that
+    /// only saw the current entry would read it as a class taking no arguments.
+    pub params: Vec<String>,
 }
 
 /// The builtin type called `name`, if there is one.

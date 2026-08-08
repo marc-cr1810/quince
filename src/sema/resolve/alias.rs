@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use crate::error::{QuinceError, Raised, Result};
 use crate::error::ErrorKind;
 use crate::runtime::dict::KEY_TYPES;
+use crate::sema::resolve::Prior;
 use crate::syntax::ast::{Expr, ExprKind, Stmt, StmtKind, TypeExpr, TypeName};
 use crate::syntax::token::Span;
 
@@ -23,8 +24,15 @@ use crate::syntax::token::Span;
 /// another declared below it, which is the same courtesy the resolver extends to
 /// a function calling one further down the file — a rule that held for code and
 /// not for types would be arbitrary.
-pub(super) fn expand(program: &mut [Stmt]) -> Result<()> {
-    let mut arities = HashMap::new();
+pub(super) fn expand(program: &mut [Stmt], prior: &Prior) -> Result<()> {
+    // The prior world first, so a class this entry redeclares takes its own
+    // parameter list rather than the one it had a line ago.
+    let mut arities: HashMap<String, usize> = prior
+        .classes
+        .iter()
+        .filter(|(_, class)| !class.params.is_empty())
+        .map(|(name, class)| (name.clone(), class.params.len()))
+        .collect();
     parameterised(program, &mut arities);
     let mut declared = HashMap::new();
     // In declaration order, kept beside the map. Which alias a cycle is
