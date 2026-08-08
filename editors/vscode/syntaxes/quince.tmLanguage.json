@@ -38,7 +38,7 @@
       "patterns": [
         {
           "name": "keyword.control.quince",
-          "match": "\\b(if|else|while|for|in|return|try|catch|throw|import)\\b"
+          "match": "\\b(if|else|while|for|return|try|catch|throw|import)\\b"
         },
         {
           "comment": "`from` is not reserved: it is a keyword only where the parser treats it as one, which is at the start of a `from <module> import` and nowhere else.",
@@ -47,12 +47,12 @@
         },
         {
           "name": "keyword.declaration.quince",
-          "match": "\\b(fn|op|class|extends|extend|let|final|complete|sealed|const|override|explicit|public|private|protected|is|alias)\\b"
+          "match": "\\b(fn|op|class|extends|extend|let|final|complete|sealed|const|override|explicit|public|private|protected|alias)\\b"
         },
         {
-          "comment": "The logical operators are words rather than symbols, so they are reserved and are highlighted here — but they are operators, and the scope says so.",
-          "name": "keyword.operator.word.quince",
-          "match": "\\b(and|or|not)\\b"
+          "comment": "Every word operator, in one rule, because grammar.md's precedence table treats them as one family: `in`, `not in`, `is` and `is not` at level 13 beside `<` and `>=`, then `not`, `and` and `or` at 15 to 17. `in` used to sit with `if` and `while` and `is` with `fn` and `class`, which gave five operators three scopes and two colours — and made `for x in xs` read as though `in` were part of the loop syntax rather than the operator it also is everywhere else. `wordlike` rather than `word`: themes colour `keyword.operator` as plain punctuation, and the built-in ones give a word operator the keyword colour only through an allowlist of sub-scopes that `keyword.operator.wordlike` is on and `keyword.operator.word` is not.",
+          "name": "keyword.operator.wordlike.quince",
+          "match": "\\b(and|or|not|is|in)\\b"
         },
         {
           "name": "variable.language.quince",

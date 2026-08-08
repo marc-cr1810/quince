@@ -802,8 +802,16 @@ impl Interp {
                 // way it looks. Rooted through `temps`, because an initializer is
                 // an arbitrary expression and may reach a safe point — the same
                 // reason the `op init` case below pushes the instance.
+                //
+                // The arguments are rooted for the same reason and are easy to
+                // miss: they were evaluated before this call and are held only
+                // in a Rust `Vec` until `op init` binds them into its scope, so
+                // an initializer that reaches a safe point in between —
+                // `let left: Expr = ConstExpr(0.0)` is a call and does — would
+                // collect an argument the constructor has not looked at yet.
                 let mark = self.temps.len();
                 self.temps.push(instance.clone());
+                self.temps.extend(args.iter().filter(|arg| arg.handle().is_some()).cloned());
                 let initialized = self.init_fields(id, instance_id, span);
                 self.temps.truncate(mark);
                 initialized?;

@@ -70,6 +70,59 @@ fn the_list_being_mapped_into_survives_collection() {
     assert_eq!(interp.heap.list(id), &[Value::Int(3), Value::Int(3)]);
 }
 
+/// A constructor's arguments are rooted while the class's field initializers run.
+///
+/// A field initializer is arbitrary Quince code — `let left: Node = Leaf()` is
+/// a call — so it reaches a safe point, and it runs *between* the arguments
+/// being evaluated and `op init` binding them into its scope. In that window
+/// the arguments live only in a Rust `Vec`, which the collector cannot see.
+///
+/// The shape below is the smallest one that has all three parts: `Pair` has a
+/// field initializer that calls something, `wrap` hands it a freshly allocated
+/// argument that no name holds, and `churn` inside the initializer forces a
+/// real collection while that argument is in flight.
+///
+/// Checked by deleting the `temps.extend(args…)` in `Interp::call`'s instance
+/// branch, which makes this panic at `handle points at a collected object`
+/// inside the parameter type check — the first thing to look at the argument
+/// after the collection swept it.
+#[test]
+fn a_constructors_arguments_survive_its_field_initializers() {
+    let interp = run("fn churn(k) {\n\
+         \x20   let scratch = []\n\
+         \x20   let i = 0\n\
+         \x20   while i < k {\n\
+         \x20       scratch.push([i])\n\
+         \x20       i = i + 1\n\
+         \x20   }\n\
+         }\n\
+         class Leaf {\n\
+         \x20   op init() { churn(400) }\n\
+         }\n\
+         class Pair {\n\
+         \x20   let filler: Leaf = Leaf()\n\
+         \x20   let items: list\n\
+         \x20   op init(items: list) { self.items = items }\n\
+         }\n\
+         fn wrap(a, b) {\n\
+         \x20   return Pair([a, b])\n\
+         }\n\
+         let made = wrap(1, 2)\n\
+         let held = made.items\n\
+         let n = len(held)");
+
+    assert!(interp.heap.collections > 0, "the collector never ran");
+    assert!(
+        matches!(global(&interp, "n"), Some(Value::Int(2))),
+        "the constructor argument did not survive: got {:?}",
+        global(&interp, "n")
+    );
+    let Some(Value::List(id)) = global(&interp, "held") else {
+        panic!("the argument should still be a list");
+    };
+    assert_eq!(interp.heap.list(id), &[Value::Int(1), Value::Int(2)]);
+}
+
 /// `io`'s file half, which the corpus cannot hold.
 ///
 /// A case writes nothing: `tests/cases` is checked in, and a suite that
