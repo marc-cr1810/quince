@@ -1,0 +1,8 @@
+# §3.6 — caught at run time from the receiver's reified header, not at
+# resolution, even where the annotation would have let the resolver answer.
+extend list[int] {
+    fn sum_squares(): int { return 0 }
+}
+
+let names: list[string] = ["a", "b"]
+names.sum_squares()

@@ -190,8 +190,15 @@ pub(crate) fn collect_stmt_semantic_tokens(
                 push_raw_token(source, *name_span, name, 6, 1, raw_tokens);
                 collect_type_expr_semantic_tokens(source, ty, raw_tokens);
             }
-            StmtKind::Extend { target, methods, .. } => {
+            StmtKind::Extend { target, constraint, methods, .. } => {
                 push_raw_token(source, stmt.span, &target.name, 0, 0, raw_tokens);
+                // The arguments of `extend list[int]`, which are ordinary types
+                // written where types go. The head is already coloured above.
+                if let Some(constraint) = constraint {
+                    for arg in &constraint.args {
+                        collect_type_expr_semantic_tokens(source, arg, raw_tokens);
+                    }
+                }
                 for m in methods {
                     push_raw_token(source, m.name_span, &m.name, 2, 1, raw_tokens);
                     for param in &m.params {

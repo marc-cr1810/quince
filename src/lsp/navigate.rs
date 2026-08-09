@@ -6,7 +6,9 @@ use lsp_types::{
     Range, SymbolInformation, SymbolKind, Uri as Url, WorkspaceEdit, TextEdit,
 };
 
-use quince::syntax::ast::{Expr, ExprKind, FnDecl, ImportNames, Stmt, StmtKind, TypeExpr, TypeName};
+use quince::syntax::ast::{
+    Expr, ExprKind, FnDecl, ImportNames, Stmt, StmtKind, TypeExpr, TypeName, written_params,
+};
 use quince::syntax::token::Span;
 use crate::lsp::DocumentState;
 use crate::lsp::position::{get_word_at_position, offset_to_position, span_to_range};
@@ -814,12 +816,19 @@ pub(crate) fn get_hierarchical_document_symbols(_uri: &Url, state: Option<&Docum
                     children: None,
                 });
             }
-            StmtKind::Alias { name, name_span, ty, .. } => {
+            StmtKind::Alias { name, name_span, params, ty, .. } => {
                 let name_range = find_name_range(&state.text, *name_span, name).unwrap_or(stmt_range);
+                // The parameter list is part of what the alias *is* — v0.9
+                // §3.7 — so `alias[T] = tuple[T, T]` rather than a detail whose
+                // `T` comes from nowhere.
+                let declared = match params.is_empty() {
+                    true => String::new(),
+                    false => format!("[{}]", written_params(params)),
+                };
                 #[allow(deprecated)]
                 symbols.push(DocumentSymbol {
                     name: name.clone(),
-                    detail: Some(format!("alias = {}", ty.written())),
+                    detail: Some(format!("alias{declared} = {}", ty.written())),
                     kind: SymbolKind::STRUCT,
                     tags: None,
                     deprecated: None,

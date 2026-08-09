@@ -41,6 +41,8 @@ pub(super) fn declaration(message: impl Into<String>, span: Span) -> Raised {
 /// Resolves a whole program in place.
 mod alias;
 
+pub use alias::Alias;
+
 pub fn resolve(program: &mut [Stmt]) -> Result<()> {
     resolve_within(program, &Prior::default())
 }
@@ -84,6 +86,16 @@ pub struct Prior {
     /// where the name is overloaded.
     pub functions: HashMap<String, Vec<Rc<FnDecl>>>,
     pub classes: HashMap<String, PriorClass>,
+    /// The aliases an earlier compilation declared, already expanded — v0.9
+    /// §3.7.
+    ///
+    /// The one entry here that is *not* read off a bound value, because an
+    /// alias is the one declaration that binds none: it has no run-time
+    /// existence at all, so there is nothing in the heap to read it back from.
+    /// The evaluator keeps the table instead and hands it over here, which
+    /// preserves the property that matters — what the next line can reach is
+    /// what the lines before it actually got as far as declaring.
+    pub aliases: HashMap<String, Alias>,
 }
 
 /// A class an earlier compilation bound.

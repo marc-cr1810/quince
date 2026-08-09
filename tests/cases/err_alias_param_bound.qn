@@ -1,0 +1,4 @@
+# §3.7 — an alias declares no type, so a bound would have nothing to hold an
+# argument to. Refused rather than ignored: ignoring it is what makes somebody
+# believe it held.
+alias Bounded[T: float] = list[T]

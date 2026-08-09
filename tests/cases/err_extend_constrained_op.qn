@@ -1,0 +1,11 @@
+# The language dispatches an `op` from the class's slot table, which is reached
+# from the type and knows nothing about a particular value's header — so a
+# constraint on one could never be consulted.
+class Box[T] {
+    public let item: T = 0
+    public op init() {}
+}
+
+extend Box[int] {
+    op add(other: any): int { return 1 }
+}

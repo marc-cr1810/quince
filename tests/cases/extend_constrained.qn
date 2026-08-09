@@ -1,0 +1,74 @@
+# v0.9 §3.6 — container-constrained extensions.
+#
+# `extend list[int]` adds a method to the instantiation rather than to `list`,
+# and which receivers it reaches is decided at run time from the reified header
+# — not at resolution. The annotated local below could have been answered for
+# statically, but a receiver reached through a parameter, a container, or a
+# dynamic binding could not, and one mistake reporting from two places at two
+# times is worse than reporting late.
+
+extend list[int] {
+    fn sum_squares(): int {
+        let total = 0
+        for x in self {
+            total = total + x * x
+        }
+        return total
+    }
+}
+
+let numbers: list[int] = [1, 2, 3]
+print(numbers.sum_squares())
+
+# The refusal is a catchable error like every other type error, so the case can
+# show both halves of §3.6's example.
+let names: list[string] = ["a", "b"]
+try {
+    names.sum_squares()
+} catch e {
+    print(e.message)
+}
+
+# Two instantiations, two blocks, one name. The receiver tells them apart before
+# the arguments are looked at, so the pair is not the ambiguity §3.5 refuses —
+# and their parameter lists are identical, which is the case that proves it.
+extend dict[string, int] {
+    fn describe(): string {
+        return "counts"
+    }
+}
+
+extend dict[string, string] {
+    fn describe(): string {
+        return "labels"
+    }
+}
+
+let counts: dict[string, int] = {"a": 1}
+let labels: dict[string, string] = {"a": "one"}
+print(counts.describe())
+print(labels.describe())
+
+# An unconstrained block still reaches every receiver, and coexists with a
+# constrained one under a different name.
+extend list {
+    fn second(): any {
+        return self[1]
+    }
+}
+
+print(numbers.second())
+print(names.second())
+
+# A receiver reached through a parameter — the case the resolver could not have
+# answered for, and the reason §3.6 checks at run time.
+fn total(xs: list[int]): int {
+    return xs.sum_squares()
+}
+
+print(total([4, 5]))
+
+# The constraint follows the *header*, not the annotation the value arrived
+# through. A `list[int]` stored in a `list[any?]` binding is still a `list[int]`.
+let held: list[any?] = [numbers]
+print(held[0].sum_squares())

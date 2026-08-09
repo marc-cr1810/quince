@@ -19,7 +19,7 @@ use crate::runtime::dict::{Dict, Key};
 use crate::runtime::env::Env;
 use crate::runtime::heap::{ObjId, Object};
 use crate::runtime::value::{Native, Value};
-use crate::interp::generic::substituted;
+use crate::sema::types::substituted;
 use crate::sema::types::{arguments_admit, holds};
 use crate::syntax::ast::{
     CallArg, Expr, ExprKind, FnDecl, Op, Param, TypeExpr, TypeName, TypeParam,
@@ -1169,7 +1169,7 @@ pub(super) fn is_pack_param(param: &Param) -> bool {
         // forgot would silently accept anything. v0.9 §3.1.
         //
         // A clone and nothing else outside a generic method — see
-        // [`crate::interp::generic::substituted`].
+        // [`crate::sema::types::substituted`].
         let substituted = substituted(ty, self.bindings());
         let ty = &substituted;
         // A name that is not a type at all is a different mistake from a value
@@ -1649,7 +1649,7 @@ pub(super) fn is_pack_param(param: &Param) -> bool {
     ///
     /// `nil` still needs a `?`, exactly as an annotation does — `nil is int` is
     /// `false` and `nil is int?` is `true`.
-    pub(super) fn has_type(&mut self, ty: &TypeExpr, value: &Value) -> bool {
+    pub(super) fn has_type(&self, ty: &TypeExpr, value: &Value) -> bool {
         if matches!(value, Value::Nil) {
             return ty.admits_nil();
         }

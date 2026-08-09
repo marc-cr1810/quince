@@ -4,7 +4,7 @@
 //! Two halves of one idea, v0.9 §3.1. `Stack[int]()` builds an instance whose
 //! `T` is settled; a `push(item: T)` on it has to be checked against `int` when
 //! it runs. The first half is [`Interp::built_generic`], the second is
-//! [`substituted`], and the thing that joins them is the header — the arguments
+//! [`substituted`](crate::sema::types::substituted), and the thing that joins them is the header — the arguments
 //! are recorded on the instance and read back off it, so there is exactly one
 //! place that knows.
 //!
@@ -26,20 +26,12 @@ use crate::error::{ErrorKind, QuinceError, Result};
 use crate::interp::Interp;
 use crate::runtime::heap::{ObjId, Object};
 use crate::runtime::value::Value;
-use crate::sema::types::{bound_help, satisfies};
+use crate::sema::types::{Bindings, bound_help, satisfies};
 use crate::syntax::ast::{
     CallArg, ConstArg, Expr, ExprKind, ParamKind, Slot, TypeExpr, TypeName, TypeParam, Var,
     written_params,
 };
 use crate::syntax::token::Span;
-
-/// A type parameter and what it was bound to, in the order the class declared
-/// them.
-///
-/// A slice of pairs rather than a map: a parameter list is one, two, or three
-/// long in every program anyone will write, and a linear scan over three
-/// entries beats hashing a string.
-pub type Bindings = [(String, TypeExpr)];
 
 impl Interp {
     /// `Stack[int](…)` — a generic class supplied with its arguments and built.
@@ -500,7 +492,7 @@ impl Interp {
     ///
     /// Empty outside a generic method, which is where every program spends
     /// almost all of its time — and an empty binding list is what makes
-    /// [`substituted`] a clone.
+    /// [`substituted`](crate::sema::types::substituted) a clone.
     pub(super) fn bindings(&self) -> &Bindings {
         self.type_bindings.last().map_or(&[], Vec::as_slice)
     }
@@ -655,87 +647,6 @@ fn unconstrained() -> TypeExpr {
     }
 }
 
-/// An annotation with every type parameter replaced by what it is bound to.
-///
-/// `list[T]` becomes `list[int]` on a `Stack[int]`, and the result is an
-/// ordinary annotation that the checks already in the evaluator can be pointed
-/// at without knowing generics exist. That is the whole trick: a `T` is not a
-/// new kind of type, it is a type not yet written down.
-///
-/// Spans survive substitution — the replacement carries the *use*'s span and
-/// not the argument's, so a refusal underlines the parameter the program wrote
-/// rather than a bracket in another declaration.
-///
-/// Answers with a clone when there is nothing to replace, which is every
-/// annotation in a non-generic class. A `Cow` was the obvious alternative and
-/// is not worth it: the caller needs an owned `TypeExpr` either way, since the
-/// checks it feeds take one by reference and outlive nothing.
-pub(super) fn substituted(ty: &TypeExpr, bindings: &Bindings) -> TypeExpr {
-    if bindings.is_empty() {
-        return ty.clone();
-    }
-    let mut out = ty.clone();
-    // A pack in an argument position *splices*: `tuple[Ts...]` with `Ts` bound
-    // to three types becomes a `tuple` with three arguments, not one argument
-    // that is itself a tuple. This is the whole of what makes a pack different
-    // from a parameter, and it is why the argument walk is a `flat_map`.
-    out.args = ty
-        .args
-        .iter()
-        .flat_map(|arg| expanded(arg, bindings))
-        .collect();
-    if let TypeName::Pack(name) = &ty.name {
-        // A pack standing where a whole type goes — `args: Ts...` — is the
-        // collected tuple itself. Nothing to splice into, so the binding is
-        // used as it is.
-        let Some((_, bound)) = bindings.iter().find(|(param, _)| param == name) else {
-            return out;
-        };
-        let mut replaced = bound.clone();
-        replaced.span = ty.span;
-        replaced.nullable = replaced.nullable || ty.nullable;
-        replaced.frozen = replaced.frozen || ty.frozen;
-        return replaced;
-    }
-    let TypeName::Named(name) = &ty.name else {
-        return out;
-    };
-    let Some((_, bound)) = bindings.iter().find(|(param, _)| param == name) else {
-        return out;
-    };
-    // A parameter takes no arguments of its own — `T[int]` is not a form — so
-    // whatever was bound replaces the name *and* the empty argument list.
-    let mut replaced = bound.clone();
-    replaced.span = ty.span;
-    // The two qualifiers belong to the use and not to the binding. `T?` admits
-    // `nil` whatever `T` is, and a `const T` freezes what crosses it — both are
-    // words the body wrote about this position, and the argument has no say in
-    // either.
-    replaced.nullable = replaced.nullable || ty.nullable;
-    replaced.frozen = replaced.frozen || ty.frozen;
-    replaced
-}
-
-/// One argument, substituted — as however many types it turns into.
-///
-/// One for everything but a bound pack, which is the reason this hands back a
-/// list at all. See [`substituted`].
-fn expanded(arg: &TypeExpr, bindings: &Bindings) -> Vec<TypeExpr> {
-    let TypeName::Pack(name) = &arg.name else {
-        return vec![substituted(arg, bindings)];
-    };
-    match bindings.iter().find(|(param, _)| param == name) {
-        // The arguments the pack took, spliced in where it was written. Each is
-        // already a finished type — a pack binds to what a construction was
-        // given, and a type argument cannot itself be a pack.
-        Some((_, bound)) => bound.args.clone(),
-        // Nothing bound it, so it stands for itself. A bare `CustomTuple()`
-        // leaves this, and `holds` reads an unsubstituted pack as constraining
-        // nothing.
-        None => vec![arg.clone()],
-    }
-}
-
 fn plural(count: usize, word: &str) -> String {
     match count {
         1 => word.to_string(),
@@ -751,85 +662,3 @@ fn an(name: &str) -> String {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn named(name: &str) -> TypeExpr {
-        TypeExpr {
-            applied: false,
-            name: TypeName::Named(name.to_string()),
-            args: Vec::new(),
-            nullable: false,
-            frozen: false,
-            span: Span::new(3, 4),
-        }
-    }
-
-    fn generic(name: &str, args: Vec<TypeExpr>) -> TypeExpr {
-        TypeExpr {
-            applied: !args.is_empty(),
-            args,
-            ..named(name)
-        }
-    }
-
-    #[test]
-    fn a_bare_parameter_becomes_its_argument() {
-        let bindings = vec![("T".to_string(), named("int"))];
-        assert_eq!(substituted(&named("T"), &bindings).written(), "int");
-    }
-
-    #[test]
-    fn a_parameter_nested_in_a_container_is_reached() {
-        let bindings = vec![("T".to_string(), named("int"))];
-        let ty = generic("list", vec![named("T")]);
-        assert_eq!(substituted(&ty, &bindings).written(), "list[int]");
-    }
-
-    #[test]
-    fn substitution_keeps_the_span_of_the_use() {
-        let bindings = vec![(
-            "T".to_string(),
-            TypeExpr {
-                span: Span::new(99, 100),
-                ..named("int")
-            },
-        )];
-        // The report is about the `T` the body wrote, which is at 3..4 — the
-        // argument's own span is in another declaration entirely.
-        assert_eq!(substituted(&named("T"), &bindings).span, Span::new(3, 4));
-    }
-
-    #[test]
-    fn the_question_mark_belongs_to_the_use() {
-        let bindings = vec![("T".to_string(), named("int"))];
-        let optional = TypeExpr {
-            nullable: true,
-            ..named("T")
-        };
-        assert!(substituted(&optional, &bindings).admits_nil());
-        // And does not leak back the other way: a `T` written plain is not
-        // nullable because some other position wrote `T?`.
-        assert!(!substituted(&named("T"), &bindings).admits_nil());
-    }
-
-    #[test]
-    fn an_argument_that_is_itself_generic_substitutes_whole() {
-        let bindings = vec![("T".to_string(), generic("list", vec![named("int")]))];
-        let ty = generic("dict", vec![named("string"), named("T")]);
-        assert_eq!(
-            substituted(&ty, &bindings).written(),
-            "dict[string, list[int]]"
-        );
-    }
-
-    #[test]
-    fn a_name_no_parameter_claims_is_left_alone() {
-        let bindings = vec![("T".to_string(), named("int"))];
-        assert_eq!(substituted(&named("Point"), &bindings).written(), "Point");
-        // Including one that merely starts the same way: matching is on the
-        // whole name and not on a prefix.
-        assert_eq!(substituted(&named("Total"), &bindings).written(), "Total");
-    }
-}

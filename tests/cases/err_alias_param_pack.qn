@@ -1,0 +1,3 @@
+# A pack stands for however many arguments are left, and an alias has no arity
+# of its own to compare that against.
+alias Row[Ts...] = tuple[Ts...]

@@ -1,0 +1,5 @@
+# Deliberately not the class rule, where writing none means unconstrained: a
+# class has a body a bare `T` can stand in, and an alias has only the
+# substitution.
+alias Pair[T] = tuple[T, T]
+let x: Pair = (1, 2)

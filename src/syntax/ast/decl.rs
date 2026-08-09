@@ -400,7 +400,7 @@ pub enum TypeName {
     /// Carries the parameter's name and not what it is bound to, because a use
     /// site is written long before there is a binding to read.
     ///
-    /// [`substituted`]: crate::interp::generic
+    /// [`substituted`]: crate::sema::types::substituted
     Pack(String),
     /// `any`, or `_`, which are two spellings of one type.
     ///

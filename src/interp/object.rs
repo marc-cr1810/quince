@@ -12,9 +12,9 @@ use crate::error::{ErrorKind, QuinceError, Raised, Result};
 use crate::interp::error::an;
 use crate::interp::{Attr, Interp};
 use crate::runtime::dict::Key;
-use crate::runtime::heap::ObjId;
+use crate::runtime::heap::{ObjId, Object};
 use crate::runtime::value::Value;
-use crate::syntax::ast::{FnDecl, Var};
+use crate::syntax::ast::{FnDecl, TypeExpr, Var};
 use crate::syntax::ast::Visibility;
 use crate::syntax::token::Span;
 
@@ -26,7 +26,7 @@ impl Interp {
     /// field holding a function is called as an ordinary function rather than
     /// silently acquiring a receiver it was never written to take.
     pub(super) fn attr(
-        &self,
+        &mut self,
         receiver: &Value,
         name: &str,
         target_span: Span,
@@ -77,6 +77,12 @@ impl Interp {
         match self.find_method(class, name) {
             Some(method) => {
                 self.may_reach(class, name, name_span)?;
+                // §3.6, and the only caller: an extension naming an
+                // instantiation reaches a receiver whose header says so, and
+                // this is the one point where both the method and the value it
+                // was found for are in hand.
+                let receiver = receiver.clone();
+                let method = self.constrained(method, &receiver, name_span)?;
                 Ok(Attr::Method(method))
             }
             None => Err(self.no_attr(receiver, name, target_span, name_span, expr_span)),
@@ -208,6 +214,116 @@ impl Interp {
         None
     }
 
+    /// One extension entry, as the list of functions it actually holds, each
+    /// beside the instantiation the block that added it named.
+    ///
+    /// A key holds a single function or the overload set several blocks joined,
+    /// and both callers below want to look at them one at a time. Kept as
+    /// `Value`s rather than declarations because the constraint is on the
+    /// *function* — see [`Function::constraint`](crate::runtime::value::Function::constraint).
+    fn each_extension(&self, entry: &Value) -> Vec<(Value, Option<Rc<TypeExpr>>)> {
+        let held = match entry {
+            Value::Overload(set) => self.heap.overload(*set).to_vec(),
+            other => vec![other.clone()],
+        };
+        held.into_iter()
+            .map(|value| {
+                let constraint = match &value {
+                    Value::Function(id) => self.heap.function(*id).constraint.clone(),
+                    _ => None,
+                };
+                (value, constraint)
+            })
+            .collect()
+    }
+
+    /// The method `name` on `receiver`, with §3.6's constraints applied.
+    ///
+    /// The one place an `extend list[int]` block is held to what it said. Two
+    /// things happen here and they are the same thing seen from either side: an
+    /// entry loses the declarations whose instantiation the receiver is not one
+    /// of, and if that leaves nothing, the refusal names what the block did
+    /// cover.
+    ///
+    /// **At run time, from the receiver's header, and not at resolution.** The
+    /// annotation on a local would let the resolver answer for `names` in
+    /// §3.6's example, and a receiver reached through a parameter, a container,
+    /// or a dynamic binding could not be answered for at all. One mistake
+    /// reporting from two places at two times is worse than reporting late.
+    ///
+    /// Costs nothing where nothing is constrained: the common entry is a lone
+    /// function with no constraint, and that is the first arm.
+    fn constrained(&mut self, method: Value, receiver: &Value, span: Span) -> Result<Value> {
+        let candidates = self.each_extension(&method);
+        if candidates.iter().all(|(_, held)| held.is_none()) {
+            return Ok(method);
+        }
+        let mut kept = Vec::new();
+        let mut refused = Vec::new();
+        for (value, held) in candidates {
+            match held {
+                None => kept.push(value),
+                Some(held) if self.has_type(&held, receiver) => kept.push(value),
+                Some(held) => refused.push(held.written()),
+            }
+        }
+        match kept.len() {
+            0 => {
+                let name = self
+                    .each_extension(&method)
+                    .iter()
+                    .find_map(|(value, _)| self.declaration(value))
+                    .map_or_else(|| "this method".to_string(), |decl| decl.name.clone());
+                refused.dedup();
+                let quoted: Vec<String> =
+                    refused.iter().map(|held| format!("`{held}`")).collect();
+                let only = match quoted.split_last() {
+                    Some((last, [])) => last.clone(),
+                    Some((last, rest)) => format!("{} or {last}", rest.join(", ")),
+                    None => "nothing".to_string(),
+                };
+                Err(QuinceError::new(
+                    format!("`{name}` is defined only on {only}"),
+                    span,
+                )
+                .with_kind(ErrorKind::Type)
+                .with_help(format!(
+                    "this is {}, and an `extend` block naming an instantiation adds methods to \
+                     that one — the block reaches a value whose header says so",
+                    an(&self.described(receiver))
+                )))
+            }
+            1 => Ok(kept.pop().expect("one is there")),
+            // Rebuilt rather than handed back whole, because what was dropped
+            // is exactly what a call must not be able to select. Allocating
+            // here is safe unrooted: nothing between this and the return
+            // collects.
+            _ => Ok(Value::Overload(self.heap.alloc(Object::Overload(kept)))),
+        }
+    }
+
+    /// How a receiver reads in §3.6's refusal — its type with the arguments its
+    /// header carries, when it carries any.
+    ///
+    /// `list[string]` and not `list`, since the whole of what went wrong is an
+    /// argument. A value nothing described has no arguments to print and reads
+    /// as the bare type, which is the honest answer: it is not an instantiation
+    /// of anything, and that is exactly why the block did not reach it.
+    fn described(&self, receiver: &Value) -> String {
+        let name = receiver.type_name(&self.heap).to_string();
+        let held = receiver
+            .base(&self.heap)
+            .handle()
+            .and_then(|id| self.heap.descriptor(id));
+        match held {
+            Some(held) if !held.args.is_empty() => {
+                let args: Vec<String> = held.args.iter().map(TypeExpr::written).collect();
+                format!("{name}[{}]", args.join(", "))
+            }
+            _ => name,
+        }
+    }
+
     /// Every method callable on a value of class `id`, with what it resolves to.
     ///
     /// The same two walks [`Interp::find_method`] makes and in the same order,
@@ -267,9 +383,16 @@ impl Interp {
     /// library that has to keep growing without breaking callers. Quince has nine
     /// builtin types with single-digit method counts, so the loud answer is
     /// affordable here and would not be there.
-    pub(super) fn may_extend(&self, id: ObjId, decl: &FnDecl, span: Span) -> Result<()> {
+    pub(super) fn may_extend(
+        &self,
+        id: ObjId,
+        decl: &FnDecl,
+        constraint: Option<&TypeExpr>,
+        span: Span,
+    ) -> Result<()> {
         let name = &decl.name;
         let type_name = || self.heap.class(id).name.clone();
+
         // First, because it is the only one of the three that is about the type
         // rather than about the name being added: a closed type refuses the block,
         // and which method it happens to start with is beside the point.
@@ -322,16 +445,27 @@ impl Interp {
         // written in may be in different modules. What is refused is the pair a
         // call could not tell apart, which is the same rule a class body follows
         // and is checked with the same code.
+        //
+        // v0.9 §3.6 adds a second way for a call to tell two apart: the
+        // *receiver*. `extend list[int]` and `extend list[string]` may both
+        // declare `total()` with identical parameters, because the header
+        // decides which one a call reaches long before the arguments are
+        // looked at. So a pair constrained differently is skipped here rather
+        // than compared — and two blocks naming the *same* instantiation are
+        // compared exactly as two unconstrained ones are.
         if let Some(earlier) = self.extensions.get(&(id, name.to_string())) {
-            let against: Vec<Rc<FnDecl>> = match earlier {
-                Value::Overload(set) => self
-                    .heap
-                    .overload(*set)
-                    .iter()
-                    .filter_map(|value| self.declaration(value))
-                    .collect(),
-                other => self.declaration(other).into_iter().collect(),
-            };
+            let against: Vec<Rc<FnDecl>> = self
+                .each_extension(earlier)
+                .into_iter()
+                .filter(|(_, held)| match (held.as_deref(), constraint) {
+                    // Two instantiations, and only the same one is a clash. One
+                    // side unconstrained covers every receiver the other does,
+                    // so it always is.
+                    (Some(held), Some(new)) => held.same_as(new),
+                    _ => true,
+                })
+                .filter_map(|(func, _)| self.declaration(&func))
+                .collect();
             if let Some(clash) = against
                 .iter()
                 .find_map(|earlier| crate::sema::overload::clash(earlier, decl))

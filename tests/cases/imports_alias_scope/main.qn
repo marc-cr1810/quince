@@ -1,0 +1,11 @@
+# The module's alias does the work inside the module, and is not a type here.
+import util
+
+print(util.best([3, 9, 4]))
+
+try {
+    let mine: Score = 1
+    print(mine)
+} catch e {
+    print(e.message)
+}

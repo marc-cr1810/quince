@@ -1,0 +1,4 @@
+# §3.7 — an alias is a substitution with one argument per parameter, so a
+# second one has nowhere to go.
+alias Pair[T] = tuple[T, T]
+let x: Pair[int, float] = (1, 2)

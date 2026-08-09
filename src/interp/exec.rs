@@ -15,6 +15,7 @@ use crate::interp::call::Written;
 use crate::interp::error::an;
 use crate::interp::{Flow, Interp, resolved};
 use crate::sema::overload;
+use crate::sema::resolve::Alias;
 use crate::runtime::class::Class;
 use crate::runtime::env::{self, Env};
 use crate::runtime::heap::{ObjId, Object};
@@ -137,6 +138,7 @@ impl Interp {
                     decl: Rc::clone(decl),
                     env,
                     owner: None,
+                    constraint: None,
                 })));
                 // The second and later declarations of a name join the set the
                 // first one bound. Which those are was decided at resolution —
@@ -275,6 +277,10 @@ impl Interp {
                         // Filled in below: the class does not exist yet, and a
                         // method's reach is its own class's.
                         owner: None,
+                        // A class body is the declaration, so there is no
+                        // instantiation it was written *about*. §3.6's
+                        // constraint belongs to `extend` alone.
+                        constraint: None,
                     })));
                     declared.extend(func.handle());
                     // Several declarations may share a name — v0.8 §3.5 — and
@@ -372,11 +378,42 @@ impl Interp {
 
             // An alias names a type and holds no value, so there is nothing here
             // to run. The resolver has already substituted every use of it.
-            StmtKind::Alias { .. } => Ok(Flow::Normal),
+            //
+            // Recorded all the same, and only for the prompt: every other
+            // declaration a later entry can reach is read back out of the heap,
+            // and this is the one that leaves nothing there to read. What is
+            // kept is the *expanded* body, since that is what the resolver
+            // rewrote this statement to — so an alias captures what it meant
+            // when it was declared, exactly as a class's methods do.
+            StmtKind::Alias { name, params, ty, .. } => {
+                // The top level of a module and nowhere else, which is exactly
+                // the rule `alias::expand` applies when it collects them: an
+                // alias inside a function is a type visible for the length of a
+                // block, and nothing else in the language scopes a type. The
+                // resolver ignores one written there, so nothing may reach it
+                // from here either.
+                //
+                // The keying below would already keep such an entry out of
+                // `declarations`, so what this check is actually load-bearing
+                // for is the table's size: without it a nested alias leaves one
+                // entry per *call*, keyed by a scope that no longer exists and
+                // that nothing will ever look up.
+                if env == env::module_of(&self.heap, env) {
+                    self.aliases.insert(
+                        (env, name.clone()),
+                        Alias {
+                            params: params.clone(),
+                            ty: ty.clone(),
+                        },
+                    );
+                }
+                Ok(Flow::Normal)
+            }
 
             StmtKind::Extend {
                 target,
                 target_span,
+                constraint,
                 methods,
             } => {
                 let value = self.read(target, env, *target_span)?;
@@ -393,13 +430,41 @@ impl Interp {
         .with_help("`extend` adds methods to a type, so the name after it has to hold one"));
                 };
 
+                // §3.6's constraint is checked against the *receiver*, and an
+                // `op` has no receiver to check it against: the language calls
+                // one through the class's slot table, which is reached from the
+                // type and knows nothing about what any particular value's
+                // header says. Installing one here would be a constraint that
+                // silently never held, so the block is refused instead.
+                if let Some(constraint) = constraint
+                    && let Some(decl) = methods.iter().find(|decl| decl.op.is_some())
+                {
+                    let op = decl.op.expect("just found one").name();
+                    return Err(QuinceError::new(
+                        format!("`op {op}` cannot be added to `{}`", constraint.written()),
+                        decl.name_span,
+                    )
+                    .with_kind(ErrorKind::Type)
+                    .with_help(format!(
+                        "the language dispatches an `op` on the type and not on what a value's \
+                         header says, so the arguments could never be consulted — write \
+                         `extend {}` if it should apply to all of them",
+                        target.name
+                    )));
+                }
+
                 // Every name checked before any is added, so a block whose third
                 // method collides leaves the type exactly as it found it. A
                 // half-applied extension would be the worst of both: a program
                 // that reported an error and changed behaviour anyway.
                 for decl in methods {
-                    self.may_extend(id, decl, *target_span)?;
+                    self.may_extend(id, decl, constraint.as_ref(), *target_span)?;
                 }
+
+                // Shared by every method in the block, since the constraint is
+                // written once — and shared by the *value*, so the comparison
+                // at each call is against the same allocation the block named.
+                let constraint = constraint.clone().map(Rc::new);
 
                 // Nothing here reaches a safe point, so the functions are safe
                 // unrooted until the table holds them — and the table is a root,
@@ -411,6 +476,7 @@ impl Interp {
                         // Left `None`: an `extend` block is outside the class it
                         // adds to, so it reaches what any outsider reaches.
                         owner: None,
+                        constraint: constraint.clone(),
                     })));
                     // Overloads coexist across `extend` blocks as well as inside
                     // one, which is what §3.5 means by "extensions coexist

@@ -1,0 +1,3 @@
+# A const parameter is a value a body reads, and an alias has no body — it is
+# gone by the time anything could read one.
+alias Sized[const N: int] = list[int]

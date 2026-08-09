@@ -814,3 +814,92 @@ fn an_alias_is_expanded_before_signatures_are_compared() {
         "this scope already declares `f` with these parameter types"
     );
 }
+
+#[test]
+fn a_parameterised_alias_is_a_substitution_and_not_a_type() {
+    // §3.7's whole claim, checked where it is actually made: `Pair[float]` is
+    // gone by the time anything downstream reads a type, and what is left is
+    // what it abbreviated. Compared through `written` because that is what a
+    // report would print.
+    let program = resolved("alias Pair[T] = tuple[T, T]\nlet x: Pair[float] = (1.0, 2.0)");
+    let StmtKind::Let { ty: Some(ty), .. } = &program[1].kind else {
+        panic!("expected an annotated binding");
+    };
+    assert_eq!(ty.written(), "tuple[float, float]");
+}
+
+#[test]
+fn an_alias_argument_reaches_a_nested_alias_expanded() {
+    // `Row[Score]` binds `V` to `int` and not to a name about to disappear,
+    // which is what the argument walk before the substitution is for.
+    let program = resolved(
+        "alias Score = int\n\
+         alias Pair[T] = tuple[T, T]\n\
+         alias Row[V] = dict[string, Pair[V]]\n\
+         let r: Row[Score] = {}",
+    );
+    let StmtKind::Let { ty: Some(ty), .. } = &program[3].kind else {
+        panic!("expected an annotated binding");
+    };
+    assert_eq!(ty.written(), "dict[string, tuple[int, int]]");
+}
+
+#[test]
+fn a_use_of_an_alias_writes_every_argument_or_it_is_refused() {
+    // Deliberately not the rule a class follows, where writing none means the
+    // arguments are unconstrained: a class has a body a bare `T` can stand
+    // unsubstituted in, and an alias has only the substitution.
+    assert_eq!(
+        resolve_err("alias Pair[T] = tuple[T, T]\nlet x: Pair = (1, 2)"),
+        "`Pair` takes 1 type argument, but none were written"
+    );
+    assert_eq!(
+        resolve_err("alias Pair[T] = tuple[T, T]\nlet x: Pair[int, int] = (1, 2)"),
+        "`Pair` takes 1 type argument, but 2 were written"
+    );
+    // And one that takes none still refuses arguments, which is the report
+    // v0.7 had no way to reach because there was no grammar for it.
+    assert_eq!(
+        resolve_err("alias Ints = list[int]\nlet x: Ints[string] = []"),
+        "`Ints` takes no type arguments, but 1 was written"
+    );
+}
+
+#[test]
+fn the_qualifiers_on_a_use_of_an_alias_belong_to_the_use() {
+    let program = resolved("alias Pair[T] = tuple[T, T]\nlet x: const Pair[int]? = nil");
+    let StmtKind::Let { ty: Some(ty), .. } = &program[1].kind else {
+        panic!("expected an annotated binding");
+    };
+    assert!(ty.nullable && ty.frozen);
+    assert_eq!(ty.written(), "const tuple[int, int]?");
+}
+
+#[test]
+fn an_alias_that_cycles_through_its_own_parameter_is_refused() {
+    // §3.7 names this case specifically. Nothing extra is needed to catch it:
+    // the cycle is found by name, and the arguments do not enter into it.
+    assert_eq!(
+        resolve_err("alias A[T] = A[T]"),
+        "`A` is defined in terms of itself"
+    );
+}
+
+#[test]
+fn an_extend_block_names_a_real_instantiation() {
+    // §3.6 — the one thing the resolver *does* refuse about a constrained
+    // extension, by the same check every annotation goes through.
+    assert_eq!(
+        resolve_err("extend list[int, string] {\n fn f() {}\n}"),
+        "`list` takes 1 argument, but 2 were written"
+    );
+    resolved("extend list[int] {\n fn f() {}\n}");
+    // An alias in the head is refused here and nowhere else: by the evaluator
+    // the name has been substituted out of every use, and `extend` would
+    // report it as an undefined variable.
+    assert_eq!(
+        resolve_err("alias Ints = list[int]\nextend Ints {\n fn f() {}\n}"),
+        "`Ints` is an alias, so it cannot be extended"
+    );
+}
+

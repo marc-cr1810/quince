@@ -50,7 +50,7 @@ use crate::runtime::class::BUILTINS as BUILTIN_TYPES;
 use crate::runtime::env::Globals;
 use crate::runtime::heap::{Heap, ObjId, Object};
 use crate::runtime::value::Value;
-use crate::sema::resolve::{Prior, PriorClass};
+use crate::sema::resolve::{Alias, Prior, PriorClass};
 use crate::syntax::ast::{Slot, Stmt, StmtKind};
 use crate::syntax::token::TokenKind;
 
@@ -314,6 +314,24 @@ pub struct Interp {
     /// A root, because the functions in here are heap objects reachable from
     /// nowhere else — the class does not hold them, which is the entire point.
     extensions: HashMap<(ObjId, String), Value>,
+    /// Every alias declared at the top level of each module, already expanded
+    /// — v0.9 §3.7.
+    ///
+    /// The evaluator has nothing to *do* with an alias: it names a type, binds
+    /// no value, and is gone from every use before this runs. It is kept anyway
+    /// because a prompt needs it. Every other declaration a later entry can
+    /// reach is read back out of the heap by [`Interp::declarations`], and an
+    /// alias is the one that leaves nothing there to read — so without this,
+    /// `alias S = int` on one line and `let x: S = 1` on the next was a name
+    /// the second line had never heard of.
+    ///
+    /// Keyed by module scope for the reason `module_private` is: a module's
+    /// statements run through the same evaluator, and an alias it declares is
+    /// its own. Without the key, `import util` at a prompt would quietly put
+    /// every alias in that file into scope on the following line.
+    ///
+    /// Not a root and never will be: a `TypeExpr` holds no handles.
+    aliases: HashMap<(ObjId, String), Alias>,
     /// The header the construction now in flight should stamp on the instance
     /// it is about to allocate — v0.9 §3.1.
     ///
@@ -450,6 +468,7 @@ impl Interp {
             input,
             rng: stdlib::DEFAULT_SEED,
             extensions: HashMap::new(),
+            aliases: HashMap::new(),
             pending: None,
             type_bindings: Vec::new(),
             stdlib_modules: HashMap::new(),
@@ -591,6 +610,15 @@ impl Interp {
                     );
                 }
                 _ => {}
+            }
+        }
+        // The starting module's own, which is the scope a prompt entry runs
+        // in. Unlike the two above there is nothing else to filter for: an
+        // alias has no run-time form for a value to disagree with, so what was
+        // declared there *is* what the next entry can reach.
+        for ((module, name), alias) in &self.aliases {
+            if *module == self.globals {
+                prior.aliases.insert(name.clone(), alias.clone());
             }
         }
         prior

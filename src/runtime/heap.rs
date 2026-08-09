@@ -655,6 +655,7 @@ mod tests {
         let scope = heap.alloc(Object::Env(Env::new(None, 1)));
         let func = heap.alloc(Object::Function(Function {
             owner: None,
+            constraint: None,
             decl: std::rc::Rc::new(crate::syntax::ast::FnDecl {
                 visibility: crate::syntax::ast::Visibility::Public,
                 returns: None,

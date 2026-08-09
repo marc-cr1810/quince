@@ -1,0 +1,58 @@
+# v0.9 §3.7 — generic type aliases.
+#
+# v0.7 gave an alias without parameters. With generics it takes them, and it is
+# still a resolution-time substitution introducing no type: `Pair[float]` and
+# `tuple[float, float]` are one type, and `is` cannot tell them apart.
+
+alias Pair[T] = tuple[T, T]
+alias Lookup[V] = dict[string, V]
+
+let coords: Pair[float] = (1.0, 2.0)
+let scores: Lookup[int] = {"alice": 95}
+print(coords)
+print(scores)
+
+# The whole of what "introduces no type" means, asked directly.
+print(coords is tuple[float, float])
+print(coords is Pair[float])
+print(scores is dict[string, int])
+
+# One alias may name another, and the argument reaching the inner one is the
+# *expanded* form — `Row[Score]` binds `V` to `int`, not to a name about to
+# disappear.
+alias Score = int
+alias Row[V] = dict[string, Pair[V]]
+
+let row: Row[Score] = {"a": (1, 2)}
+print(row)
+print(row is dict[string, tuple[int, int]])
+
+# The two qualifiers belong to the use site and combine with whatever the
+# declaration wrote.
+let maybe: Pair[int]? = nil
+print(maybe)
+
+# An alias in every position an annotation goes, not only a `let`.
+fn swap(p: Pair[int]): Pair[int] {
+    let (a, b) = p
+    return (b, a)
+}
+
+print(swap((1, 2)))
+
+# A parameter of an alias is a name for a type and nothing more, so an argument
+# may itself be a generic class.
+class Box[T] {
+    public let item: T = 0
+    public op init() {}
+}
+
+alias Boxes[T] = list[Box[T]]
+let boxed: Boxes[int] = []
+print(boxed)
+print(boxed is list[Box[int]])
+
+# And the unparameterised form v0.7 gave still means exactly what it did.
+alias ScoreTable = dict[string, int]
+let table: ScoreTable = {"a": 1}
+print(table)

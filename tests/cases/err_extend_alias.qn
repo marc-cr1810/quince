@@ -1,0 +1,6 @@
+# An alias abbreviates a type and introduces none, so there is nothing under the
+# name for an extension to add to.
+alias Ints = list[int]
+extend Ints {
+    fn f(): int { return 1 }
+}

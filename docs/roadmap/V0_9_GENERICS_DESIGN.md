@@ -664,6 +664,86 @@ should stop moving before a fourth parameter form joins it.
 
 **Tranche 6 — `extend list[T]` and generic aliases.** The two small ones.
 
+> **Small, and they met in the middle.** §3.6 and §3.7 share no machinery on
+> paper. They share one in practice: an alias is a name for a type, an `extend`
+> head *is* a type now, and the pass that removes the first is the pass that has
+> to hold the second to an arity. Both landed in `sema/resolve/alias.rs` for that
+> reason, and `extend Ints` — where `Ints` is an alias — is refused there because
+> it is the last place in the compiler that knows the name was ever an alias.
+>
+> **The `extend` head is read as a type, and everything new falls out of that.**
+> One call to the type grammar replaces one identifier, so the arguments cost
+> nothing to parse and the constraint arrives as an ordinary `TypeExpr` that the
+> arity, bound, and dict-key checks every annotation goes through already accept.
+> That is the whole of §3.6's "the resolver still refuses a block whose target is
+> not a real instantiation" — no second check, just the first one reaching one
+> more place. What the wider grammar then admits and this refuses is `extend
+> int?` and `extend const list`: both are words about a *boundary a value
+> crosses*, and an extension is not one.
+>
+> **The constraint lives on the allocated function, not on the declaration.** It
+> is written once per block and a block holds declarations, so the declaration
+> looks like the place for it — but it is a fact about *how this function came to
+> be on the class*, not about the function, and the same declaration reached
+> another way would not carry it. The deciding argument is duplication: the alias
+> pass rewrites the `extend` statement, and a copy inside each declaration would
+> be a second thing to remember to rewrite.
+>
+> **A constrained block may not add an `op`.** The language reaches an `op`
+> through the class's slot table, which is found from the *type* and knows
+> nothing about what a particular value's header says — so the constraint could
+> never be consulted, and installing one would be a promise that silently never
+> held. §3.6 checks the receiver, and an `op` has no receiver to check.
+>
+> **The receiver is a third way to tell two declarations apart, and §3.5's rule
+> now says so.** `extend list[int]` and `extend list[string]` may both declare
+> `total()` with identical parameter lists, because the header decides which one
+> a call reaches long before the arguments are looked at. Two blocks naming the
+> *same* instantiation are still compared exactly as two unconstrained ones are.
+>
+> **A container nothing described is not an instantiation of anything**, so
+> `[1, 2].sum_squares()` is refused where `let xs: list[int] = [1, 2]` followed by
+> `xs.sum_squares()` is not. That is sharp, and it is the answer §3.9 already
+> gives: `[1, 2] is list[int]` is false for the same value for the same reason.
+> Disagreeing with `is` here would be worse than the sharpness.
+>
+> **An alias parameter is a plain `T` and nothing else.** The parameter list is
+> read by the grammar a class uses — one form, so the two cannot drift apart in
+> what they accept — and then held to the one shape an alias can honour. A bound
+> would constrain nothing, since an alias declares no type to hold an argument
+> against; a `const N` would be a value with no body to read it; a pack stands for
+> however many arguments are left, and a substitution has no arity of its own to
+> compare that against. Refused rather than ignored: ignoring a bound is exactly
+> the silence that makes somebody believe it held.
+>
+> **A use of a parameterised alias writes every argument**, which is deliberately
+> *not* the rule §3.1 gives a class, where writing none means the arguments are
+> unconstrained. A class has a body that a bare `T` can stand unsubstituted in.
+> An alias has only the substitution, so a `Pair` with nothing bound to its `T`
+> would expand to a `tuple[T, T]` naming something that does not exist.
+>
+> **An alias now survives a prompt entry, which it never had.** `alias S = int`
+> on one line and `let x: S = 1` on the next was a name the second line had never
+> heard of — a v0.7 bug that parameters only made easier to hit. The cause is a
+> real asymmetry rather than an oversight: the prior world is deliberately read
+> off what is *bound* rather than off accumulated text, and an alias is the one
+> declaration that binds nothing, so there was nothing in the heap to read it
+> back from. The evaluator keeps the table instead and hands it over with the
+> rest, which preserves the property that argument was protecting — what the next
+> line can reach is what the lines before it actually got as far as declaring.
+> Keyed by module scope, because a module's statements run through the same
+> evaluator and `import util` must not put that file's aliases into scope at the
+> prompt. Redeclaring one at a prompt replaces it; two in one file is still the
+> mistake it was.
+>
+> **Substitution moved to `sema/types.rs`**, from `interp/generic.rs` where
+> tranche 1 put it. It now has two callers in different halves of the compiler —
+> the evaluator replacing a class's parameters in an annotation, the resolver
+> replacing an alias's in its body — and a second copy of its span and qualifier
+> rules would be a second copy to get wrong. Nothing about the operation changed;
+> §3.4's pack splicing is simply unreachable from the alias side, because a pack
+> cannot be an alias parameter.
+
 **Tranche 7 — function types and literals.** Independent of every tranche above it, and
 last of the language items because nothing here waits on it. It is the one tranche a
 milestone running long could move to v0.11, where generic functions want it anyway.

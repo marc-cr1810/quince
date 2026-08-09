@@ -2237,3 +2237,113 @@ fn destructuring_binds_every_name_and_the_rest_is_a_tuple() {
     let err = interp.run(&program).expect_err("a list does not destructure");
     assert!(err.message.contains("cannot be taken apart"), "{}", err.message);
 }
+
+#[test]
+fn a_constrained_extension_reaches_the_instantiation_it_named() {
+    // §3.6. The receiver's *header* decides, which is why the second binding
+    // is refused and the first is not — both are lists, and only one of them
+    // was described as a list of ints.
+    let interp = run(
+        "extend list[int] { fn total(): int { return len(self) } }\n\
+         let ints: list[int] = [1, 2, 3]\n\
+         let n = ints.total()\n",
+    );
+    assert_eq!(global(&interp, "n"), Some(Value::Int(3)));
+
+    let program = crate::compile(
+        "extend list[int] { fn total(): int { return len(self) } }\n\
+         let names: list[string] = [\"a\"]\n\
+         let n = names.total()\n",
+    )
+    .expect("parses");
+    let mut interp = Interp::with_output(Box::new(Vec::new()));
+    let err = interp
+        .run(&program)
+        .expect_err("the header says the elements are strings");
+    assert_eq!(err.message, "`total` is defined only on `list[int]`");
+}
+
+#[test]
+fn a_constrained_extension_is_refused_late_rather_than_early() {
+    // The point §3.6 makes about *when*: a receiver reached through a
+    // parameter could not have been answered for at resolution, and one
+    // mistake reporting from two places at two times is worse than reporting
+    // late. So the program below compiles and then fails on the call.
+    let program = crate::compile(
+        "extend list[int] { fn total(): int { return len(self) } }\n\
+         fn count(xs: any): int { return xs.total() }\n\
+         let names: list[string] = [\"a\"]\n\
+         let n = count(names)\n",
+    )
+    .expect("parses");
+    let mut interp = Interp::with_output(Box::new(Vec::new()));
+    let err = interp.run(&program).expect_err("the receiver is not one");
+    assert_eq!(err.message, "`total` is defined only on `list[int]`");
+}
+
+#[test]
+fn two_instantiations_may_declare_one_name_with_identical_parameters() {
+    // The pair §3.5 would refuse inside one type, admitted because the
+    // *receiver* tells them apart before the arguments are looked at. Their
+    // parameter lists being identical is the whole test.
+    let interp = run(
+        "extend dict[string, int] { fn describe(): string { return \"counts\" } }\n\
+         extend dict[string, string] { fn describe(): string { return \"labels\" } }\n\
+         let counts: dict[string, int] = {\"a\": 1}\n\
+         let labels: dict[string, string] = {\"a\": \"one\"}\n\
+         let a = counts.describe()\n\
+         let b = labels.describe()\n",
+    );
+    let Some(Value::Str(counts)) = global(&interp, "a") else {
+        panic!("`counts.describe()` should have answered");
+    };
+    let Some(Value::Str(labels)) = global(&interp, "b") else {
+        panic!("`labels.describe()` should have answered");
+    };
+    assert_eq!((&*counts, &*labels), ("counts", "labels"));
+
+    // And two blocks naming the *same* instantiation are compared exactly as
+    // two unconstrained ones are.
+    let program = crate::compile(
+        "extend list[int] { fn f(a: int) {} }\n\
+         extend list[int] { fn f(b: int) {} }\n",
+    )
+    .expect("parses");
+    let mut interp = Interp::with_output(Box::new(Vec::new()));
+    let err = interp.run(&program).expect_err("a call could not tell them apart");
+    assert!(err.message.contains("already declares"), "{}", err.message);
+}
+
+#[test]
+fn an_unconstrained_extension_still_reaches_every_receiver() {
+    // The v0.8 form is not a special case of the v0.9 one — it is the absence
+    // of a constraint, and the absence has to keep costing nothing.
+    let interp = run(
+        "extend list { fn second(): any { return self[1] } }\n\
+         let names: list[string] = [\"a\", \"b\"]\n\
+         let ints: list[int] = [1, 2]\n\
+         let a = names.second()\n\
+         let b = ints.second()\n",
+    );
+    let Some(Value::Str(second)) = global(&interp, "a") else {
+        panic!("`names.second()` should have answered");
+    };
+    assert_eq!(&*second, "b");
+    assert_eq!(global(&interp, "b"), Some(Value::Int(2)));
+}
+
+#[test]
+fn a_constrained_extension_may_not_add_an_op() {
+    // The language reaches an `op` through the class's slot table, which is
+    // found from the type — so the constraint could never be consulted and a
+    // block writing one is refused rather than silently ignored.
+    let program = crate::compile(
+        "class Box[T] { public op init() {} }\n\
+         extend Box[int] { op eq(other: any): bool { return true } }\n",
+    )
+    .expect("parses");
+    let mut interp = Interp::with_output(Box::new(Vec::new()));
+    let err = interp.run(&program).expect_err("an op has no receiver header to read");
+    assert_eq!(err.message, "`op eq` cannot be added to `Box[int]`");
+}
+

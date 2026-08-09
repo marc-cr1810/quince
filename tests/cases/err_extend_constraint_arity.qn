@@ -1,0 +1,5 @@
+# §3.6 — the resolver refuses an `extend` block whose target is not a real
+# instantiation, by the same arity check every annotation goes through.
+extend list[int, string] {
+    fn f(): int { return 1 }
+}

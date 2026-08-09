@@ -1,0 +1,1 @@
+`Bounded` is an alias, so `T` cannot take a bound

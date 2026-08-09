@@ -5,7 +5,7 @@ use crate::error::Result;
 use crate::interp::Interp;
 use crate::runtime::class::Builtin;
 use crate::runtime::heap::{Heap, ObjId};
-use crate::syntax::ast::FnDecl;
+use crate::syntax::ast::{FnDecl, TypeExpr};
 use crate::syntax::token::Span;
 
 /// A user-defined function together with the scope it closed over.
@@ -28,6 +28,20 @@ pub struct Function {
     /// outside the declaration, so it is outside, and giving it the class's own
     /// reach would make `extend` the way around every `private` in the language.
     pub owner: Option<ObjId>,
+    /// The instantiation an `extend` block named, for one that named one —
+    /// `extend list[int]`'s `list[int]`, v0.9 §3.6.
+    ///
+    /// Here rather than on the [`FnDecl`], though it is written once per block
+    /// and the declarations are what a block holds: the constraint is a fact
+    /// about *how this function came to be on the class*, not about the
+    /// function, and the same declaration reached through a different route
+    /// would not carry it. Keeping it on the allocated function also keeps one
+    /// copy — the alias pass rewrites the `extend` statement, and a second copy
+    /// inside each declaration would be a second thing to remember to rewrite.
+    ///
+    /// `None` on everything else, which is every function in every program that
+    /// does not write the brackets.
+    pub constraint: Option<Rc<TypeExpr>>,
 }
 
 /// The signature every builtin implements.

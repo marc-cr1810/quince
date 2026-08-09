@@ -1,6 +1,6 @@
 use super::*;
 use crate::syntax::ast::{
-    BindKind, Expr, ExprKind, FnDecl, Op, Openness, UnaryOp, Visibility,
+    BindKind, Expr, ExprKind, FnDecl, Op, Openness, UnaryOp, Visibility, written_params,
 };
 use crate::syntax::lexer::Lexer;
 
@@ -995,4 +995,73 @@ use crate::syntax::lexer::Lexer;
         assert!(!empty.same_as(&bare), "two types, not one");
         assert_eq!(empty.written(), "tuple[]");
         assert_eq!(bare.written(), "tuple");
+    }
+
+    #[test]
+    fn an_extend_block_may_name_an_instantiation() {
+        // §3.6. The head is read as a type so the arguments can be written, and
+        // `applied` is what says whether any were — `extend list` and
+        // `extend list[]` are not the same block.
+        let program = parse_ok("extend list[int] {\n fn f() {}\n}");
+        let StmtKind::Extend { target, constraint: Some(constraint), .. } = &program[0].kind else {
+            panic!("expected a constrained extension");
+        };
+        assert_eq!(target.name, "list");
+        assert_eq!(constraint.written(), "list[int]");
+
+        let program = parse_ok("extend list {\n fn f() {}\n}");
+        let StmtKind::Extend { target, constraint: None, .. } = &program[0].kind else {
+            panic!("expected an unconstrained extension");
+        };
+        assert_eq!(target.name, "list");
+    }
+
+    #[test]
+    fn the_rest_of_the_type_grammar_means_nothing_on_an_extend_head() {
+        // Reading the head as a type admits `?` and `const`, which are words
+        // about a *position* a value crosses. An extension is not one.
+        assert_eq!(
+            parse_err("extend list[int]? {\n fn f() {}\n}").message,
+            "`?` means nothing on the type an `extend` block names"
+        );
+        assert_eq!(
+            parse_err("extend const list {\n fn f() {}\n}").message,
+            "`const` means nothing on the type an `extend` block names"
+        );
+        assert_eq!(
+            parse_err("extend 16 {\n fn f() {}\n}").message,
+            "expected the name of a type after `extend`"
+        );
+    }
+
+    #[test]
+    fn an_alias_takes_the_one_parameter_form_it_can_honour() {
+        // §3.7. The same parameter grammar a class uses, so the two cannot
+        // drift apart in what they accept — and then held to a plain `T`,
+        // because the other three forms all promise something an alias has no
+        // place to check or read.
+        let program = parse_ok("alias Pair[T] = tuple[T, T]");
+        let StmtKind::Alias { params, ty, .. } = &program[0].kind else {
+            panic!("expected an alias");
+        };
+        assert_eq!(written_params(params), "T");
+        assert_eq!(ty.written(), "tuple[T, T]");
+
+        for (src, refused) in [
+            ("alias A[T: float] = list[T]", "`A` is an alias, so `T` cannot take a bound"),
+            (
+                "alias A[const N: int] = list[int]",
+                "`A` is an alias, so `N` cannot take a `const` parameter",
+            ),
+            ("alias A[Ts...] = tuple[Ts...]", "`A` is an alias, so `Ts` cannot take a pack"),
+        ] {
+            assert_eq!(parse_err(src).message, refused);
+        }
+
+        // And the v0.7 form is unchanged — an empty list, not a missing one.
+        let program = parse_ok("alias ScoreTable = dict[string, int]");
+        let StmtKind::Alias { params, .. } = &program[0].kind else {
+            panic!("expected an alias");
+        };
+        assert!(params.is_empty());
     }

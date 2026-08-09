@@ -15,7 +15,7 @@ use crate::error::{QuinceError, Raised, Result};
 use crate::error::ErrorKind;
 use crate::runtime::dict::KEY_TYPES;
 use crate::sema::resolve::Prior;
-use crate::sema::types::{bound_help, satisfies};
+use crate::sema::types::{bound_help, satisfies, substituted};
 use crate::syntax::ast::{
     Expr, ExprKind, ParamKind, Stmt, StmtKind, TypeExpr, TypeName, TypeParam, written_params,
 };
@@ -40,11 +40,20 @@ pub(super) fn expand(program: &mut [Stmt], prior: &Prior) -> Result<()> {
         }
     }
     parameterised(program, &mut classes);
-    let mut declared = HashMap::new();
+    // The aliases an earlier entry declared, which this one may name as freely
+    // as it names a class an earlier entry declared. They arrive already
+    // expanded — that is what they were rewritten to when *their* entry was
+    // compiled — so a prior alias captures what its body meant at the time,
+    // which is the same thing a prior class's methods do.
+    let mut declared: HashMap<String, Alias> = prior.aliases.clone();
     // In declaration order, kept beside the map. Which alias a cycle is
     // reported at has to be the same on every run, and a `HashMap`'s iteration
     // order is not — `alias A = B` / `alias B = A` blamed whichever the hash
     // happened to yield first.
+    //
+    // This entry's names only, which is also what makes the duplicate refusal
+    // in `collect` mean the right thing: two `alias A` in one file is a
+    // mistake, and a prompt redeclaring one is the ordinary thing to do there.
     let mut order = Vec::new();
     collect(program, &mut declared, &mut order)?;
 
@@ -52,7 +61,7 @@ pub(super) fn expand(program: &mut [Stmt], prior: &Prior) -> Result<()> {
     // is substituted with it, so a use site is rewritten once rather than
     // repeatedly until it settles. This is also where a cycle is found: the
     // resolution of `A` reaches `A`.
-    let mut resolved: HashMap<String, TypeExpr> = HashMap::new();
+    let mut resolved: HashMap<String, Alias> = prior.aliases.clone();
     for name in &order {
         let expanded = resolve_one(name, &declared, &mut Vec::new())?;
         resolved.insert(name.clone(), expanded);
@@ -150,6 +159,24 @@ fn parameterised(stmts: &[Stmt], into: &mut Classes) {
     }
 }
 
+/// One `alias` declaration: what it abbreviates, and the parameters it takes.
+///
+/// The parameters are what v0.9 §3.7 adds and are empty for every alias v0.7
+/// could write. They stay beside the body all the way through, because the
+/// arity of a use site is checked against them at both of the two moments an
+/// alias is read — while another alias is being expanded, and at the use site
+/// itself.
+///
+/// Public because a prompt carries them between entries: an alias binds no
+/// value, so unlike every other declaration there is nothing in the heap for
+/// [`Prior`] to read it back from, and the evaluator keeps the table instead.
+/// See [`Interp::aliases`](crate::interp::Interp).
+#[derive(Clone)]
+pub struct Alias {
+    pub params: Vec<TypeParam>,
+    pub ty: TypeExpr,
+}
+
 /// What a substitution needs to know, threaded as one value.
 ///
 /// Two tables that travel together and are read at the same moment: the second
@@ -158,15 +185,20 @@ fn parameterised(stmts: &[Stmt], into: &mut Classes) {
 /// about when the check happens.
 struct Expansion<'a> {
     /// Each alias, expanded to a form naming no alias.
-    resolved: &'a HashMap<String, TypeExpr>,
+    resolved: &'a HashMap<String, Alias>,
     /// What the program's classes declare. See [`Classes`].
     classes: &'a Classes,
 }
 
 /// Gathers every `alias` declaration, refusing a second one for a name.
+///
+/// A second one *in this compilation*, which `order` is the record of — `into`
+/// may already hold the same name from an earlier prompt entry, and redeclaring
+/// there is the ordinary thing to do. The insert overwrites it, which is what
+/// makes the later line win.
 fn collect(
     stmts: &mut [Stmt],
-    into: &mut HashMap<String, TypeExpr>,
+    into: &mut HashMap<String, Alias>,
     order: &mut Vec<String>,
 ) -> Result<()> {
     for stmt in stmts {
@@ -177,14 +209,21 @@ fn collect(
         if let StmtKind::Alias {
             name,
             name_span,
+            params,
             ty,
             ..
         } = &stmt.kind
         {
-            if into.contains_key(name) {
+            if order.iter().any(|seen| seen == name) {
                 return Err(redeclared(name, *name_span));
             }
-            into.insert(name.clone(), ty.clone());
+            into.insert(
+                name.clone(),
+                Alias {
+                    params: params.clone(),
+                    ty: ty.clone(),
+                },
+            );
             order.push(name.clone());
         }
     }
@@ -194,31 +233,40 @@ fn collect(
 /// One alias, expanded until it names no alias — or a cycle, refused.
 fn resolve_one(
     name: &str,
-    declared: &HashMap<String, TypeExpr>,
+    declared: &HashMap<String, Alias>,
     path: &mut Vec<String>,
-) -> Result<TypeExpr> {
+) -> Result<Alias> {
     if path.iter().any(|seen| seen == name) {
         path.push(name.to_string());
         // Reported at the definition the cycle closes on, which is the one
         // somebody has to change.
-        let span = declared.get(name).map_or(Span::new(0, 0), |ty| ty.span);
+        let span = declared
+            .get(name)
+            .map_or(Span::new(0, 0), |alias| alias.ty.span);
         return Err(cycles(path, span));
     }
-    let Some(ty) = declared.get(name) else {
+    let Some(alias) = declared.get(name) else {
         // Not an alias, so nothing to expand. The name is checked for being a
         // type at all when the annotation is applied.
         unreachable!("only a declared alias is resolved");
     };
     path.push(name.to_string());
-    let expanded = expand_type(ty, declared, path)?;
+    // A parameter of *this* alias is not a name to be expanded — it stands for
+    // whatever a use site writes, and is replaced by [`instantiated`] rather
+    // than looked up. Nothing has to be done to leave it alone: no alias may be
+    // named `T` and also be `T`, since a name declares one thing.
+    let expanded = expand_type(&alias.ty, declared, path)?;
     path.pop();
-    Ok(expanded)
+    Ok(Alias {
+        params: alias.params.clone(),
+        ty: expanded,
+    })
 }
 
 /// Rewrites a type, replacing any alias it names with what that alias means.
 fn expand_type(
     ty: &TypeExpr,
-    declared: &HashMap<String, TypeExpr>,
+    declared: &HashMap<String, Alias>,
     path: &mut Vec<String>,
 ) -> Result<TypeExpr> {
     let mut args = Vec::with_capacity(ty.args.len());
@@ -233,20 +281,82 @@ fn expand_type(
         return Ok(TypeExpr { args, ..ty.clone() });
     }
 
-    // The alias stands where the use site was, so it keeps the use site's span —
-    // a report about `let x: ScoreTable = 1` should underline what was written,
-    // not the declaration somewhere above. The two qualifiers combine rather
-    // than being replaced: `const ScoreTable?` means what it says whatever the
-    // alias was declared as.
     let target = resolve_one(name, declared, path)?;
+    // The arguments handed over are the *expanded* ones — `Pair[Score]` with
+    // `alias Score = int` binds `T` to `int` and not to a name about to
+    // disappear. That is what the walk at the top of this function is for.
+    instantiated(name, &target, &TypeExpr { args, ..ty.clone() })
+}
+
+/// An alias applied to the arguments a use site wrote.
+///
+/// The one place §3.7's "a resolution-time substitution introducing no type"
+/// actually happens. Three things are combined and each comes from a different
+/// side:
+///
+/// - **The body**, from the declaration, with each parameter replaced.
+/// - **The span**, from the use, so a report about `let x: ScoreTable = 1`
+///   underlines what was written and not the declaration somewhere above.
+/// - **The two qualifiers**, combined rather than replaced: `const Pair[int]?`
+///   means what it says whatever the alias was declared as.
+///
+/// An alias with no parameters takes this path too and comes out of it
+/// unchanged, since [`substituted`] with no bindings is a clone — so the v0.7
+/// form is not a second case here, it is this one with an empty list.
+fn instantiated(name: &str, alias: &Alias, at: &TypeExpr) -> Result<TypeExpr> {
+    if alias.params.len() != at.args.len() {
+        return Err(wrong_arity(name, alias, at));
+    }
+    let bindings: Vec<(String, TypeExpr)> = alias
+        .params
+        .iter()
+        .map(|param| param.name.clone())
+        .zip(at.args.iter().cloned())
+        .collect();
+    let target = substituted(&alias.ty, &bindings);
     Ok(TypeExpr {
         name: target.name,
         applied: target.applied,
         args: target.args,
-        nullable: ty.nullable || target.nullable,
-        frozen: ty.frozen || target.frozen,
-        span: ty.span,
+        nullable: at.nullable || target.nullable,
+        frozen: at.frozen || target.frozen,
+        span: at.span,
     })
+}
+
+/// A use of an alias that wrote the wrong number of arguments.
+///
+/// Deliberately *not* the rule [`check_arguments`] applies to a class, where
+/// writing none at all is allowed and means the arguments are unconstrained.
+/// A class has a body that a bare `T` can stand unsubstituted in; an alias has
+/// only the substitution, and a `Pair` with nothing bound to its `T` would
+/// expand to a `tuple[T, T]` naming something that does not exist. So every
+/// parameter needs an argument, and there is nothing to infer one from.
+fn wrong_arity(name: &str, alias: &Alias, at: &TypeExpr) -> Raised {
+    let takes = match alias.params.len() {
+        0 => "takes no type arguments".to_string(),
+        count => format!(
+            "takes {count} type {}",
+            if count == 1 { "argument" } else { "arguments" }
+        ),
+    };
+    let written = match at.args.len() {
+        0 => "none were".to_string(),
+        1 => "1 was".to_string(),
+        count => format!("{count} were"),
+    };
+    let error = refused(format!("`{name}` {takes}, but {written} written"), at.span);
+    match alias.params.is_empty() {
+        true => error.with_help(format!(
+            "`{name}` abbreviates `{}`, which is already complete",
+            alias.ty.written()
+        )),
+        false => error.with_help(format!(
+            "`{name}` declares `[{}]`, and an alias is a substitution — every parameter needs \
+             an argument, because there is no body for an unwritten one to stand in",
+            written_params(&alias.params)
+        )),
+    }
 }
 
 /// A declaration error about a type, worded where the type was written.
@@ -522,7 +632,36 @@ fn substitute_stmt(stmt: &mut Stmt, ctx: &Expansion<'_>) -> Result<()> {
                 substitute_expr(&mut field.value, ctx)?;
             }
         }
-        StmtKind::Extend { methods, .. } => {
+        StmtKind::Extend {
+            target,
+            target_span,
+            methods,
+            constraint,
+        } => {
+            // An alias abbreviates a type and declares none, so there is
+            // nothing under the name for an extension to add to. Caught here
+            // because this is the only pass that knows the name is an alias:
+            // by the evaluator it has been substituted out of every use, and
+            // `extend` would report it as an undefined variable.
+            if ctx.resolved.contains_key(target.name.as_str()) {
+                return Err(refused(
+                    format!("`{}` is an alias, so it cannot be extended", target.name),
+                    *target_span,
+                )
+                .with_help(format!(
+                    "`{}` abbreviates a type and introduces none — extend the type it \
+                     abbreviates, and every use of the alias reaches the method",
+                    target.name
+                )));
+            }
+            // §3.6's "the resolver still refuses an `extend list[int]` block
+            // whose target is not a real instantiation". Nothing extra is
+            // needed to say it: `substitute` ends in [`check_arguments`], which
+            // is the same arity, bound, and dict-key check every annotation in
+            // the program goes through.
+            if let Some(constraint) = constraint {
+                substitute(constraint, ctx)?;
+            }
             for decl in methods {
                 substitute_fn(decl, ctx)?;
             }
@@ -678,14 +817,11 @@ fn substitute(ty: &mut TypeExpr, ctx: &Expansion<'_>) -> Result<()> {
     if let TypeName::Named(name) = &ty.name
         && let Some(target) = ctx.resolved.get(name.as_str())
     {
-        *ty = TypeExpr {
-            name: target.name.clone(),
-            applied: target.applied,
-            args: target.args.clone(),
-            nullable: ty.nullable || target.nullable,
-            frozen: ty.frozen || target.frozen,
-            span: ty.span,
-        };
+        // The same [`instantiated`] an alias naming another alias goes through,
+        // so `Pair[float]` means one thing whether it is written in an
+        // annotation or inside a second alias's body. Its arity refusal is the
+        // one that fires here.
+        *ty = instantiated(name, target, ty)?;
     }
     check_arguments(ty, ctx.classes)
 }

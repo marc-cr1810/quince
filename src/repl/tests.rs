@@ -516,3 +516,72 @@ fn a_generic_class_keeps_its_parameters_across_entries() {
         "`Holder` takes 1 argument, but 2 were written"
     );
 }
+
+#[test]
+fn an_alias_declared_on_one_line_is_a_type_on_the_next() {
+    // Every other declaration a later entry can reach is read back out of the
+    // heap, and an alias is the one that leaves nothing there to read: it names
+    // a type, binds no value, and has no run-time existence at all. So the
+    // evaluator keeps the table and hands it over with the rest — without which
+    // this was a name the second line had never heard of.
+    assert_eq!(
+        entries(&["alias Score = int", "let x: Score = 1", "x"]),
+        Some(Value::Int(1))
+    );
+
+    // Including a parameterised one, and including one that names another the
+    // session already has. v0.9 §3.7.
+    assert_eq!(
+        entries(&[
+            "alias Score = int",
+            "alias Pair[T] = tuple[T, T]",
+            "alias Row[V] = dict[string, Pair[V]]",
+            "let r: Row[Score] = {\"a\": (1, 2)}",
+            "r is dict[string, tuple[int, int]]",
+        ]),
+        Some(Value::Bool(true))
+    );
+}
+
+#[test]
+fn redeclaring_an_alias_at_a_prompt_replaces_it() {
+    // Two `alias A` in one file is a mistake with no reading of the second that
+    // is right. At a prompt it is the ordinary thing to do — the same
+    // distinction a redefined function makes — so the refusal is about *this*
+    // compilation and the later line simply wins.
+    assert_eq!(
+        entries(&[
+            "alias Score = int",
+            "alias Score = string",
+            "let x: Score = \"top\"",
+            "x is string",
+        ]),
+        Some(Value::Bool(true))
+    );
+    assert_eq!(
+        refused(&["alias Score = int\nalias Score = string"]),
+        "`Score` is already an alias"
+    );
+}
+
+#[test]
+fn an_alias_is_carried_from_the_top_level_and_nowhere_else() {
+    // What a prompt entry can reach is what the entries before it declared at
+    // the top level, which is exactly the rule `alias::expand` applies when it
+    // collects them: an alias is file-wide, and nothing in the language scopes
+    // a *type* to a block.
+    let mut interp = Interp::new();
+    let program = quince::compile("alias Score = int").expect("compiles");
+    interp.run_repl(&program).expect("it runs");
+    assert!(interp.declarations().aliases.contains_key("Score"));
+
+    // The body is *run*, so this is the statement reaching the evaluator and
+    // being turned away rather than never arriving. Without the check it would
+    // also leave one dead entry in the table per call, keyed by a scope that no
+    // longer exists.
+    let mut interp = Interp::new();
+    let program =
+        quince::compile("fn f() { alias Nested = int }\nf()\nf()").expect("compiles");
+    interp.run_repl(&program).expect("it runs");
+    assert!(interp.declarations().aliases.is_empty());
+}

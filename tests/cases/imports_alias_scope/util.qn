@@ -1,0 +1,11 @@
+# An alias is file-wide, and a module is a file. Nothing exports one: it names
+# a type and binds no value, so there is no name for `import` to carry.
+alias Score = int
+
+public fn best(scores: list[Score]): Score {
+    let top = 0
+    for s in scores {
+        if s > top { top = s }
+    }
+    return top
+}

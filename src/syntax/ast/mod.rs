@@ -404,6 +404,14 @@ pub enum StmtKind {
         name: String,
         /// Where the name was written, for a report about the declaration.
         name_span: Span,
+        /// `alias Pair[T] = tuple[T, T]`'s `T` — v0.9 §3.7. Empty for the
+        /// unparameterised alias v0.7 gave, which is every alias written
+        /// before this milestone.
+        ///
+        /// Only [`ParamKind::Type`] with no bound reaches here; the parser
+        /// refuses the other forms, because an alias is substituted away
+        /// before anything could check a bound or read a value.
+        params: Vec<TypeParam>,
         ty: TypeExpr,
         /// Whether an importing module sees it.
         visibility: Visibility,
@@ -425,6 +433,16 @@ pub enum StmtKind {
         /// the whole body — and a report about the *type* should underline the
         /// word that names it, not the twenty lines that follow.
         target_span: Span,
+        /// `extend list[int]`'s `list[int]` — v0.9 §3.6. `None` when no
+        /// brackets were written, which is every `extend` before this
+        /// milestone and every one that means "on all of them".
+        ///
+        /// The whole type and not just the arguments, so that the resolver can
+        /// hand it to the same arity and bound checks an annotation goes
+        /// through, and so that a report can quote it back as written. Its head
+        /// is `target`'s name by construction — the parser reads one word and
+        /// builds both.
+        constraint: Option<TypeExpr>,
         /// Never an `op`, which the parser refuses. An extension may add to a
         /// type; it may not change how the language dispatches on it.
         methods: Vec<Rc<FnDecl>>,

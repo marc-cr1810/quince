@@ -103,6 +103,12 @@ impl Resolver {
                 target,
                 methods,
                 target_span: _,
+                // Nothing to resolve and nothing to bring into scope. §3.6's
+                // constraint names an *instantiation* — `list[int]`, not
+                // `list[T]` — so it introduces no parameter a body could
+                // mention, and `alias::expand` has already held it to the arity
+                // and bounds every other annotation is held to.
+                constraint: _,
             } => {
                 // Read like any other name, which is what lets `extend int` and
                 // `extend Money` take one path: a builtin type is a global holding

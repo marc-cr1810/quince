@@ -831,11 +831,19 @@ impl Parser {
     /// Parsed like a binding and resolved like nothing: an alias declares a
     /// *name for a type*, so there is no value, no slot, and nothing for the
     /// evaluator to run. The resolver substitutes it and the statement is gone.
+    ///
+    /// v0.9 §3.7 gives it a parameter list, read by the same [`Self::type_params`]
+    /// a class uses — one grammar for one form, so `alias Pair[T]` and
+    /// `class Pair[T]` cannot drift apart in what they accept. What an alias
+    /// then refuses is checked here rather than there; see
+    /// [`Self::check_alias_params`].
     pub(super) fn alias_stmt(&mut self) -> Result<Stmt> {
         let start = self.peek().span;
         let modifiers = self.modifiers("an alias")?;
         self.advance();
         let (name, name_span) = self.expect_ident("after `alias`")?;
+        let params = self.type_params(&name)?;
+        Self::check_alias_params(&name, &params)?;
         self.expect(TokenKind::Assign, "in an alias")?;
         let ty = self.type_expr()?;
         let span = start.to(ty.span);
@@ -845,12 +853,54 @@ impl Parser {
             kind: StmtKind::Alias {
                 name,
                 name_span,
+                params,
                 ty,
                 visibility: modifiers.visibility,
                 doc: modifiers.doc,
             },
             span,
         })
+    }
+
+    /// Holds an alias's parameter list to the one form an alias can honour.
+    ///
+    /// A plain `T`, and nothing else. The other three forms all promise
+    /// something that needs a place to be checked or read, and an alias has
+    /// none: it is gone by the time the resolver has an opinion about a type,
+    /// so a bound would constrain nothing, a `const N` would be a value no body
+    /// exists to read, and a pack would take a number of arguments that the
+    /// substitution has no arity of its own to compare against.
+    ///
+    /// Refused rather than ignored, because ignoring a bound is exactly the
+    /// silence that makes somebody believe it held.
+    fn check_alias_params(name: &str, params: &[TypeParam]) -> Result<()> {
+        for param in params {
+            let (what, help) = match &param.kind {
+                ParamKind::Type { bound: None } => continue,
+                ParamKind::Type { bound: Some(_) } => (
+                    "a bound",
+                    "an alias abbreviates a type and declares none, so there is nothing for a \
+                     bound to hold an argument to — put it on the class the alias names",
+                ),
+                ParamKind::Const { .. } => (
+                    "a `const` parameter",
+                    "a const parameter is a value a body reads, and an alias has no body — \
+                     write it on the class this alias abbreviates",
+                ),
+                ParamKind::Pack => (
+                    "a pack",
+                    "an alias is a substitution with one argument per parameter, and a pack \
+                     stands for however many are left — write `tuple[…]` at the use site \
+                     instead",
+                ),
+            };
+            return Err(declaration(
+                format!("`{name}` is an alias, so `{}` cannot take {what}", param.name),
+                param.span,
+            )
+            .with_help(help));
+        }
+        Ok(())
     }
 
     /// `class Point { … }`, with an optional modifier in front of it.
@@ -953,9 +1003,44 @@ impl Parser {
     /// Shaped like a class body with the two halves a class has and an extension
     /// does not: no name to bind, and no `extends` clause, because an extension
     /// declares no type for anything to descend from.
+    ///
+    /// v0.9 §3.6 lets the type carry arguments — `extend list[int]` — so the
+    /// head is read as a type rather than as an identifier. What that admits
+    /// and this then refuses is the rest of the type grammar: `extend int?` and
+    /// `extend const list` are words about a *position*, and an extension is
+    /// not one. The head still has to be a plain name, since the block adds
+    /// methods to the class that name holds.
     pub(super) fn extend_stmt(&mut self) -> Result<Stmt> {
         let start = self.advance().span;
-        let (target, target_span) = self.expect_ident("after `extend`")?;
+        let ty = self.type_expr()?;
+        let target_span = ty.span;
+        let TypeName::Named(name) = &ty.name else {
+            return Err(declaration(
+                "expected the name of a type after `extend`",
+                target_span,
+            )
+            .with_help(
+                "an `extend` block adds methods to a type that already exists, so what follows \
+                 the word is the name that holds one",
+            ));
+        };
+        for (written, what) in [(ty.nullable, "?"), (ty.frozen, "const")] {
+            if written {
+                return Err(declaration(
+                    format!("`{what}` means nothing on the type an `extend` block names"),
+                    target_span,
+                )
+                .with_help(format!(
+                    "`{what}` says what may cross a boundary — an extension is not one, it adds \
+                     methods to `{name}` itself"
+                )));
+            }
+        }
+        let target = Var::new(name.clone());
+        // The brackets and not the arguments, so that `extend tuple[]` — the
+        // empty product — is a constraint and `extend tuple` is not. §3.5's
+        // `applied` means the same thing here it means in an annotation.
+        let constraint = ty.applied.then_some(ty);
 
         self.expect(TokenKind::LBrace, "after the type being extended")?;
 
@@ -986,8 +1071,9 @@ impl Parser {
 
         Ok(Stmt {
             kind: StmtKind::Extend {
-                target: Var::new(target),
+                target,
                 target_span,
+                constraint,
                 methods,
             },
             span: start.to(end),
