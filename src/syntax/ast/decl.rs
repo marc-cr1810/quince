@@ -217,6 +217,14 @@ pub enum ParamKind {
         /// relation in the language and §3.2 exists partly to say so.
         bound: Option<TypeExpr>,
     },
+    /// `[Ts...]` — a variadic type pack. §3.4.
+    ///
+    /// Carries nothing, unlike the two beside it. A pack has no bound and no
+    /// type: what it *is* is "however many arguments are left", and the rules
+    /// that make it usable — one per list, in last position — are about the
+    /// list rather than about this parameter, so they are enforced where the
+    /// list is read.
+    Pack,
     /// `[const N: int]` — a compile-time *value* parameter. §3.3.
     Const {
         /// The type of the value, not a bound on a type. `int`, `bool`, or
@@ -246,12 +254,18 @@ impl TypeParam {
     pub fn bound(&self) -> Option<&TypeExpr> {
         match &self.kind {
             ParamKind::Type { bound } => bound.as_ref(),
-            ParamKind::Const { .. } => None,
+            ParamKind::Const { .. } | ParamKind::Pack => None,
         }
     }
 
     pub fn is_const(&self) -> bool {
         matches!(self.kind, ParamKind::Const { .. })
+    }
+
+    /// Whether this is `Ts...`, which stands for however many arguments are
+    /// left rather than for one. §3.4.
+    pub fn is_pack(&self) -> bool {
+        matches!(self.kind, ParamKind::Pack)
     }
 
     /// How the declaration wrote it, for a report quoting the list back.
@@ -262,8 +276,22 @@ impl TypeParam {
                 format!("{}: {}", self.name, bound.written())
             }
             ParamKind::Const { ty } => format!("const {}: {}", self.name, ty.written()),
+            ParamKind::Pack => format!("{}...", self.name),
         }
     }
+}
+
+/// A parameter list as the declaration wrote it — `T, U: float`, `Ts...`.
+///
+/// Beside [`TypeParam::written`] rather than at either of the two places that
+/// quote a list back, because the resolver and the evaluator both refuse an
+/// argument count and both name the declaration when they do.
+pub fn written_params(params: &[TypeParam]) -> String {
+    params
+        .iter()
+        .map(TypeParam::written)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// A type as the program wrote it.
@@ -282,6 +310,17 @@ pub struct TypeExpr {
     pub name: TypeName,
     /// `list[int]`'s `int`, in the order written.
     pub args: Vec<TypeExpr>,
+    /// Whether a bracket pair was written at all.
+    ///
+    /// Not derivable from [`TypeExpr::args`], and v0.9 §3.5 is why: a tuple's
+    /// arity is part of its type, so `tuple[]` is the empty product and `tuple`
+    /// is the shorthand admitting any tuple — two types with no arguments
+    /// between them. Every other container reads the two alike, because their
+    /// arity is not a type-level fact and `list` has always meant `list[any?]`.
+    ///
+    /// True exactly when `[` was read, so everything that synthesizes a type
+    /// sets it from whether it has arguments to write.
+    pub applied: bool,
     /// Whether a `?` followed it, admitting `nil`.
     pub nullable: bool,
     /// Whether `const` preceded it, freezing the value deeply as it crosses the
@@ -348,6 +387,21 @@ pub enum TypeName {
     /// `nullable` — the parser produces neither, since `16[…]` and `16?` are
     /// not forms.
     Const(ConstArg),
+    /// `Ts...` — the pack named `Ts`, expanded where it is written. §3.4.
+    ///
+    /// Here for the reason [`TypeName::Const`] is here, and it is the same
+    /// reason twice: a pack occupies a *name* position — `tuple[Ts...]` writes
+    /// it where `int` would go — so putting it where a name goes leaves every
+    /// walk over [`TypeExpr::args`] intact. What is different is that one of
+    /// these stands for several types rather than for one, so the handful of
+    /// places that ask what a name means have to *splice* rather than replace:
+    /// see [`substituted`].
+    ///
+    /// Carries the parameter's name and not what it is bound to, because a use
+    /// site is written long before there is a binding to read.
+    ///
+    /// [`substituted`]: crate::interp::generic
+    Pack(String),
     /// `any`, or `_`, which are two spellings of one type.
     ///
     /// One variant and not two, because the difference is only how it was
@@ -388,7 +442,12 @@ impl TypeExpr {
     /// `xs is list[int]` is still true — the list is a list of ints whatever the
     /// name that held it was allowed to be.
     pub fn same_args_as(&self, other: &TypeExpr) -> bool {
-        self.args.len() == other.args.len()
+        // `applied` first, because for a tuple it *is* the difference: `tuple`
+        // and `tuple[]` both have no arguments and are not one type. Everywhere
+        // else the two agree already, since anything synthesizing a type sets
+        // the flag from whether it has arguments to write.
+        self.applied == other.applied
+            && self.args.len() == other.args.len()
             && self
                 .args
                 .iter()
@@ -408,9 +467,15 @@ impl TypeExpr {
         match &self.name {
             TypeName::Named(name) => text.push_str(name),
             TypeName::Const(value) => text.push_str(&value.written()),
+            TypeName::Pack(name) => {
+                text.push_str(name);
+                text.push_str("...");
+            }
             TypeName::Any => text.push_str("any"),
         }
-        if !self.args.is_empty() {
+        // The brackets go in when they were written, empty ones included:
+        // `tuple[]` reading back as `tuple` would quote a different type.
+        if self.applied {
             text.push('[');
             for (index, arg) in self.args.iter().enumerate() {
                 if index > 0 {

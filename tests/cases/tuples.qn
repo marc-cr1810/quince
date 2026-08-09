@@ -1,0 +1,55 @@
+## Tuples: literals, indexing, equality, iteration, and the annotation.
+## v0.9 §3.5.
+
+let point: tuple[float, float, string] = (12.5, 45.0, "GPS_COORD_1")
+print(point)
+print(len(point))
+print(point[0], point[2], point[-1])
+
+let record: tuple[int, string, bool, float] = (101, "Alice", true, 3.14)
+print(record)
+
+# A single-element tuple needs a trailing comma, because `(42)` is an int.
+let single: tuple[int] = (42,)
+let empty: tuple[] = ()
+print(single, empty)
+print(len(single), len(empty))
+
+# Arity is part of the type, and `is` answers in one comparison.
+print(point is tuple[float, float, string])
+print(point is tuple[float, float])
+print(point is tuple[])
+print(point is tuple)
+print(empty is tuple[])
+
+# Equality is elementwise, and a tuple is never a list.
+print((1, 2) == (1, 2))
+print((1, 2) == (1, 2, 3))
+print((1, 2) == (1, 3))
+
+# Everything a sequence answers, less the write.
+print(2 in (1, 2, 3))
+print(9 in (1, 2, 3))
+for x in (1, "two", true) {
+    print(x)
+}
+print(type(point))
+
+# `float` widens an int, one level down, as it does for a list.
+let widened: tuple[float, float] = (1, 2)
+print(widened)
+
+# A tuple nests, and holds whatever a value can be.
+let nested: tuple[tuple[int, int], list[int]] = ((1, 2), [3, 4])
+print(nested)
+
+# A tuple iterates, so the list of what it holds is a thing to ask for. The
+# other direction is not a conversion: a list does not say what its arity is.
+print(list((1, "two", true)))
+
+# An empty tuple is falsy, as every other empty collection is.
+if empty {
+    print("unreachable")
+} else {
+    print("() is falsy")
+}

@@ -1,0 +1,16 @@
+CustomTuple(101, "Bob", true)
+3
+CustomTuple(101, "Bob", true)
+true
+false
+true
+101 Bob
+CustomTuple() 0
+true
+false
+CustomTuple(3, 4) true
+CustomTuple(1, "two", 3.0) 3
+pt(3, true)
+true
+false
+alone()

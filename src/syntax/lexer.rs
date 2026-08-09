@@ -76,6 +76,14 @@ impl<'a> Lexer<'a> {
                 '[' => TokenKind::LBracket,
                 ']' => TokenKind::RBracket,
                 ',' => TokenKind::Comma,
+                // Three characters before one, so `Ts...` and `(h, ...t)` are a
+                // spread rather than a member access of a member access. v0.10's
+                // `..` slots in between the two arms.
+                '.' if self.peek() == Some('.') && self.peek_next() == Some('.') => {
+                    self.advance();
+                    self.advance();
+                    TokenKind::DotDotDot
+                }
                 '.' => TokenKind::Dot,
                 ':' => TokenKind::Colon,
                 // Maximal munch, and the order matters: `int??` has to lex as a

@@ -1,0 +1,4 @@
+# §3.5 — a tuple is immutable, which is what makes it a value rather than a
+# short list. There is no `Heap::tuple_mut` for this to reach.
+let t = (1, 2)
+t[0] = 5

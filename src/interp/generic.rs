@@ -29,6 +29,7 @@ use crate::runtime::value::Value;
 use crate::sema::types::{bound_help, satisfies};
 use crate::syntax::ast::{
     CallArg, ConstArg, Expr, ExprKind, ParamKind, Slot, TypeExpr, TypeName, TypeParam, Var,
+    written_params,
 };
 use crate::syntax::token::Span;
 
@@ -81,11 +82,19 @@ impl Interp {
                  write `{name}(…)`"
             )));
         }
-        if type_args.len() != params.len() {
-            let (wanted, got) = (params.len(), type_args.len());
+        // A pack takes its own position and every one after it, so the list it
+        // ends is a minimum rather than a count. §3.4, and `fixed` is the
+        // number of parameters before it — which is `params.len()` when there
+        // is no pack, so the two cases are one comparison.
+        let pack = pack_at(&params);
+        let fixed = pack.unwrap_or(params.len());
+        let short = type_args.len() < fixed;
+        if short || (pack.is_none() && type_args.len() != fixed) {
+            let (wanted, got) = (fixed, type_args.len());
+            let at_least = if pack.is_some() { "at least " } else { "" };
             return Err(QuinceError::new(
                 format!(
-                    "`{name}` takes {wanted} type {}, got {got}",
+                    "`{name}` takes {at_least}{wanted} type {}, got {got}",
                     plural(wanted, "argument")
                 ),
                 span,
@@ -98,14 +107,20 @@ impl Interp {
         let mut bound = Vec::with_capacity(values.len());
         for (index, value) in values.iter().enumerate() {
             let at = type_args[index].span;
-            let arg = self.as_argument(value, &type_args[index], &name, &params[index], env, at)?;
+            // Every argument at or past the pack's position belongs to it, so
+            // they are all read as that one parameter — which is what makes the
+            // reified list flat: `CustomTuple[int, string, bool]` records three
+            // arguments, and `is` compares them one by one with no idea a pack
+            // was involved.
+            let param = &params[index.min(fixed)];
+            let arg = self.as_argument(value, &type_args[index], &name, param, env, at)?;
             // §3.2's bound, checked here as well as at resolution — not instead
             // of it. An explicit argument list is an *expression*, so the
             // resolver never sees it as a type and cannot check it; an
             // annotation is a type, and checking it here would mean waiting for
             // a construction to report a mistake the source already showed.
             // Two places, because there are genuinely two ways in.
-            if let Some(bound) = params[index].bound()
+            if let Some(bound) = param.bound()
                 && !satisfies(bound, &arg, &|name, ancestor| {
                     self.descends_by_name(name, ancestor)
                 })
@@ -119,7 +134,7 @@ impl Interp {
                     at,
                 )
                 .with_kind(ErrorKind::Type)
-                .with_help(bound_help(&name, &params[index].name, bound)));
+                .with_help(bound_help(&name, &param.name, bound)));
             }
             bound.push(arg);
         }
@@ -194,6 +209,27 @@ impl Interp {
         let TypeName::Named(name) = &ty.name else {
             return Ok(Value::Nil);
         };
+        // A tuple, whose arity is settled by the time this runs even though it
+        // was not where the field was written — which is the whole reason the
+        // resolver defers a pack rather than refusing it. §3.5 refuses
+        // `let t: tuple[int, string]` because there is no *empty* value of that
+        // type to synthesize, and this does not contradict it: there is no
+        // empty tuple to reach for here either, so each element answers with
+        // its own zero and a type with none refuses below, exactly as `T` does.
+        if name == "tuple" {
+            let mut items = Vec::with_capacity(ty.args.len());
+            for (index, arg) in ty.args.clone().iter().enumerate() {
+                // A pack nothing expanded stands for an unknown number of
+                // elements, and zero is the only count it can be given: there
+                // is no position here to name a type for, so there is no value
+                // to invent. `CustomTuple()` starts its `data` as `()`.
+                if matches!(arg.name, TypeName::Pack(_)) {
+                    continue;
+                }
+                items.push(self.default_of(arg, &format!("{field}[{index}]"), span)?);
+            }
+            return Ok(Value::Tuple(self.heap.alloc(Object::Tuple(items))));
+        }
         let zero = match name.as_str() {
             "int" => Some(Value::Int(0)),
             "float" => Some(Value::Float(0.0)),
@@ -306,7 +342,10 @@ impl Interp {
             ParamKind::Const { ty } => {
                 self.as_const_argument(value, expr, whose, param, ty, env, span)
             }
-            ParamKind::Type { .. } => match value {
+            // A pack's arguments are ordinary types, one per position — what a
+            // pack changes is how many of them there are, and that is settled
+            // by the caller before this is asked about any one of them.
+            ParamKind::Pack | ParamKind::Type { .. } => match value {
                 // No arguments of its own: `Stack[list[int]]` would need
                 // `list[int]` to be an expression, and it is not one. The
                 // annotation form is what reaches a nested argument, as it is
@@ -393,6 +432,7 @@ impl Interp {
             Some(held) if held.type_name() == wanted => Ok(TypeExpr {
                 name: TypeName::Const(held),
                 args: Vec::new(),
+                applied: false,
                 nullable: false,
                 frozen: false,
                 span,
@@ -495,16 +535,30 @@ impl Interp {
         }
         let params = class.params.clone();
         let held = self.heap.descriptor(instance);
+        let args = held.as_ref().map_or(&[][..], |ty| &ty.args);
         params
             .iter()
             .enumerate()
-            .map(|(index, param)| {
-                let arg = held
-                    .as_ref()
-                    .and_then(|ty| ty.args.get(index))
-                    .cloned()
-                    .unwrap_or_else(unconstrained);
-                (param.name.clone(), arg)
+            .filter_map(|(index, param)| {
+                // A pack binds to *all* the arguments from its position on,
+                // gathered into a `tuple` — which is what makes `tuple[Ts...]`
+                // and `args: Ts...` both work by ordinary substitution: the
+                // first splices the arguments back out, and the second is the
+                // collected value's type as written. §3.4.
+                if param.is_pack() {
+                    // Unless nothing described the instance at all, in which
+                    // case the pack is left unbound rather than bound to
+                    // nothing: `CustomTuple()` with no annotation is dynamic,
+                    // and a pack bound to the empty sequence would say the
+                    // opposite — that it takes no arguments. §3.1's defaulting
+                    // is "unconstrained", and for a pack that is spelled by
+                    // leaving `Ts...` where it was. `CustomTuple[]` *is*
+                    // described, with an empty argument list, and does bind.
+                    let rest = held.as_ref().and_then(|_| args.get(index..))?;
+                    return Some((param.name.clone(), packed(rest.to_vec())));
+                }
+                let arg = args.get(index).cloned().unwrap_or_else(unconstrained);
+                Some((param.name.clone(), arg))
             })
             .collect()
     }
@@ -530,7 +584,10 @@ impl Interp {
 /// over this one.
 fn inferred_header(ty: Option<&TypeExpr>, value: &Expr) -> Option<TypeExpr> {
     let ty = ty?;
-    if ty.args.is_empty() {
+    // Written brackets and not merely arguments, because `CustomTuple[]` binds
+    // a pack to the empty sequence and that is a header worth lending — it is
+    // the difference between "takes nothing" and "takes whatever". §3.4.
+    if !ty.applied {
         return None;
     }
     let TypeName::Named(named) = &ty.name else {
@@ -555,6 +612,32 @@ fn inferred_header(ty: Option<&TypeExpr>, value: &Expr) -> Option<TypeExpr> {
     })
 }
 
+/// Where a pack sits in a parameter list, if there is one.
+///
+/// Always the last position — the parser refuses anything after it — so this
+/// doubles as "how many parameters take exactly one argument".
+fn pack_at(params: &[TypeParam]) -> Option<usize> {
+    params.iter().position(TypeParam::is_pack)
+}
+
+/// What a pack is bound to: the arguments it took, as a `tuple`.
+///
+/// A tuple and not a bare list of types, because it has to be a [`TypeExpr`] —
+/// `Bindings` maps a name to one type, and a pack is several. `tuple` is the
+/// honest head for it: `op init(args: Ts...)` collects its arguments into
+/// exactly this value at run time, so the annotation a substituted `Ts...`
+/// becomes is the type of the thing the body holds. §3.4.
+fn packed(args: Vec<TypeExpr>) -> TypeExpr {
+    TypeExpr {
+        name: TypeName::Named("tuple".to_string()),
+        applied: true,
+        args,
+        nullable: false,
+        frozen: false,
+        span: Span::new(0, 0),
+    }
+}
+
 /// The type an unbound parameter stands for: `any?`, the top type.
 ///
 /// The same value [`crate::sema::types`] gives an elided container argument,
@@ -565,6 +648,7 @@ fn unconstrained() -> TypeExpr {
     TypeExpr {
         name: TypeName::Any,
         args: Vec::new(),
+        applied: false,
         nullable: true,
         frozen: false,
         span: Span::new(0, 0),
@@ -591,11 +675,28 @@ pub(super) fn substituted(ty: &TypeExpr, bindings: &Bindings) -> TypeExpr {
         return ty.clone();
     }
     let mut out = ty.clone();
+    // A pack in an argument position *splices*: `tuple[Ts...]` with `Ts` bound
+    // to three types becomes a `tuple` with three arguments, not one argument
+    // that is itself a tuple. This is the whole of what makes a pack different
+    // from a parameter, and it is why the argument walk is a `flat_map`.
     out.args = ty
         .args
         .iter()
-        .map(|arg| substituted(arg, bindings))
+        .flat_map(|arg| expanded(arg, bindings))
         .collect();
+    if let TypeName::Pack(name) = &ty.name {
+        // A pack standing where a whole type goes — `args: Ts...` — is the
+        // collected tuple itself. Nothing to splice into, so the binding is
+        // used as it is.
+        let Some((_, bound)) = bindings.iter().find(|(param, _)| param == name) else {
+            return out;
+        };
+        let mut replaced = bound.clone();
+        replaced.span = ty.span;
+        replaced.nullable = replaced.nullable || ty.nullable;
+        replaced.frozen = replaced.frozen || ty.frozen;
+        return replaced;
+    }
     let TypeName::Named(name) = &ty.name else {
         return out;
     };
@@ -615,16 +716,24 @@ pub(super) fn substituted(ty: &TypeExpr, bindings: &Bindings) -> TypeExpr {
     replaced
 }
 
-/// A parameter list as the declaration wrote it — `T, U: float`.
-fn written_params(params: &[crate::syntax::ast::TypeParam]) -> String {
-    params
-        .iter()
-        .map(|param| match param.bound() {
-            Some(bound) => format!("{}: {}", param.name, bound.written()),
-            None => param.name.clone(),
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
+/// One argument, substituted — as however many types it turns into.
+///
+/// One for everything but a bound pack, which is the reason this hands back a
+/// list at all. See [`substituted`].
+fn expanded(arg: &TypeExpr, bindings: &Bindings) -> Vec<TypeExpr> {
+    let TypeName::Pack(name) = &arg.name else {
+        return vec![substituted(arg, bindings)];
+    };
+    match bindings.iter().find(|(param, _)| param == name) {
+        // The arguments the pack took, spliced in where it was written. Each is
+        // already a finished type — a pack binds to what a construction was
+        // given, and a type argument cannot itself be a pack.
+        Some((_, bound)) => bound.args.clone(),
+        // Nothing bound it, so it stands for itself. A bare `CustomTuple()`
+        // leaves this, and `holds` reads an unsubstituted pack as constraining
+        // nothing.
+        None => vec![arg.clone()],
+    }
 }
 
 fn plural(count: usize, word: &str) -> String {
@@ -648,6 +757,7 @@ mod tests {
 
     fn named(name: &str) -> TypeExpr {
         TypeExpr {
+            applied: false,
             name: TypeName::Named(name.to_string()),
             args: Vec::new(),
             nullable: false,
@@ -658,6 +768,7 @@ mod tests {
 
     fn generic(name: &str, args: Vec<TypeExpr>) -> TypeExpr {
         TypeExpr {
+            applied: !args.is_empty(),
             args,
             ..named(name)
         }

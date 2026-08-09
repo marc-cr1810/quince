@@ -618,6 +618,33 @@ the class machinery.
 products and N-element packs check the same way. Literals, destructuring, tail unpacking,
 elementwise index resolution.
 
+> **Three things §3.4 and §3.5 did not settle, recorded where they were decided.**
+>
+> **`tuple` and `tuple[]` are two types, and `args` alone could not say which.** A container's
+> arity is not part of its type anywhere else, so `list` and `list[any?]` are one type and an
+> empty argument list has never meant anything. §3.5 makes arity part of a tuple's type, and
+> that turns the empty bracket pair into the *empty product* — a real type, distinct from the
+> bare `tuple` that admits any of them. `TypeExpr` grew one field, `applied`, recording
+> whether brackets were written; everything that synthesizes a type sets it from whether it
+> has arguments to write, so the flag is a no-op everywhere but here.
+>
+> **`is` reads a tuple's arity off the allocation and its elements off the header.** §3.5
+> asks for O(1) and the two halves cost differently: the length is a field on the object, so
+> it is answered whatever described the value, while the element types would be a walk and
+> stay a header question exactly as a list's do. A class ending its parameter list in a pack
+> answers the same way and for the same reason — otherwise the padding that makes `list` and
+> `list[any?]` one type would quietly make `CustomTuple[int, string]` and
+> `CustomTuple[int, string, bool]` one type too.
+>
+> **§3.4's `private let data: tuple[Ts...]` and §3.5's "no default initialization" only look
+> like a contradiction.** §3.5 refuses `let t: tuple[int, string]` because there is no empty
+> value of that type to synthesize, and that argument is about a type whose arity is
+> *written*. A pack's is not — so the question is deferred to construction, where the binding
+> is, which is the deferral §3.6 and §3.1 already make for a bare `T`. There the arity is
+> known and each element answers with its own zero, and an element type with no default
+> refuses exactly as `Test[NoDefault]()` does. A plain `let t: tuple[int, string]` is still
+> refused at resolution, in §3.5's words.
+
 **Tranche 5 — const generic parameters.** After packs, because the parameter-list grammar
 should stop moving before a fourth parameter form joins it.
 

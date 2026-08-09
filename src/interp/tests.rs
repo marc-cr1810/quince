@@ -2097,3 +2097,143 @@ fn a_const_argument_has_to_be_constant() {
         assert_eq!(global(&interp, "ok"), Some(Value::Bool(true)), "{word}");
     }
 }
+
+#[test]
+fn a_tuples_arity_is_part_of_its_type() {
+    // §3.5. The length is a field on the allocation, so `is` answers it
+    // whatever described the value — which is what makes an arity question
+    // O(1) without the element walk `is` promises not to do.
+    let interp = run(
+        "let t: tuple[int, string] = (1, \"a\")\n\
+         let same = t is tuple[int, string]\n\
+         let shorter = t is tuple[int]\n\
+         let empty = t is tuple[]\n\
+         let bare = t is tuple\n\
+         let wrong = t is tuple[string, int]\n",
+    );
+    assert_eq!(global(&interp, "same"), Some(Value::Bool(true)));
+    assert_eq!(global(&interp, "shorter"), Some(Value::Bool(false)));
+    assert_eq!(global(&interp, "empty"), Some(Value::Bool(false)));
+    // A bare `tuple` wrote no brackets and so constrains no arity, exactly as
+    // a bare `list` constrains no element type.
+    assert_eq!(global(&interp, "bare"), Some(Value::Bool(true)));
+    assert_eq!(global(&interp, "wrong"), Some(Value::Bool(false)));
+
+    // And `tuple[]` is the empty product rather than a second spelling of the
+    // bare form — the distinction `TypeExpr::applied` exists for.
+    let interp = run(
+        "let e: tuple[] = ()\n\
+         let is_empty = e is tuple[]\n\
+         let is_any = e is tuple\n\
+         let is_one = e is tuple[int]\n",
+    );
+    assert_eq!(global(&interp, "is_empty"), Some(Value::Bool(true)));
+    assert_eq!(global(&interp, "is_any"), Some(Value::Bool(true)));
+    assert_eq!(global(&interp, "is_one"), Some(Value::Bool(false)));
+}
+
+#[test]
+fn a_tuple_cannot_be_written_to() {
+    // What makes a tuple a value rather than a short list. Reported in its own
+    // words, because the position exists and the value is fine — §3.5.
+    let program = crate::compile("let t = (1, 2)\nt[0] = 5\n").expect("parses");
+    let mut interp = Interp::with_output(Box::new(Vec::new()));
+    let err = interp.run(&program).expect_err("a tuple has no writes");
+    assert!(err.message.contains("cannot be written to"), "{}", err.message);
+}
+
+#[test]
+fn a_pack_binds_to_however_many_arguments_are_left() {
+    // §3.4. The reified list is *flat* — three arguments, not one that is a
+    // pack — so `is` compares them one by one with no idea a pack was
+    // involved, and the arity check is what keeps two lengths two types.
+    let source = "class Tup[Ts...] {\n\
+                      private let data: tuple[Ts...]\n\
+                      public op init(args: Ts...) { self.data = args }\n\
+                      public const fn size(): int { return len(self.data) }\n\
+                  }\n";
+    let interp = run(&format!(
+        "{source}\
+         let t: Tup[int, string, bool] = Tup(1, \"a\", true)\n\
+         let n = t.size()\n\
+         let exact = t is Tup[int, string, bool]\n\
+         let shorter = t is Tup[int, string]\n\
+         let bare = t is Tup\n"
+    ));
+    assert_eq!(global(&interp, "n"), Some(Value::Int(3)));
+    assert_eq!(global(&interp, "exact"), Some(Value::Bool(true)));
+    assert_eq!(global(&interp, "shorter"), Some(Value::Bool(false)));
+    assert_eq!(global(&interp, "bare"), Some(Value::Bool(true)));
+
+    // An empty pack is a pack, and `Tup[]` is a type.
+    let interp = run(&format!(
+        "{source}\
+         let e: Tup[] = Tup()\n\
+         let n = e.size()\n\
+         let empty = e is Tup[]\n"
+    ));
+    assert_eq!(global(&interp, "n"), Some(Value::Int(0)));
+    assert_eq!(global(&interp, "empty"), Some(Value::Bool(true)));
+
+    // Unannotated and with no argument list, the pack is unbound rather than
+    // bound to nothing: `Tup(…)` is dynamic, as an unannotated anything is.
+    let interp = run(&format!(
+        "{source}\
+         let d = Tup(1, \"a\", 3.0)\n\
+         let n = d.size()\n"
+    ));
+    assert_eq!(global(&interp, "n"), Some(Value::Int(3)));
+}
+
+#[test]
+fn a_pack_constructor_coerces_from_a_tuple_and_from_nothing_else() {
+    // §3.4's one extension to v0.8 §3.3, which admits only a single-parameter
+    // constructor: a tuple is exactly a value that says how it splits, and its
+    // arity is part of its type.
+    let source = "class Tup[Ts...] {\n\
+                      private let data: tuple[Ts...]\n\
+                      public op init(args: Ts...) { self.data = args }\n\
+                      public const fn size(): int { return len(self.data) }\n\
+                  }\n";
+    let interp = run(&format!(
+        "{source}\
+         let t: Tup[int, string, bool] = (1, \"a\", true)\n\
+         let n = t.size()\n\
+         let exact = t is Tup[int, string, bool]\n"
+    ));
+    assert_eq!(global(&interp, "n"), Some(Value::Int(3)));
+    // Stamped with the annotation's arguments, though nothing on the right is
+    // a construction for the header to have been lent to.
+    assert_eq!(global(&interp, "exact"), Some(Value::Bool(true)));
+
+    // The elements are checked one by one, against the bound pack.
+    let program = crate::compile(&format!(
+        "{source}let bad: Tup[int, string, bool] = (1, \"a\", \"not a bool\")\n"
+    ))
+    .expect("parses");
+    let mut interp = Interp::with_output(Box::new(Vec::new()));
+    let err = interp.run(&program).expect_err("the third element is wrong");
+    assert!(err.message.contains("item 2"), "{}", err.message);
+}
+
+#[test]
+fn destructuring_binds_every_name_and_the_rest_is_a_tuple() {
+    // §3.5. The leftover is a tuple because a tuple is what was taken apart,
+    // which is also what lets it be taken apart again.
+    let interp = run(
+        "let (head, ...tail) = (1, 2, 3)\n\
+         let (second, third) = tail\n\
+         let n = len(tail)\n",
+    );
+    assert_eq!(global(&interp, "head"), Some(Value::Int(1)));
+    assert_eq!(global(&interp, "second"), Some(Value::Int(2)));
+    assert_eq!(global(&interp, "third"), Some(Value::Int(3)));
+    assert_eq!(global(&interp, "n"), Some(Value::Int(2)));
+
+    // Only a tuple. A list's length is not part of its type, so the same line
+    // would work or not depending on what it happened to hold that time.
+    let program = crate::compile("let (a, b) = [1, 2]\n").expect("parses");
+    let mut interp = Interp::with_output(Box::new(Vec::new()));
+    let err = interp.run(&program).expect_err("a list does not destructure");
+    assert!(err.message.contains("cannot be taken apart"), "{}", err.message);
+}

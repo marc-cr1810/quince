@@ -16,7 +16,9 @@ use crate::error::ErrorKind;
 use crate::runtime::dict::KEY_TYPES;
 use crate::sema::resolve::Prior;
 use crate::sema::types::{bound_help, satisfies};
-use crate::syntax::ast::{Expr, ExprKind, ParamKind, Stmt, StmtKind, TypeExpr, TypeName, TypeParam};
+use crate::syntax::ast::{
+    Expr, ExprKind, ParamKind, Stmt, StmtKind, TypeExpr, TypeName, TypeParam, written_params,
+};
 use crate::syntax::token::Span;
 
 /// Expands every alias in `program`, in place.
@@ -239,6 +241,7 @@ fn expand_type(
     let target = resolve_one(name, declared, path)?;
     Ok(TypeExpr {
         name: target.name,
+        applied: target.applied,
         args: target.args,
         nullable: ty.nullable || target.nullable,
         frozen: ty.frozen || target.frozen,
@@ -268,6 +271,97 @@ fn cycles(path: &[String], span: Span) -> Raised {
     ))
 }
 
+/// Holds each type argument to the bound its parameter declared — v0.9 §3.2.
+///
+/// Split out of [`check_arguments`] because a pack reaches it by a different
+/// route: a list ending in one has no arity to check, so it returns straight
+/// here rather than falling through the count comparison. The rules are the
+/// same either way, which is the point of there being one function.
+fn check_bounds(
+    head: &str,
+    params: &[TypeParam],
+    args: &[TypeExpr],
+    classes: &Classes,
+) -> Result<()> {
+    for (param, arg) in params.iter().zip(args) {
+        // §3.3 — a const parameter wants a value and a type parameter wants
+        // a type, and an annotation is the one place both are spelled the
+        // same way. Which was meant is a fact about the declaration, so the
+        // report quotes the declaration.
+        let written = arg.written();
+        match (&param.kind, &arg.name) {
+            // A pack takes whatever is written in its position and every
+            // position after it, so there is no one argument for it to
+            // disagree with. The count is checked above.
+            (ParamKind::Pack, _) => {}
+            (ParamKind::Const { ty }, TypeName::Const(value)) => {
+                let wanted = match &ty.name {
+                    TypeName::Named(name) => name.as_str(),
+                    _ => "",
+                };
+                if value.type_name() != wanted {
+                    return Err(refused(
+                        format!(
+                            "`{head}`\u{2019}s `{}` is `{wanted}`, but `{written}` is `{}`",
+                            param.name,
+                            value.type_name()
+                        ),
+                        arg.span,
+                    )
+                    .with_label(param.span, "declared here"));
+                }
+            }
+            (ParamKind::Const { .. }, _) => {
+                return Err(refused(
+                    format!(
+                        "`{head}`\u{2019}s `{}` takes a value, and `{written}` is a type",
+                        param.name
+                    ),
+                    arg.span,
+                )
+                .with_label(param.span, "declared here")
+                .with_help(format!(
+                    "the declaration writes `{}` — the argument in that position is a \
+                     literal, or a name declared `const`",
+                    param.written()
+                )));
+            }
+            (ParamKind::Type { .. }, TypeName::Const(_)) => {
+                return Err(refused(
+                    format!(
+                        "`{head}`\u{2019}s `{}` takes a type, and `{written}` is a value",
+                        param.name
+                    ),
+                    arg.span,
+                )
+                .with_label(param.span, "declared here")
+                .with_help(format!(
+                    "write `const {}: …` in the declaration if it was meant to take one",
+                    param.name
+                )));
+            }
+            (ParamKind::Type { .. }, _) => {}
+        }
+        let Some(bound) = param.bound() else {
+            continue;
+        };
+        if satisfies(bound, arg, &|name, ancestor| classes.descends(name, ancestor)) {
+            continue;
+        }
+        return Err(refused(
+            format!(
+                "`{}` does not satisfy bound `{}`",
+                arg.written(),
+                bound.written()
+            ),
+            arg.span,
+        )
+        .with_label(param.span, "declared here")
+        .with_help(bound_help(head, &param.name, bound)));
+    }
+    Ok(())
+}
+
 /// Refuses a container type whose arguments do not fit it.
 ///
 /// Two rules: the arity — `list` takes one argument, `dict` one or two — and
@@ -295,9 +389,41 @@ fn check_arguments(ty: &TypeExpr, classes: &Classes) -> Result<()> {
     let arity = match head {
         "list" => 1..=1,
         "dict" => 1..=2,
+        // The one head with no arity to check: `tuple[A, B]` and
+        // `tuple[A, B, C]` are both good annotations, because a tuple's arity is
+        // written rather than declared. §3.5, and it is why this is a `return`
+        // rather than a wider range — there is no upper bound to state.
+        "tuple" => return Ok(()),
         _ if classes.params.contains_key(head) => {
-            let count = classes.params[head].len();
-            count..=count
+            let params = &classes.params[head];
+            let count = params.len();
+            // A pack ends the list and takes however many arguments are left,
+            // so the count becomes a minimum with no upper bound to state —
+            // the same shape `tuple` has, arrived at from a declaration rather
+            // than from the language. §3.4.
+            match params.last().is_some_and(TypeParam::is_pack) {
+                true => {
+                    if !args.is_empty() && args.len() < count - 1 {
+                        return Err(refused(
+                            format!(
+                                "`{head}` takes at least {} type {}, but {} {} written",
+                                count - 1,
+                                if count == 2 { "argument" } else { "arguments" },
+                                args.len(),
+                                if args.len() == 1 { "was" } else { "were" }
+                            ),
+                            span,
+                        )
+                        .with_help(format!(
+                            "`{head}` declares `[{}]`, and a pack takes whatever is left \
+                             over — the parameters in front of it still each need one",
+                            written_params(params)
+                        )));
+                    }
+                    return check_bounds(head, params, args, classes);
+                }
+                false => count..=count,
+            }
         }
         // Not a container and not a class that declared parameters, so it takes
         // no arguments — and a program that wrote some has said something the
@@ -348,80 +474,8 @@ fn check_arguments(ty: &TypeExpr, classes: &Classes) -> Result<()> {
     // §3.2's bounds, checked where the argument is written — which is the whole
     // point of them being checked at resolution: the declaration is right and
     // is somewhere else, so the caret belongs on the word the program chose.
-    if let Some(params) = classes.params.get(head) {
-        for (param, arg) in params.iter().zip(args) {
-            // §3.3 — a const parameter wants a value and a type parameter wants
-            // a type, and an annotation is the one place both are spelled the
-            // same way. Which was meant is a fact about the declaration, so the
-            // report quotes the declaration.
-            let written = arg.written();
-            match (&param.kind, &arg.name) {
-                (ParamKind::Const { ty }, TypeName::Const(value)) => {
-                    let wanted = match &ty.name {
-                        TypeName::Named(name) => name.as_str(),
-                        _ => "",
-                    };
-                    if value.type_name() != wanted {
-                        return Err(refused(
-                            format!(
-                                "`{head}`\u{2019}s `{}` is `{wanted}`, but `{written}` is `{}`",
-                                param.name,
-                                value.type_name()
-                            ),
-                            arg.span,
-                        )
-                        .with_label(param.span, "declared here"));
-                    }
-                }
-                (ParamKind::Const { .. }, _) => {
-                    return Err(refused(
-                        format!(
-                            "`{head}`\u{2019}s `{}` takes a value, and `{written}` is a type",
-                            param.name
-                        ),
-                        arg.span,
-                    )
-                    .with_label(param.span, "declared here")
-                    .with_help(format!(
-                        "the declaration writes `{}` — the argument in that position is a \
-                         literal, or a name declared `const`",
-                        param.written()
-                    )));
-                }
-                (ParamKind::Type { .. }, TypeName::Const(_)) => {
-                    return Err(refused(
-                        format!(
-                            "`{head}`\u{2019}s `{}` takes a type, and `{written}` is a value",
-                            param.name
-                        ),
-                        arg.span,
-                    )
-                    .with_label(param.span, "declared here")
-                    .with_help(format!(
-                        "write `const {}: …` in the declaration if it was meant to take one",
-                        param.name
-                    )));
-                }
-                (ParamKind::Type { .. }, _) => {}
-            }
-            let Some(bound) = param.bound() else {
-                continue;
-            };
-            if satisfies(bound, arg, &|name, ancestor| classes.descends(name, ancestor)) {
-                continue;
-            }
-            return Err(refused(
-                format!(
-                    "`{}` does not satisfy bound `{}`",
-                    arg.written(),
-                    bound.written()
-                ),
-                arg.span,
-            )
-            .with_label(param.span, "declared here")
-            .with_help(bound_help(head, &param.name, bound)));
-        }
-    }
+    let declared = classes.params.get(head).map_or(&[][..], Vec::as_slice);
+    check_bounds(head, declared, args, classes)?;
 
     // The key is the first argument, for both `dict[K, V]` and the `dict[K]`
     // shorthand. `any` is admitted: it says the keys are heterogeneous, which
@@ -449,6 +503,7 @@ fn check_arguments(ty: &TypeExpr, classes: &Classes) -> Result<()> {
 fn substitute_stmt(stmt: &mut Stmt, ctx: &Expansion<'_>) -> Result<()> {
     match &mut stmt.kind {
         StmtKind::Alias { ty, .. } => substitute(ty, ctx)?,
+        StmtKind::Destructure { value, .. } => substitute_expr(value, ctx)?,
         StmtKind::Let { ty, value, .. } => {
             if let Some(ty) = ty {
                 substitute(ty, ctx)?;
@@ -587,7 +642,7 @@ fn substitute_expr(expr: &mut Expr, ctx: &Expansion<'_>) -> Result<()> {
             substitute_expr(target, ctx)?;
             substitute_expr(value, ctx)?;
         }
-        ExprKind::List(items) => {
+        ExprKind::List(items) | ExprKind::Tuple(items) => {
             for item in items {
                 substitute_expr(item, ctx)?;
             }
@@ -625,6 +680,7 @@ fn substitute(ty: &mut TypeExpr, ctx: &Expansion<'_>) -> Result<()> {
     {
         *ty = TypeExpr {
             name: target.name.clone(),
+            applied: target.applied,
             args: target.args.clone(),
             nullable: ty.nullable || target.nullable,
             frozen: ty.frozen || target.frozen,

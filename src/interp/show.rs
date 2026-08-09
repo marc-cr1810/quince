@@ -99,6 +99,27 @@ impl Interp {
                     Style::BOLD.paint("]", color)
                 )
             }
+            // A one-element tuple keeps its trailing comma: `(42)` is a
+            // parenthesised int, and printing one for a tuple would print
+            // something that reads back as a different value. §3.5.
+            Value::Tuple(id) => {
+                let id = *id;
+                let mut items = Vec::new();
+                let mut i = 0;
+                while let Some(item) = self.heap.tuple(id).get(i).cloned() {
+                    items.push(self.repr_styled(&item, color, ask)?);
+                    i += 1;
+                }
+                let inside = match items.as_slice() {
+                    [only] => format!("{only},"),
+                    _ => items.join(", "),
+                };
+                format!(
+                    "{}{inside}{}",
+                    Style::BOLD.paint("(", color),
+                    Style::BOLD.paint(")", color)
+                )
+            }
             Value::Dict(id) => {
                 let mut entries = Vec::new();
                 for (key, value) in self.entries(*id) {

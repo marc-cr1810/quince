@@ -1,0 +1,2 @@
+# §3.5 — a `...` name holds every element left over, so it goes last.
+let (a, ...r, b) = (1, 2, 3)

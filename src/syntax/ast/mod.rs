@@ -14,7 +14,7 @@ pub mod op;
 
 pub use decl::{
     BindKind, ConstArg, FieldDecl, FnDecl, ImportName, ImportNames, Openness, Param, ParamKind,
-    SELF, SUPER, TypeExpr, TypeName, TypeParam, Visibility,
+    SELF, SUPER, TypeExpr, TypeName, TypeParam, Visibility, written_params,
 };
 pub use op::{BinaryOp, LogicalOp, OPS, Op, Reflect, ShortAssignOp, UnaryOp};
 
@@ -70,6 +70,14 @@ pub enum ExprKind {
     Nil,
     Var(Var),
     List(Vec<Expr>),
+    /// `(101, "Bob", true)` — an arbitrary-arity product, v0.9 §3.5.
+    ///
+    /// Zero, one, or many. The one-element case is written `(42,)` and the
+    /// trailing comma is not optional there, because `(42)` is a parenthesised
+    /// int and has been since v0.1 — the comma is the whole of what makes a
+    /// tuple, and a language where one form silently became the other would
+    /// have no way to write the grouping.
+    Tuple(Vec<Expr>),
     /// Key-value pairs in source order, which is the order the dict keeps.
     Dict(Vec<(Expr, Expr)>),
     Unary {
@@ -237,6 +245,18 @@ impl CallArg {
     }
 }
 
+/// One name a destructuring binding introduces.
+///
+/// Shaped like the head of a [`StmtKind::Let`] and for the same reasons: the
+/// span is where the name was written, so a report about one element of the
+/// pattern underlines that element, and the slot is filled in by the resolver.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Destructured {
+    pub name: String,
+    pub span: Span,
+    pub slot: Option<Slot>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Block {
     pub stmts: Vec<Stmt>,
@@ -294,6 +314,31 @@ pub enum StmtKind {
         /// The `##` block written above it. A binding has no parameters and no
         /// return, so this carries a summary and the parser refuses the rest.
         doc: Option<Doc>,
+    },
+    /// `let (lat, lon, label) = point`, and `let (head, ...tail) = t` — v0.9
+    /// §3.5.
+    ///
+    /// A statement of its own rather than a [`StmtKind::Let`] whose name is a
+    /// pattern, because the two differ in the thing everything downstream cares
+    /// about: how many names are bound. A `Let` reserves one slot and carries
+    /// one annotation; this reserves several and carries none, and folding them
+    /// would give every reader of a binding an `Option<Vec<…>>` to unwrap.
+    ///
+    /// §3.5 calls it a binding form, and it is one: [`BindKind`] means here
+    /// exactly what it means on a `let`, and applies to every name at once.
+    Destructure {
+        /// The names written before the `...`, in order, one per element.
+        names: Vec<Destructured>,
+        /// The `...tail`, when one was written, holding however many elements
+        /// are left over — as a tuple, since that is what was taken apart.
+        ///
+        /// An `Option` beside the list rather than a flag on its last entry, so
+        /// that "one rest name, at the end" is the only shape this can be in.
+        rest: Option<Destructured>,
+        value: Expr,
+        bind: BindKind,
+        /// Whether an importing module sees these names, as for a `let`.
+        visibility: Visibility,
     },
     /// Shared so a closure can hold the body without deep-copying it each time
     /// the declaration is executed.

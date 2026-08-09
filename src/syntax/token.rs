@@ -162,6 +162,16 @@ pub enum TokenKind {
     RBracket,
     Comma,
     Dot,
+    /// `...`, which spreads a sequence — v0.9 §2.1.
+    ///
+    /// Two uses and one meaning: `Ts...` declares a parameter pack, and
+    /// `(head, ...tail)` takes the rest of a tuple. Both say "however many are
+    /// left", which is why they share a token rather than each getting one.
+    ///
+    /// Lexed as three characters before [`TokenKind::Dot`] can take the first,
+    /// so `a...b` is a spread and not a chain of member accesses. v0.10's `..`
+    /// wants the same maximal munch and will sit between the two.
+    DotDotDot,
     Colon,
     /// Marks a type as nullable — `int?`.
     ///
@@ -200,7 +210,7 @@ pub const KEYWORDS: &[&str] = &[
 
 /// Built-in types that the editor grammar highlights as support types.
 pub const BUILTIN_TYPES: &[&str] = &[
-    "string", "int", "float", "bool", "dict", "list",
+    "string", "int", "float", "bool", "dict", "list", "tuple",
 ];
 
 impl TokenKind {
@@ -337,6 +347,7 @@ impl TokenKind {
             | TokenKind::QuestionQuestion
             | TokenKind::QuestionDot
             | TokenKind::Dot
+            | TokenKind::DotDotDot
             | TokenKind::Colon
             | TokenKind::Semi
             | TokenKind::Eof => return None,
@@ -425,6 +436,7 @@ impl fmt::Display for TokenKind {
             TokenKind::RBracket => write!(f, "]"),
             TokenKind::Comma => write!(f, ","),
             TokenKind::Dot => write!(f, "."),
+            TokenKind::DotDotDot => write!(f, "..."),
             TokenKind::Colon => write!(f, ":"),
             TokenKind::Question => write!(f, "?"),
             TokenKind::QuestionQuestion => write!(f, "??"),

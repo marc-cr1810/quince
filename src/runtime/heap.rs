@@ -19,6 +19,13 @@ pub struct ObjId(u32);
 pub enum Object {
     List(Vec<Value>),
     Dict(Dict),
+    /// The elements of a tuple, in the order written — v0.9 §3.5.
+    ///
+    /// A heap object for the reason a list is one: a value is copied on every
+    /// read, and an arbitrary-arity product cannot be copied inline. There is
+    /// no `tuple_mut` beside [`Heap::tuple`], and that absence is the whole of
+    /// what makes a tuple immutable — `t[0] = 5` has nothing to call.
+    Tuple(Vec<Value>),
     Env(Env),
     /// The top-level scope. Exactly one exists, and it is the collector's
     /// permanent root.
@@ -283,6 +290,18 @@ impl Heap {
         }
     }
 
+    /// The elements of a tuple.
+    ///
+    /// No `_mut` counterpart, deliberately: §3.5's immutability is enforced by
+    /// there being no way to ask for one, rather than by a check some caller
+    /// could forget.
+    pub fn tuple(&self, id: ObjId) -> &Vec<Value> {
+        match self.get(id) {
+            Object::Tuple(items) => items,
+            other => panic!("expected a tuple, found {other:?}"),
+        }
+    }
+
     pub fn dict(&self, id: ObjId) -> &Dict {
         match self.get(id) {
             Object::Dict(entries) => entries,
@@ -413,7 +432,9 @@ impl Default for Heap {
 /// bugs that are almost impossible to find.
 fn trace(object: &Object, worklist: &mut Vec<ObjId>) {
     match object {
-        Object::List(items) => worklist.extend(items.iter().filter_map(Value::handle)),
+        Object::List(items) | Object::Tuple(items) => {
+            worklist.extend(items.iter().filter_map(Value::handle))
+        }
         Object::Dict(entries) => entries.trace(worklist),
         Object::Env(env) => env.trace(worklist),
         Object::Globals(globals) => globals.trace(worklist),
@@ -460,7 +481,11 @@ fn trace(object: &Object, worklist: &mut Vec<ObjId>) {
 /// has to answer both.
 fn reachable_data(object: &Object, worklist: &mut Vec<ObjId>) {
     match object {
-        Object::List(items) => worklist.extend(items.iter().filter_map(Value::handle)),
+        // A tuple is already immutable, and freezing one is still not a no-op:
+        // it may hold a list, and a `const` binding of a tuple has to reach it.
+        Object::List(items) | Object::Tuple(items) => {
+            worklist.extend(items.iter().filter_map(Value::handle))
+        }
         // Keys are hashable, so they are never heap objects — see `runtime::dict`.
         Object::Dict(entries) => entries.trace(worklist),
         // Fields are data; the class holding the methods is not.

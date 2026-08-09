@@ -177,6 +177,12 @@ pub enum Value {
     Str(Rc<str>),
     List(ObjId),
     Dict(ObjId),
+    /// An arbitrary-arity product — v0.9 §3.5.
+    ///
+    /// Heap-allocated like a list, and immutable unlike one: there is no
+    /// `heap.tuple_mut`, so nothing in the language can write through this
+    /// handle. That is what makes a tuple a value rather than a short list.
+    Tuple(ObjId),
     Function(ObjId),
     /// Several declarations sharing a name, one of which a call selects — v0.8
     /// §3.5.
@@ -210,6 +216,7 @@ impl Value {
         match self {
             Value::List(id)
             | Value::Dict(id)
+            | Value::Tuple(id)
             | Value::Function(id)
             | Value::Overload(id)
             | Value::BoundMethod(id)
@@ -240,6 +247,7 @@ impl Value {
             Value::Str(_) => Builtin::Str,
             Value::List(_) => Builtin::List,
             Value::Dict(_) => Builtin::Dict,
+            Value::Tuple(_) => Builtin::Tuple,
             Value::Function(_)
             | Value::Overload(_)
             | Value::Native(_)
@@ -312,6 +320,8 @@ impl Value {
             Value::Str(s) => !s.is_empty(),
             Value::List(id) => !heap.list(*id).is_empty(),
             Value::Dict(id) => !heap.dict(*id).is_empty(),
+            // `()` is falsy, as every other empty collection is.
+            Value::Tuple(id) => !heap.tuple(*id).is_empty(),
             Value::Function(_)
             | Value::Overload(_)
             | Value::Native(_)
@@ -360,6 +370,16 @@ impl Value {
                     })
                     .collect();
                 format!("{{{}}}", entries.join(", "))
+            }
+            // A one-element tuple keeps its trailing comma, because that comma
+            // is what the literal needs to be a tuple at all — printing `(42)`
+            // would print an expression that means something else.
+            Value::Tuple(id) => {
+                let items: Vec<_> = heap.tuple(*id).iter().map(|v| v.repr_base(heap)).collect();
+                match items.as_slice() {
+                    [only] => format!("({only},)"),
+                    _ => format!("({})", items.join(", ")),
+                }
             }
             Value::Function(id) => format!("<fn {}>", heap.function(*id).decl.name),
             Value::Overload(id) => match heap.overload(*id).first() {
@@ -435,6 +455,7 @@ impl PartialEq for Value {
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::List(a), Value::List(b)) => a == b,
             (Value::Dict(a), Value::Dict(b)) => a == b,
+            (Value::Tuple(a), Value::Tuple(b)) => a == b,
             (Value::Function(a), Value::Function(b)) => a == b,
             (Value::Overload(a), Value::Overload(b)) => a == b,
             (Value::Native(a), Value::Native(b)) => std::ptr::eq(*a, *b),

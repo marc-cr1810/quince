@@ -1,0 +1,75 @@
+## Variadic type packs. v0.9 §3.4.
+
+class CustomTuple[Ts...] {
+    private let data: tuple[Ts...]
+
+    public op init(args: Ts...) {
+        self.data = args
+    }
+
+    public const fn len(): int {
+        return len(self.data)
+    }
+
+    public const op get(index: int) {
+        return self.data[index]
+    }
+
+    public const op string(): string {
+        return "CustomTuple" + string(self.data)
+    }
+}
+
+let t1: CustomTuple[int, string, bool] = CustomTuple(101, "Bob", true)
+print(t1)
+print(t1.len())
+
+# Coerced from a tuple literal via `op init(args: Ts...)` — the one extension
+# v0.9 §3.4 makes to v0.8 §3.3's single-parameter rule.
+let t2: CustomTuple[int, string, bool] = (101, "Bob", true)
+print(t2)
+
+# The arity is part of the type, so `is` tells the two apart.
+print(t1 is CustomTuple[int, string, bool])
+print(t1 is CustomTuple[int, string])
+print(t1 is CustomTuple)
+
+let id: int = t1[0]
+let name: string = t1[1]
+print(id, name)
+
+# A pack may be empty, and `CustomTuple[]` is a type.
+let none: CustomTuple[] = CustomTuple()
+print(none, none.len())
+print(none is CustomTuple[])
+print(none is CustomTuple[int])
+
+# Explicit instantiation reaches the same place the annotation does.
+let written = CustomTuple[int, int](3, 4)
+print(written, written is CustomTuple[int, int])
+
+# Unannotated, the pack is unconstrained — gradual typing as everywhere else.
+let dynamic = CustomTuple(1, "two", 3.0)
+print(dynamic, dynamic.len())
+
+# Parameters in front of a pack, which are matched before it takes the rest.
+class Tagged[Label, Ts...] {
+    private let tag: Label
+    private let rest: tuple[Ts...]
+
+    public op init(tag: Label, rest: Ts...) {
+        self.tag = tag
+        self.rest = rest
+    }
+
+    public const op string(): string {
+        return string(self.tag) + string(self.rest)
+    }
+}
+
+let tagged: Tagged[string, int, bool] = Tagged("pt", 3, true)
+print(tagged)
+print(tagged is Tagged[string, int, bool])
+print(tagged is Tagged[string, int])
+let bare: Tagged[string] = Tagged("alone")
+print(bare)

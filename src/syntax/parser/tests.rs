@@ -28,6 +28,7 @@ use crate::syntax::lexer::Lexer;
             ExprKind::Nil => "nil".into(),
             ExprKind::Var(var) => var.name.clone(),
             ExprKind::List(items) => format!("[{}]", joined(items)),
+            ExprKind::Tuple(items) => format!("(tuple {})", joined(items)),
             ExprKind::Dict(entries) => {
                 let pairs: Vec<_> = entries
                     .iter()
@@ -909,4 +910,89 @@ use crate::syntax::lexer::Lexer;
         assert_eq!(expr_of("Pair[int, string]"), "(type-args Pair int string)");
         assert_eq!(expr_of("Stack[int]"), "(index Stack int)");
         assert_eq!(expr_of("xs[i]"), "(index xs i)");
+    }
+
+    #[test]
+    fn a_comma_is_what_makes_a_tuple_and_parentheses_still_group() {
+        // The whole of v0.9 §3.5's literal rule, and the one-element case is
+        // why the trailing comma is not optional: `(42)` has meant an int
+        // since v0.1, and a language where one form silently became the other
+        // would have no way left to write the grouping.
+        assert_eq!(expr_of("(1, 2)"), "(tuple 1 2)");
+        assert_eq!(expr_of("(42,)"), "(tuple 42)");
+        assert_eq!(expr_of("()"), "(tuple )");
+        assert_eq!(expr_of("(42)"), "42");
+        assert_eq!(expr_of("(1 + 2) * 3"), "(* (+ 1 2) 3)");
+        // A trailing comma after the first, as every other bracketed list
+        // already allows.
+        assert_eq!(expr_of("(1, 2,)"), "(tuple 1 2)");
+    }
+
+    #[test]
+    fn a_destructuring_binding_is_settled_by_the_token_after_the_keyword() {
+        // A `(` after `let` can be nothing but a pattern, so the form is
+        // decided before anything is parsed.
+        parse_ok("let (a, b) = t");
+        parse_ok("final (a, ...rest) = t");
+        parse_ok("const (...everything) = t");
+
+        // One `...` name, and it goes last: two could not be told apart, and
+        // anything after one has nothing left to take.
+        let err = parse_err("let (a, ...r, b) = t");
+        assert!(err.message.contains("comes after a `...`"), "{}", err.message);
+        let err = parse_err("let (...a, ...b) = t");
+        assert!(err.message.contains("comes after a `...`"), "{}", err.message);
+        // A name twice would leave which element won unsaid.
+        let err = parse_err("let (a, a) = t");
+        assert!(err.message.contains("bound twice"), "{}", err.message);
+        // And a pattern binding nothing is a statement written the long way.
+        let err = parse_err("let () = t");
+        assert!(err.message.contains("binds no names"), "{}", err.message);
+    }
+
+    #[test]
+    fn a_pack_ends_the_parameter_list_and_there_is_one_of_it() {
+        // v0.9 §3.4's rule, which is the same rule the `...` in a pattern
+        // obeys and for the same reason.
+        parse_ok("class CustomTuple[Ts...] { op init() {} }");
+        parse_ok("class Tagged[Label, Ts...] { op init() {} }");
+
+        let err = parse_err("class Bad[Ts..., U] { op init() {} }");
+        assert!(
+            err.message.contains("after `Ts...`"),
+            "{}",
+            err.message
+        );
+        let err = parse_err("class Bad[Ts..., Us...] { op init() {} }");
+        assert!(
+            err.message.contains("after `Ts...`"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn a_written_bracket_pair_is_not_the_same_as_no_brackets() {
+        // §3.5 makes arity part of a tuple's type, so `tuple[]` is the empty
+        // product and `tuple` admits any tuple. `args` alone cannot tell them
+        // apart — `applied` is what does, and `written` reads it back.
+        let empty = Parser::new(
+            crate::syntax::lexer::Lexer::new("tuple[]")
+                .tokenize()
+                .expect("lexes"),
+        )
+        .parse_type_for_test()
+        .expect("parses");
+        let bare = Parser::new(
+            crate::syntax::lexer::Lexer::new("tuple")
+                .tokenize()
+                .expect("lexes"),
+        )
+        .parse_type_for_test()
+        .expect("parses");
+        assert!(empty.applied && empty.args.is_empty());
+        assert!(!bare.applied && bare.args.is_empty());
+        assert!(!empty.same_as(&bare), "two types, not one");
+        assert_eq!(empty.written(), "tuple[]");
+        assert_eq!(bare.written(), "tuple");
     }

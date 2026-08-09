@@ -64,7 +64,7 @@
       "patterns": [
         {
           "name": "support.type.quince",
-          "match": "\\b(string|int|float|bool|dict|list|any)\\b\\?*"
+          "match": "\\b(string|int|float|bool|dict|list|tuple|any)\\b\\?*"
         }
       ]
     },

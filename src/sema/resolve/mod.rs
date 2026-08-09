@@ -402,6 +402,16 @@ impl Resolver {
                 StmtKind::Let { name, bind, .. } => {
                     self.declare(name, bind.mutable(), stmt.span)?
                 }
+                // Every name at once, and each declared exactly as a `let`
+                // would be — §3.5's "every name it introduces obeys the usual
+                // `let` and `final` rules", spelled where the rules live.
+                StmtKind::Destructure {
+                    names, rest, bind, ..
+                } => {
+                    for bound in names.iter().chain(rest.as_ref()) {
+                        self.declare(&bound.name, bind.mutable(), bound.span)?;
+                    }
+                }
                 StmtKind::Fn { decl, overload, .. } => {
                     // The first declaration of a name binds it; the rest join
                     // what it bound. Only one slot is reserved, which is what
@@ -676,7 +686,12 @@ impl Resolver {
                 return true;
             }
             if let Some(builtin) = builtin_named(name) {
-                return !matches!(builtin, "function" | "class" | "module" | "nil");
+                // `tuple` joins the three that name no representation to have a
+                // zero of, for a different reason: it names too many. A
+                // `tuple[int, string]` has no empty value to synthesize the way
+                // `list` has `[]`, because its arity is part of its type and
+                // every element would have to be invented. v0.9 §3.5.
+                return !matches!(builtin, "function" | "class" | "module" | "nil" | "tuple");
             }
             if !self.members.contains_key(name) {
                 return true;

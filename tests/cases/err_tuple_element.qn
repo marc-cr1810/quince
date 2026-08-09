@@ -1,0 +1,3 @@
+# §3.5 — positions are checked one by one, and the report names the position
+# rather than the whole value.
+let bad: tuple[int, string] = (1, 2)

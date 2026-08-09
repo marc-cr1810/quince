@@ -20,6 +20,7 @@ use crate::runtime::env::{self, Env};
 use crate::runtime::heap::{ObjId, Object};
 use crate::runtime::value::{Function, Value};
 use crate::syntax::ast::{BindKind, Block, Expr, ImportNames, Op, Slot, Stmt, StmtKind, TypeExpr};
+use crate::syntax::token::Span;
 
 impl Interp {
     pub(super) fn exec(&mut self, stmt: &Stmt, env: ObjId) -> Result<Flow> {
@@ -86,6 +87,42 @@ impl Interp {
                     ty.clone().map(Rc::new),
                     env,
                 );
+                Ok(Flow::Normal)
+            }
+
+            StmtKind::Destructure {
+                names,
+                rest,
+                value,
+                bind,
+                visibility: _,
+            } => {
+                let taken = self.eval(value, env)?;
+                let elements = self.taken_apart(&taken, names.len(), rest.is_some(), value.span)?;
+                // The leftover is a tuple, because a tuple is what was taken
+                // apart — §3.5's `let (head, ...tail) = (1, 2, 3)` leaves
+                // `tail` a `(2, 3)` and not a list. Built before anything is
+                // bound, so a failure above leaves no name half-written.
+                let leftover = rest.as_ref().map(|bound| {
+                    let items = elements[names.len()..].to_vec();
+                    (bound, Value::Tuple(self.heap.alloc(Object::Tuple(items))))
+                });
+                for (bound, element) in names.iter().zip(&elements) {
+                    let element = element.clone();
+                    // `const` freezes each name's value, exactly as it does on
+                    // a `let`. The tuple itself is not the thing bound, so
+                    // freezing it would freeze something no name here holds.
+                    if bind.freezes() {
+                        self.heap.freeze(&element);
+                    }
+                    self.bind_typed(&bound.slot, &bound.name, element, bind.mutable(), None, env);
+                }
+                if let Some((bound, leftover)) = leftover {
+                    if bind.freezes() {
+                        self.heap.freeze(&leftover);
+                    }
+                    self.bind_typed(&bound.slot, &bound.name, leftover, bind.mutable(), None, env);
+                }
                 Ok(Flow::Normal)
             }
 
@@ -575,6 +612,9 @@ impl Interp {
                 // Snapshotted, so mutating the collection inside the loop cannot
                 // invalidate the iteration.
                 Value::List(id) => self.heap.list(*id).clone(),
+                // No snapshot needed — a tuple cannot change — but the same
+                // clone, because the loop wants owned values either way.
+                Value::Tuple(id) => self.heap.tuple(*id).clone(),
                 // A dict iterates over its keys, as in Python. Its values are the
                 // half you can already reach, through `d[k]`.
                 Value::Dict(id) => self.heap.dict(*id).keys().collect(),
@@ -710,6 +750,65 @@ impl Interp {
     /// Stores a freshly declared value in the slot the resolver picked for it.
     pub(super) fn bind(&mut self, slot: &Option<Slot>, name: &str, value: Value, mutable: bool, env: ObjId) {
         self.bind_typed(slot, name, value, mutable, None, env)
+    }
+
+    /// The elements a destructuring binding takes apart — v0.9 §3.5.
+    ///
+    /// Tuples only. A list would be the obvious second candidate and is the one
+    /// this deliberately refuses: a list's length is not part of its type, so
+    /// `let (a, b) = xs` would be a binding whose success depends on what the
+    /// list happened to hold that time round. A tuple's arity is the type, so
+    /// the same line either always works or never does.
+    ///
+    /// Two arities, depending on whether a `...` was written: exactly `wanted`
+    /// without one, at least `wanted` with it. Both refusals name the two
+    /// numbers, because the pattern and the value are each half of the mistake
+    /// and a reader has to see which one to change.
+    fn taken_apart(
+        &mut self,
+        value: &Value,
+        wanted: usize,
+        open: bool,
+        span: Span,
+    ) -> Result<Vec<Value>> {
+        let Value::Tuple(id) = value.base(&self.heap) else {
+            return Err(QuinceError::new(
+                format!(
+                    "{} cannot be taken apart",
+                    an(value.type_name(&self.heap))
+                ),
+                span,
+            )
+            .with_kind(ErrorKind::Type)
+            .with_help(
+                "a destructuring binding names one element per position, so it needs a value \
+                 whose length is part of its type — which is a tuple, and only a tuple",
+            ));
+        };
+        let items = self.heap.tuple(*id).clone();
+        let long_enough = match open {
+            true => items.len() >= wanted,
+            false => items.len() == wanted,
+        };
+        if !long_enough {
+            let at_least = if open { "at least " } else { "" };
+            let plural = if wanted == 1 { "" } else { "s" };
+            return Err(QuinceError::new(
+                format!(
+                    "this pattern binds {at_least}{wanted} element{plural}, and the tuple has {}",
+                    items.len()
+                ),
+                span,
+            )
+            .with_kind(ErrorKind::Type)
+            .with_help(match open {
+                true => "a `...` name may hold nothing, but the names before it each need an \
+                         element of their own",
+                false => "a tuple's arity is part of its type, so the pattern has to name every \
+                          element — or end in a `...` name, which takes however many are left",
+            }));
+        }
+        Ok(items)
     }
 
     /// The same, recording what the declaration said the name holds.

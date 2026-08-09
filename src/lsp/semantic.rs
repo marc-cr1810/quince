@@ -98,6 +98,11 @@ pub(crate) fn collect_type_expr_semantic_tokens(
         TypeName::Any => {
             push_raw_token(source, ty.span, "any", 6, 0, raw_tokens);
         }
+        // The parameter's own name, painted as the type it stands for — the
+        // `...` after it is punctuation and takes no token of its own.
+        TypeName::Pack(name) => {
+            push_raw_token(source, ty.span, name, 6, 0, raw_tokens);
+        }
         // A const argument is a literal and is highlighted as one — `16` in
         // `Buffer[int, 16]` should look like the `16` two lines down, because
         // it is the same thing standing in a different place. Token type 5 is
@@ -281,7 +286,7 @@ pub(crate) fn collect_expr_semantic_tokens(
             collect_expr_semantic_tokens(source, rhs, raw_tokens);
         }
         ExprKind::Unary { rhs, .. } => collect_expr_semantic_tokens(source, rhs, raw_tokens),
-        ExprKind::List(items) => {
+        ExprKind::List(items) | ExprKind::Tuple(items) => {
             for item in items {
                 collect_expr_semantic_tokens(source, item, raw_tokens);
             }

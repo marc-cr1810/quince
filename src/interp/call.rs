@@ -21,7 +21,9 @@ use crate::runtime::heap::{ObjId, Object};
 use crate::runtime::value::{Native, Value};
 use crate::interp::generic::substituted;
 use crate::sema::types::{arguments_admit, holds};
-use crate::syntax::ast::{CallArg, Expr, ExprKind, FnDecl, Op, Param, TypeExpr, TypeName};
+use crate::syntax::ast::{
+    CallArg, Expr, ExprKind, FnDecl, Op, Param, TypeExpr, TypeName, TypeParam,
+};
 use crate::syntax::token::Span;
 
 /// What a refusal knows about where the value it refused was written.
@@ -371,6 +373,9 @@ impl Interp {
             // A value where a type goes. Never a parameter's annotation, so no
             // argument can score against it.
             TypeName::Const(_) => None,
+            // An unsubstituted pack constrains nothing, so it scores as the top
+            // type does — the same answer `holds` gives it, for the same reason.
+            TypeName::Pack(_) => Some(2),
             // A `nil` reaching a nullable is a widening: the annotation admits
             // more than the value is.
             TypeName::Named(_) if matches!(value, Value::Nil) => Some(1),
@@ -528,7 +533,19 @@ impl Interp {
         ))
     }
 
-    /// Turns the arguments a call wrote into the positional vector it takes.
+    /// Whether a parameter is annotated with a pack — `args: Ts...`. §3.4.
+///
+/// The one thing that makes a declaration variadic, and it is read off the
+/// annotation rather than off a flag on [`Param`]: a pack *is* a type, and the
+/// parameter carrying one is otherwise an ordinary parameter.
+pub(super) fn is_pack_param(param: &Param) -> bool {
+    matches!(
+        &param.ty,
+        Some(ty) if matches!(ty.name, TypeName::Pack(_))
+    )
+}
+
+/// Turns the arguments a call wrote into the positional vector it takes.
     ///
     /// Three things happen here and nowhere else, in this order — which is the
     /// order §3.6 requires:
@@ -569,6 +586,24 @@ impl Interp {
         };
 
         let params = &shape.decl.params[usize::from(shape.receiver)..];
+        // A pack parameter takes its own position and every one after it, so a
+        // call to one has no fixed arity to check and nothing to default. The
+        // gathering happens where every other call's arity is settled — see
+        // [`Interp::gathered`] — and this steps out of the way rather than
+        // reporting the count as wrong first. §3.4.
+        if params.iter().any(Self::is_pack_param) {
+            if let Some((written, at)) = args.iter().find_map(|arg| arg.name.clone()) {
+                return Err(QuinceError::new(
+                    format!("`{name}` takes a parameter pack, so `{written}:` cannot name one"),
+                    at,
+                )
+                .with_kind(ErrorKind::Type)
+                .with_help(
+                    "a pack is filled by however many arguments are left, so which of them a                      name would pick out is not a question the declaration answers — pass them                      in order",
+                ));
+            }
+            return Ok(values);
+        }
         // The familiar report, for the shape that has always produced it: no
         // defaults and no names, where "takes N arguments" is the whole truth.
         // Worth keeping rather than folding into the general case below, because
@@ -620,6 +655,50 @@ impl Interp {
         let arranged = self.fill_defaults(&shape, params, filled, name, span);
         self.temps.truncate(mark);
         arranged
+    }
+
+    /// Collapses a variadic call's trailing arguments into the tuple its pack
+    /// parameter binds — v0.9 §3.4.
+    ///
+    /// `op init(args: Ts...)` is declared with one parameter and called with
+    /// however many the pack was bound to, and this is the one place those two
+    /// counts are reconciled. Everything downstream — the arity check, the
+    /// annotation check, the slot the parameter takes — then sees an ordinary
+    /// call, which is the point: a pack is a rule about *how many arguments
+    /// arrive*, not a second kind of parameter.
+    ///
+    /// The tuple is what the body holds, so `self.data = args` stores a tuple
+    /// and `len(self.data)` counts the elements. The annotation it is checked
+    /// against is `Ts...` substituted, which is the same tuple type — see
+    /// [`packed`](crate::interp::generic).
+    ///
+    /// Untouched for every declaration without one, which is every declaration
+    /// written before v0.9.
+    fn gathered(&mut self, decl: &FnDecl, args: Vec<Value>, span: Span) -> Result<Vec<Value>> {
+        let Some(at) = decl.params.iter().position(Self::is_pack_param) else {
+            return Ok(args);
+        };
+        if args.len() < at {
+            return Err(QuinceError::new(
+                format!(
+                    "`{}` needs {at} argument{} before `{}`, and got {}",
+                    decl.name,
+                    if at == 1 { "" } else { "s" },
+                    decl.params[at].name,
+                    args.len()
+                ),
+                span,
+            )
+            .with_kind(ErrorKind::Type)
+            .with_help(
+                "the pack takes whatever is left over, so the parameters in front of it still \
+                 each need one",
+            ));
+        }
+        let mut gathered = args;
+        let rest: Vec<Value> = gathered.split_off(at);
+        gathered.push(Value::Tuple(self.heap.alloc(Object::Tuple(rest))));
+        Ok(gathered)
     }
 
     /// Evaluates the default of every parameter a call left empty.
@@ -682,6 +761,12 @@ impl Interp {
 
             Value::Function(id) => {
                 let func = self.heap.function(id).clone();
+                // A pack parameter swallows the arguments from its position on
+                // and binds them as one tuple, so this is where a variadic call
+                // becomes an ordinary one — after it, `args` and `params` are
+                // the same length and every rule below reads as it always did.
+                // §3.4.
+                let args = self.gathered(&func.decl, args, span)?;
                 check_arity(&func.decl.name, func.decl.params.len(), args.len(), span)?;
 
                 if self.depth >= MAX_DEPTH {
@@ -1233,7 +1318,34 @@ impl Interp {
                  argument is not a conversion, and naming the class is what makes the call read"
             )));
         }
-        self.call(Value::Class(id), vec![value.clone()], span).map(Some)
+        // §3.4's one extension to v0.8 §3.3. That rule admits only a
+        // single-parameter constructor, because there is no rule that could
+        // split one value across several parameters — but a `tuple` is exactly
+        // a value that says how it splits, and its arity is part of its type.
+        // So a pack constructor is handed the elements, one per position, and
+        // the checking that follows is the ordinary checking of a variadic
+        // call. From a tuple and from nothing else: every other constructor
+        // obeys v0.8 §3.3 unchanged, and coercion still does not chain.
+        let arguments = match decl.params.get(1).is_some_and(Self::is_pack_param) {
+            true => match value.base(&self.heap) {
+                Value::Tuple(items) => self.heap.tuple(*items).clone(),
+                _ => return Ok(None),
+            },
+            false => vec![value.clone()],
+        };
+        // The annotation's own arguments, so the instance is stamped with what
+        // the binding said — `let t: CustomTuple[int, string, bool] = (…)`
+        // reaches here with no construction of its own for `evaluated_as` to
+        // have lent a header to. Without it the pack binds to nothing and the
+        // elements are checked against an unconstrained `Ts...`.
+        let restore = self.pending.replace(Rc::new(TypeExpr {
+            nullable: false,
+            frozen: false,
+            ..ty.clone()
+        }));
+        let built = self.call(Value::Class(id), arguments, span);
+        self.pending = restore;
+        built.map(Some)
     }
 
     /// The report for the element that made a container fail, if one did.
@@ -1256,7 +1368,7 @@ impl Interp {
     ) -> Option<Raised> {
         let name = match &ty.name {
             TypeName::Named(name) => name.as_str(),
-            TypeName::Any | TypeName::Const(_) => return None,
+            TypeName::Any | TypeName::Const(_) | TypeName::Pack(_) => return None,
         };
         match (name, value.base(&self.heap).clone()) {
             ("list", Value::List(id)) => {
@@ -1280,6 +1392,35 @@ impl Interp {
                             written.annotation_is_here,
                         ))
                     })
+            }
+            // Positional rather than one argument applied to every element, and
+            // only where the arity agrees: a tuple of the wrong length is the
+            // container being wrong, which the caller words better than "item 2
+            // is missing". §3.5.
+            ("tuple", Value::Tuple(id)) => {
+                let items = self.heap.tuple(id).clone();
+                if !ty.applied || ty.args.len() != items.len() {
+                    return None;
+                }
+                let (index, arg, item) = ty
+                    .args
+                    .iter()
+                    .zip(&items)
+                    .enumerate()
+                    .find(|(_, (arg, item))| !holds(arg, item, &self.heap))
+                    .map(|(index, (arg, item))| (index, arg.clone(), item.clone()))?;
+                let inside = written.within(written.element(index));
+                let at = inside.caret(span);
+                self.offending_element(&arg, &item, at, inside).or_else(|| {
+                    Some(does_not_hold(
+                        &self.heap,
+                        &arg,
+                        &item,
+                        &format!("item {index}"),
+                        at,
+                        written.annotation_is_here,
+                    ))
+                })
             }
             ("dict", Value::Dict(id)) => {
                 let dict = self.heap.dict(id).clone();
@@ -1332,7 +1473,7 @@ impl Interp {
     fn widen_elements(&mut self, ty: &TypeExpr, value: Value, span: Span) -> Result<Value> {
         let name = match &ty.name {
             TypeName::Named(name) => name.as_str(),
-            TypeName::Any | TypeName::Const(_) => return Ok(value),
+            TypeName::Any | TypeName::Const(_) | TypeName::Pack(_) => return Ok(value),
         };
         match (name, value.base(&self.heap).clone()) {
             ("list", Value::List(id)) => {
@@ -1347,6 +1488,27 @@ impl Interp {
                 if let Ok(held) = self.heap.list_mut(id) {
                     *held = widened;
                 }
+            }
+            // A fresh tuple rather than a write, because there is no write to
+            // make: §3.5's immutability is the absence of `Heap::tuple_mut`.
+            // Safe where it would not be for a list — a tuple compares by its
+            // elements and cannot be mutated through the name that still holds
+            // the original, so a copy is indistinguishable from the thing it
+            // copied.
+            ("tuple", Value::Tuple(id)) => {
+                // Nothing to widen against an arity nobody knows — the same
+                // case `tuple_holds` admits without looking.
+                if !ty.applied
+                    || ty.args.iter().any(|arg| matches!(arg.name, TypeName::Pack(_)))
+                {
+                    return Ok(value);
+                }
+                let items = self.heap.tuple(id).clone();
+                let mut widened = Vec::with_capacity(items.len());
+                for (arg, item) in ty.args.iter().zip(items) {
+                    widened.push(self.coerced(arg, item, "the item", span)?);
+                }
+                return Ok(Value::Tuple(self.heap.alloc(Object::Tuple(widened))));
             }
             ("dict", Value::Dict(id)) => {
                 let Some(arg) = ty.args.get(1).cloned() else {
@@ -1492,7 +1654,9 @@ impl Interp {
             return ty.admits_nil();
         }
         let name = match &ty.name {
-            TypeName::Any => return true,
+            // A pack nothing has bound constrains nothing, as an unbounded
+            // parameter does.
+            TypeName::Any | TypeName::Pack(_) => return true,
             // No value is an instance of a value. See `types::holds`.
             TypeName::Const(_) => return false,
             TypeName::Named(name) => name.as_str(),
@@ -1514,6 +1678,40 @@ impl Interp {
         // Still O(1): the header is a lookup and the arguments are a fixed-width
         // comparison. Nothing walks the elements, which is §3.9's promise and
         // the reason `is` cannot simply call `holds`.
+        //
+        // A tuple answers its *arity* from the allocation rather than from the
+        // header, and only its arity: §3.5 makes the length part of the type,
+        // and the length is the one thing a tuple knows about itself without a
+        // walk. So `t is tuple[int, int]` is false for a three-element tuple
+        // whatever described it, and `t is tuple` — no brackets — is true for
+        // every tuple there is. The element types stay a header question, as
+        // they are for a list, because answering them is the walk `is` promises
+        // not to do.
+        if let Value::Tuple(id) = value.base(&self.heap)
+            && ty.applied
+            && self.heap.tuple(*id).len() != ty.args.len()
+        {
+            return false;
+        }
+        // And a class ending its parameter list in a pack answers the same way,
+        // for the same reason: `CustomTuple[int, string]` and
+        // `CustomTuple[int, string, bool]` are different types, so the padding
+        // `arguments_admit` does — which is what makes `list` and `list[any?]`
+        // one type — must not quietly make these one too. §3.4.
+        if let Value::Instance(id) = value.base(&self.heap)
+            && ty.applied
+        {
+            let class = self.heap.instance(*id).class;
+            let held = self
+                .heap
+                .descriptor(*id)
+                .map_or(0, |header| header.args.len());
+            if self.heap.class(class).params.last().is_some_and(TypeParam::is_pack)
+                && held != ty.args.len()
+            {
+                return false;
+            }
+        }
         let held = value
             .base(&self.heap)
             .handle()
@@ -1610,7 +1808,14 @@ impl Interp {
                 // instead. The one declaration whose default cannot be built
                 // until there is an instance to build it for — v0.9 §3.1, and
                 // the reason the resolver defers this rather than refusing it.
-                let mut value = match field.defaulted && !bindings.is_empty() {
+                // Asked of the *declaration* and not of `bindings`, which is
+                // empty both for a class taking no parameters and for one whose
+                // pack nothing bound — and those two want opposite answers. A
+                // `tuple[Ts...]` field in a bare `CustomTuple()` still has to
+                // come from `default_of`, because the call the parser baked
+                // names `tuple`, which cannot be constructed. §3.4.
+                let generic = !self.heap.class(id).params.is_empty();
+                let mut value = match field.defaulted && generic {
                     true => {
                         let ty = field.ty.as_ref().map(|ty| substituted(ty, &bindings));
                         match &ty {
@@ -1845,7 +2050,14 @@ impl Interp {
             // narrowed a set to one of them.
             other => panic!("expected a method, found {other:?}"),
         };
-        if let Some(arity) = declared {
+        // A variadic declaration has no arity to check here: the pack is filled
+        // by however many arguments are left, and how many that is settles in
+        // `call`, which gathers them into one tuple and checks the count after.
+        // Skipped rather than adjusted, so there is exactly one place that
+        // knows what a pack does to a call. §3.4.
+        let variadic = matches!(&method, Value::Function(id)
+            if self.heap.function(*id).decl.params.iter().any(Self::is_pack_param));
+        if let Some(arity) = declared.filter(|_| !variadic) {
             check_arity(
                 method.callable_name(&self.heap),
                 arity.saturating_sub(1),

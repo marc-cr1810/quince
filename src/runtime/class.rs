@@ -14,7 +14,9 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::builtins::types::{BOOL, CLASS, DICT, FLOAT, FUNCTION, INT, LIST, MODULE, NIL, STR};
+use crate::builtins::types::{
+    BOOL, CLASS, DICT, FLOAT, FUNCTION, INT, LIST, MODULE, NIL, STR, TUPLE,
+};
 use crate::runtime::dict::Dict;
 use crate::runtime::heap::{Heap, ObjId};
 use crate::runtime::value::{Native, Value};
@@ -36,6 +38,12 @@ pub enum Builtin {
     Str,
     List,
     Dict,
+    /// An arbitrary-arity product — v0.9 §3.5.
+    ///
+    /// A builtin type rather than a class the library declares, for the reason
+    /// `list` is one: its values have their own literal syntax, and a type a
+    /// program can *write* has to be a type the language knows.
+    Tuple,
     Function,
     Class,
     Module,
@@ -57,6 +65,7 @@ pub static BUILTINS: &[Builtin] = &[
     Builtin::Str,
     Builtin::List,
     Builtin::Dict,
+    Builtin::Tuple,
     Builtin::Function,
     Builtin::Class,
     Builtin::Module,
@@ -76,6 +85,7 @@ impl Builtin {
             Builtin::Str => &STR,
             Builtin::List => &LIST,
             Builtin::Dict => &DICT,
+            Builtin::Tuple => &TUPLE,
             Builtin::Function => &FUNCTION,
             Builtin::Class => &CLASS,
             Builtin::Module => &MODULE,
@@ -109,10 +119,18 @@ impl Builtin {
             Builtin::Dict => Some(Op::Dict),
             // `nil` has no conversion to override: it is a keyword, not a global,
             // so `nil(x)` does not parse in the first place.
+            // A `tuple` is written and never converted to. Its arity is part of
+            // its type, so a `tuple(x)` would have to decide how many elements
+            // the result has from a value that does not say — and `(a, b)` is
+            // the spelling that does say. v0.9 §3.5.
             // A module is produced by `import` and by nothing else. There is no
             // value it could be made from, so there is nothing for a class to
             // override — the same answer `function` and `class` give.
-            Builtin::Nil | Builtin::Function | Builtin::Class | Builtin::Module => None,
+            Builtin::Nil
+            | Builtin::Tuple
+            | Builtin::Function
+            | Builtin::Class
+            | Builtin::Module => None,
         }
     }
 
@@ -180,6 +198,13 @@ impl Builtin {
                     | Op::Bool
                     | Op::Str
                     | Op::Init
+            ),
+            // Everything a list answers, less `op set` and `op list`: a tuple is
+            // immutable, which is what makes it a value rather than a short
+            // list, and there is no conversion to it. §3.5.
+            Builtin::Tuple => matches!(
+                op,
+                Op::Eq | Op::Len | Op::Get | Op::Contains | Op::Iter | Op::Bool | Op::Str
             ),
             Builtin::Bool => matches!(
                 op,
@@ -368,6 +393,9 @@ impl Class {
     pub fn reified(&self, args: Vec<TypeExpr>) -> TypeExpr {
         TypeExpr {
             name: crate::syntax::ast::TypeName::Named(self.name.clone()),
+            // A header is written the way an annotation would be, so a class
+            // given arguments reads as applied and one taking none does not.
+            applied: !args.is_empty(),
             args,
             nullable: false,
             frozen: false,

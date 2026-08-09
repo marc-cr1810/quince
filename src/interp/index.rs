@@ -85,6 +85,15 @@ impl Interp {
                 Ok(Value::Str(Rc::from(chars[offset].to_string())))
             }
 
+            // Read like a list, negative indices and all. What it does *not*
+            // share is the write — see [`Interp::refuse_tuple_write`].
+            Value::Tuple(id) => {
+                let id = *id;
+                let len = self.heap.tuple(id).len();
+                let offset = resolve_index(&self.heap, index, len, "tuple", span)?;
+                Ok(self.heap.tuple(id)[offset].clone())
+            }
+
             _ => {
                 let (id, offset) = self.list_index(target, index, span)?;
                 Ok(self.heap.list(id)[offset].clone())
@@ -143,6 +152,28 @@ impl Interp {
             .with_kind(ErrorKind::Type)
             .with_help("only lists and strings support slicing")),
         }
+    }
+
+    /// `t[0] = 5` on a tuple, which is what makes a tuple a value — v0.9 §3.5.
+    ///
+    /// A refusal of its own rather than the "cannot index" the list path would
+    /// give, because the program wrote something meaningful: the position
+    /// exists and the value is fine, and what is wrong is that a tuple has no
+    /// writes at all. Saying which of the two containers to reach for is the
+    /// whole help a reader needs.
+    ///
+    /// Checked here and not at resolution, for the reason §3.6 gives about
+    /// `extend list[int]`: a receiver reached through a parameter or a
+    /// container is a tuple only at run time, and one mistake reporting from
+    /// two places at two times is worse than reporting late. The editor still
+    /// says so first, wherever inference knows — see `sema::check`.
+    pub(super) fn refuse_tuple_write(&self, span: Span) -> crate::error::Raised {
+        QuinceError::new("a tuple cannot be written to", span)
+            .with_kind(ErrorKind::Type)
+            .with_help(
+                "its elements are fixed when it is written, which is what makes a tuple a value \
+                 rather than a short list — build a new one, or use a `list` if it has to change",
+            )
     }
 
     /// Resolves a list subscript, accepting Python-style negative indices.

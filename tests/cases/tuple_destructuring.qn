@@ -1,0 +1,36 @@
+## Destructuring and variadic tail unpacking. v0.9 §3.5.
+
+let point: tuple[float, float, string] = (12.5, 45.0, "GPS_COORD_1")
+let (lat, lon, label) = point
+print(label, "at", lat, lon)
+
+let (head, ...tail) = (1, 2, 3, 4, 5)
+print(head, tail)
+
+# The `...` name may hold nothing.
+let (only, ...none) = (9,)
+print(only, none)
+
+# A pattern that is nothing but a `...` takes the whole tuple.
+let (...everything) = (1, 2)
+print(everything)
+
+# The binding words mean here what they mean on a `let`.
+final (a, b) = (1, 2)
+print(a + b)
+
+let (x, y) = (1, 2)
+x = 7
+print(x, y)
+
+# Inside a function, where the names are slots rather than globals.
+fn swapped(pair: tuple[int, string]): tuple[string, int] {
+    let (first, second) = pair
+    return (second, first)
+}
+print(swapped((1, "one")))
+
+# The leftover is a tuple, so it destructures again.
+let (one, ...rest) = (1, 2, 3)
+let (two, three) = rest
+print(one, two, three)

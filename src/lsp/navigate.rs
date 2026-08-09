@@ -256,6 +256,11 @@ pub(crate) fn find_decl_span(stmts: &[Stmt], target: &str) -> Option<Span> {
                 }
             }
             StmtKind::Let { name, .. } if name == target => return Some(stmt.span),
+            StmtKind::Destructure { names, rest, .. }
+                if names.iter().chain(rest.as_ref()).any(|d| d.name == target) =>
+            {
+                return Some(stmt.span);
+            }
             StmtKind::Alias { name, .. } if name == target => return Some(stmt.span),
             StmtKind::Block(b) => {
                 if let Some(span) = find_decl_span(&b.stmts, target) {
@@ -448,6 +453,16 @@ fn visit_stmt(source: &str, stmt: &Stmt, target: &str, ranges: &mut Vec<Range>) 
             }
             visit_expr(source, value, target, ranges);
         }
+        StmtKind::Destructure { names, rest, value, .. } => {
+            for declared in names.iter().chain(rest.as_ref()) {
+                if declared.name == target
+                    && let Some(r) = find_name_range(source, declared.span, target)
+                {
+                    ranges.push(r);
+                }
+            }
+            visit_expr(source, value, target, ranges);
+        }
         StmtKind::Fn { decl, .. } => {
             visit_fndecl(source, decl, stmt.span, target, ranges);
         }
@@ -617,7 +632,7 @@ fn visit_expr(source: &str, expr: &Expr, target: &str, ranges: &mut Vec<Range>) 
             visit_expr(source, lhs, target, ranges);
             visit_expr(source, rhs, target, ranges);
         }
-        ExprKind::List(items) => {
+        ExprKind::List(items) | ExprKind::Tuple(items) => {
             for item in items {
                 visit_expr(source, item, target, ranges);
             }

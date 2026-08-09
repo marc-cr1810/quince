@@ -4,8 +4,8 @@
 //! and `if let` are statement-position forms and belong here beside `if`.
 
 use crate::error::{Raised, Result};
-use crate::syntax::ast::{BinaryOp, BindKind, Expr, ExprKind, Stmt, StmtKind};
-use crate::syntax::parser::{Parser, syntax};
+use crate::syntax::ast::{BinaryOp, BindKind, Destructured, Expr, ExprKind, Stmt, StmtKind};
+use crate::syntax::parser::{Parser, declaration, syntax};
 use crate::syntax::token::{Span, Token, TokenKind};
 
 /// The refusal for a `++` or `--` written where a value is wanted.
@@ -41,6 +41,13 @@ impl Parser {
         };
         let word = format!("`{}`", bind.word());
 
+        // `let (a, b) = t`. A `(` here can be nothing else — a binding names
+        // one thing or it takes one apart — so the whole form is settled by the
+        // token after the keyword, before anything is parsed.
+        if self.check(&TokenKind::LParen) {
+            return self.destructure_stmt(start, bind, modifiers);
+        }
+
         let (name, name_span) = self.expect_ident(&format!("after {word}"))?;
         let ty = self.annotation()?;
         // A declaration with no `= value` takes the one its type answers with:
@@ -69,6 +76,95 @@ impl Parser {
             span,
         })
     }
+    /// `let (lat, lon, label) = point`, starting at the `(` — v0.9 §3.5.
+    ///
+    /// Names and nothing else between the parentheses. A nested pattern is not
+    /// a form: `let ((a, b), c) = t` would need the tuple type to be read two
+    /// levels down to say what went wrong, and §3.5 asks for one level.
+    ///
+    /// The `...` may appear once and last, which is [`ParamKind`]'s rule for a
+    /// parameter pack and is the same rule for the same reason — two of them
+    /// could not be told apart when the elements arrive.
+    ///
+    /// [`ParamKind`]: crate::syntax::ast::ParamKind
+    fn destructure_stmt(
+        &mut self,
+        start: Span,
+        bind: BindKind,
+        modifiers: crate::syntax::parser::Modifiers,
+    ) -> Result<Stmt> {
+        self.advance();
+        let mut names: Vec<Destructured> = Vec::new();
+        let mut rest: Option<Destructured> = None;
+        while !self.check(&TokenKind::RParen) {
+            let spread = self.eat(&TokenKind::DotDotDot);
+            let (name, span) = self.expect_ident("in a destructuring binding")?;
+            if let Some(earlier) = names
+                .iter()
+                .chain(rest.as_ref())
+                .find(|seen| seen.name == name)
+            {
+                return Err(declaration(
+                    format!("`{name}` is bound twice by this pattern"),
+                    span,
+                )
+                .with_label(earlier.span, "the first one")
+                .with_help("rename one of them — one element would win and nothing would say which"));
+            }
+            let bound = Destructured {
+                name,
+                span,
+                slot: None,
+            };
+            match (spread, rest.is_some()) {
+                // A name after the `...` has nothing to take: the rest already
+                // took everything left, so what this one would hold is not a
+                // position anyone could point at.
+                (_, true) => {
+                    return Err(declaration(
+                        format!("`{}` comes after a `...`, which took the rest", bound.name),
+                        bound.span,
+                    )
+                    .with_help(
+                        "a `...` name holds every element left over, so it goes last and there \
+                         is one of it",
+                    ));
+                }
+                (true, false) => rest = Some(bound),
+                (false, false) => names.push(bound),
+            }
+            if !self.eat(&TokenKind::Comma) {
+                break;
+            }
+        }
+        self.expect(TokenKind::RParen, "after the names being bound")?;
+        // An empty pattern binds nothing, so it is a statement that runs its
+        // right-hand side and drops it — which is what writing the expression
+        // alone already says, and more clearly.
+        if names.is_empty() && rest.is_none() {
+            return Err(declaration("this pattern binds no names", start.to(self.peek().span))
+                .with_help(
+                    "write the names the tuple should be taken apart into — or, if the value is \
+                     wanted for its effect alone, write it without the `let`",
+                ));
+        }
+        self.expect(TokenKind::Assign, "after a destructuring binding")?;
+        let value = self.expression()?;
+        let span = start.to(value.span);
+        self.end_of_statement()?;
+
+        Ok(Stmt {
+            kind: StmtKind::Destructure {
+                names,
+                rest,
+                value,
+                bind,
+                visibility: modifiers.visibility,
+            },
+            span,
+        })
+    }
+
     pub(super) fn if_stmt(&mut self) -> Result<Stmt> {
         let start = self.advance().span;
         let cond = self.expression()?;

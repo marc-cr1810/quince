@@ -1,0 +1,3 @@
+# §3.5 — only a tuple destructures. A list's length is not part of its type,
+# so the same line would work or not depending on what it happened to hold.
+let (a, b) = [1, 2]

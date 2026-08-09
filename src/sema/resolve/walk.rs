@@ -49,6 +49,19 @@ impl Resolver {
                 Ok(())
             }
 
+            StmtKind::Destructure {
+                names,
+                rest,
+                value,
+                ..
+            } => {
+                self.expr(value)?;
+                for bound in names.iter_mut().chain(rest.as_mut()) {
+                    bound.slot = Some(self.slot_of(&bound.name));
+                }
+                Ok(())
+            }
+
             // Nothing to resolve — an import names no expression and reserves no
             // slot. What is left is the one rule the grammar cannot state: a
             // module is loaded once, into the scope of the file that asked for
@@ -318,6 +331,15 @@ impl Resolver {
     /// `what` names the declaration, so a field and a binding read alike. An
     /// unannotated one is never refused: `let x` is the dynamic binding v0.7
     /// describes and holds `nil`, and this rule is about annotations.
+    /// Whether a `Ts...` appears anywhere in an annotation, at any depth.
+    ///
+    /// One question with two askers: whether a default can be decided here, and
+    /// whether an argument count can be. Both are "no" for the same reason —
+    /// the arity is not written down — so the predicate is one function.
+    fn mentions_a_pack(ty: &TypeExpr) -> bool {
+        matches!(ty.name, TypeName::Pack(_)) || ty.args.iter().any(Self::mentions_a_pack)
+    }
+
     fn answers_for_itself(&self, ty: Option<&TypeExpr>, what: &str, span: Span) -> Result<()> {
         let Some(ty) = ty else {
             return Ok(());
@@ -338,6 +360,13 @@ impl Resolver {
             TypeName::Named(name) if self.type_params.iter().any(|param| param == name) => {
                 return Ok(());
             }
+            // A pack, deferred for the same reason and one step further: how
+            // many elements `tuple[Ts...]` has is not written anywhere this
+            // pass can read, so neither is whether there is a value to
+            // synthesize. `Interp::default_of` decides it where the arity is
+            // known. §3.4, and it is why §3.5's flat refusal of a defaulted
+            // `tuple` does not reach the field in `class CustomTuple[Ts...]`.
+            _ if Self::mentions_a_pack(ty) => return Ok(()),
             TypeName::Named(name) if self.default_constructible(name) => return Ok(()),
             TypeName::Named(name) => name.clone(),
             // Not a class, so there is nothing to call. `any?` would admit
@@ -348,7 +377,7 @@ impl Resolver {
             // A const argument is here only if someone annotated a binding with
             // a bare value — `let x: 16` — which is not a type and has no
             // default for the same reason.
-            TypeName::Any | TypeName::Const(_) => written.clone(),
+            TypeName::Any | TypeName::Const(_) | TypeName::Pack(_) => written.clone(),
         };
         Err(declaration(
             format!("`{named}` has no default constructor, so {what} needs an initializer"),
@@ -685,7 +714,7 @@ impl Resolver {
                 Ok(())
             }
 
-            ExprKind::List(items) => {
+            ExprKind::List(items) | ExprKind::Tuple(items) => {
                 for item in items {
                     self.expr(item)?;
                 }

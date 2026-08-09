@@ -1183,3 +1183,54 @@ fn overloaded_functions_called_inside_function_body_and_constructor_overloads() 
 
 
 
+
+#[test]
+fn a_tuple_literal_is_typed_position_by_position() {
+    // Unlike a list, whose elements are joined into one answer: a tuple's
+    // positions are unrelated and its arity is part of its type, so every
+    // element is reported separately. v0.9 §3.5.
+    assert_eq!(of("let t = (1, \"a\", true)", "t").to_string(), "tuple[int, string, bool]");
+    assert_eq!(of("let t = ()", "t").to_string(), "tuple");
+    assert_eq!(of("let t = (1,)", "t").to_string(), "tuple[int]");
+}
+
+#[test]
+fn indexing_a_tuple_with_a_literal_resolves_to_that_element() {
+    // §3.4's elementwise index resolution. The literal is the whole of what
+    // makes this answerable — which element is being read is the question.
+    let src = "let t = (1, \"a\", true)\nlet first = t[0]\nlet second = t[1]\n";
+    assert_eq!(class_of(src, "first").as_deref(), Some("int"));
+    assert_eq!(class_of(src, "second").as_deref(), Some("string"));
+    // The negative index the evaluator already accepts, read the same way.
+    let back = "let t = (1, \"a\")\nlet last = t[-1]\n";
+    assert_eq!(class_of(back, "last").as_deref(), Some("string"));
+}
+
+#[test]
+fn indexing_a_tuple_with_anything_else_answers_with_what_they_share() {
+    // "The checker cannot know which element, so it answers with what they
+    // have in common" — §3.4. Which is nothing at all when they disagree.
+    let mixed = "let t = (1, \"a\")\nlet n = 0\nlet x = t[n]\n";
+    assert_eq!(of(mixed, "x"), Type::Unknown);
+    // And is the shared type when they agree, which is the case the rule is
+    // worth stating for.
+    let same = "let t = (1, 2, 3)\nlet n = 0\nlet x = t[n]\n";
+    assert_eq!(class_of(same, "x").as_deref(), Some("int"));
+    // An index past the end has no type to answer with either. It raises when
+    // it runs, with a message about the range — a different question.
+    let past = "let t = (1, \"a\")\nlet x = t[9]\n";
+    assert_eq!(of(past, "x"), Type::Unknown);
+}
+
+#[test]
+fn a_destructuring_binding_types_each_name_from_its_position() {
+    let src = "let (a, b, c) = (1, \"x\", true)\n";
+    assert_eq!(class_of(src, "a").as_deref(), Some("int"));
+    assert_eq!(class_of(src, "b").as_deref(), Some("string"));
+    assert_eq!(class_of(src, "c").as_deref(), Some("bool"));
+    // The `...` name holds what is left, which is a tuple of the remaining
+    // positions — arity and all.
+    let rest = "let (head, ...tail) = (1, \"x\", true)\n";
+    assert_eq!(class_of(rest, "head").as_deref(), Some("int"));
+    assert_eq!(of(rest, "tail").to_string(), "tuple[string, bool]");
+}

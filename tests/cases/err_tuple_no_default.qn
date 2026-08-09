@@ -1,0 +1,3 @@
+# §3.5 — no default initialization. There is no empty value of this type to
+# synthesize, unlike `list` and its `[]`.
+let t: tuple[int, string]

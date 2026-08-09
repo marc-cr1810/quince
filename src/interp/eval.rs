@@ -195,6 +195,14 @@ impl Interp {
                 Ok(Value::List(self.heap.alloc(Object::List(values))))
             }
 
+            // Built exactly as a list is, and then never written to again:
+            // §3.5's immutability is the absence of `Heap::tuple_mut`, not a
+            // check made here. v0.9 §3.5.
+            ExprKind::Tuple(items) => {
+                let values = self.eval_seq(items, env)?;
+                Ok(Value::Tuple(self.heap.alloc(Object::Tuple(values))))
+            }
+
             ExprKind::Dict(entries) => {
                 let values = self.eval_seq(entries.iter().flat_map(|(k, v)| [k, v]), env)?;
                 let mut dict = Dict::new();
@@ -858,6 +866,9 @@ impl Interp {
                 written.map_err(|_| frozen(&self.heap, &collection, span))?;
                 Ok(held)
             }
+            // Before the list path, which would report this as a container that
+            // cannot be indexed — and it can, it just cannot be written. §3.5.
+            Value::Tuple(_) => Err(self.refuse_tuple_write(span)),
             _ => {
                 let (id, offset) = self.list_index(&collection, &index, span)?;
                 let held = self.admitted(id, 0, value.clone(), "the item", at.value)?;

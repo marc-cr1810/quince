@@ -364,6 +364,39 @@ impl<'a> Infer<'a> {
                     .with_doc(doc.clone());
                 self.bind_symbol(symbol, stmt.span.start);
             }
+            // Each name gets the element type at its position, where the
+            // right-hand side is a tuple this pass could read. The `...` name
+            // gets a `tuple` with no arguments: how many elements are left is
+            // arithmetic this pass can do, but only when the value's arity is
+            // known, and saying `tuple` is the true half of the answer.
+            StmtKind::Destructure {
+                names,
+                rest,
+                value,
+                bind,
+                ..
+            } => {
+                let found = self.expr(value);
+                let elements = match found.class_name() {
+                    Some("tuple") => found.args().to_vec(),
+                    _ => Vec::new(),
+                };
+                for (index, bound) in names.iter().enumerate() {
+                    let ty = elements.get(index).cloned().unwrap_or_default();
+                    let symbol = Symbol::new(&bound.name, Kind::Variable, ty)
+                        .declared_with(bind.word());
+                    self.bind_symbol(symbol, stmt.span.start);
+                }
+                if let Some(bound) = rest {
+                    let ty = match elements.len() >= names.len() {
+                        true => Type::generic("tuple", elements[names.len()..].to_vec()),
+                        false => Type::class("tuple"),
+                    };
+                    let symbol = Symbol::new(&bound.name, Kind::Variable, ty)
+                        .declared_with(bind.word());
+                    self.bind_symbol(symbol, stmt.span.start);
+                }
+            }
             StmtKind::Fn { decl, .. } => {
                 let scope = self.scope().start;
                 let returns = self.function(decl, None);
@@ -860,6 +893,12 @@ impl<'a> Infer<'a> {
                 Some(element) => Type::generic("list", vec![element]),
                 None => Type::class("list"),
             },
+            // Unlike a list, every element is answered for separately: a
+            // tuple's arity is part of its type and its positions are unrelated,
+            // so there is nothing to join. `()` is `tuple[]` and says so. §3.5.
+            ExprKind::Tuple(items) => {
+                Type::generic("tuple", items.iter().map(|item| self.expr(item)).collect())
+            }
             ExprKind::Dict(pairs) => {
                 let keys = joined(pairs.iter().map(|(key, _)| self.expr(key)));
                 let values = joined(pairs.iter().map(|(_, value)| self.expr(value)));
@@ -927,10 +966,22 @@ impl<'a> Infer<'a> {
             // Indexing a string gives a string. A list holds whatever was put
             // in it and a dict holds whatever was mapped to, so neither says.
             ExprKind::Index { target, index } => {
-                let target = self.expr(target);
+                let held = self.expr(target);
                 self.expr(index);
-                match target.class_name() {
+                match held.class_name() {
                     Some("string") => Type::class("string"),
+                    // v0.9 §3.4's elementwise index resolution. A tuple's
+                    // positions have unrelated types, so which element is being
+                    // read is the whole question — and a literal is the only
+                    // index that answers it. Anything worked out at run time
+                    // gets the join of the positions, which is what they have
+                    // in common and is `Unknown` unless they agree.
+                    Some("tuple") if !held.args().is_empty() => {
+                        match literal_index(index, held.args().len()) {
+                            Some(at) => held.args()[at].clone(),
+                            None => joined(held.args().iter().cloned()).unwrap_or_default(),
+                        }
+                    }
                     _ => Type::Unknown,
                 }
             }
@@ -1231,6 +1282,38 @@ fn names_a_builtin(name: &str) -> bool {
 /// Collected eagerly rather than short-circuiting, because each element still
 /// has to be walked for its own type to be recorded even once the answer is
 /// settled.
+/// Which element a subscript names, when the source says outright — v0.9 §3.4.
+///
+/// A literal, and a negated literal for the Python-style negative index the
+/// evaluator already accepts. Nothing else: a name bound to `0` is a value this
+/// pass could sometimes work out and the point of the rule is that a reader can
+/// see which element is meant, so "sometimes" would be a rule nobody could
+/// state.
+///
+/// `None` for an index out of range as well as for one that is not a literal.
+/// That is not the pass declining to notice a mistake — `xs[9]` on a
+/// three-element tuple raises when it runs, with a message about the range —
+/// it is this pass having no *type* to answer with, which is a different
+/// question and the only one it is being asked.
+fn literal_index(index: &Expr, len: usize) -> Option<usize> {
+    let at = match &index.kind {
+        ExprKind::Int(n) => *n,
+        ExprKind::Unary {
+            op: UnaryOp::Neg,
+            rhs,
+        } => match rhs.kind {
+            ExprKind::Int(n) => -n,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let at = match at < 0 {
+        true => at + len as i64,
+        false => at,
+    };
+    usize::try_from(at).ok().filter(|at| *at < len)
+}
+
 fn joined(types: impl Iterator<Item = Type>) -> Option<Type> {
     types
         .reduce(|found, next| found.join(next))
@@ -1287,7 +1370,7 @@ fn children(expr: &Expr) -> Vec<&Expr> {
         ExprKind::Chain(inner) => vec![inner],
         ExprKind::Is { value, .. } => vec![value],
         ExprKind::Coalesce { lhs, rhs } => vec![lhs, rhs],
-        ExprKind::List(items) => items.iter().collect(),
+        ExprKind::List(items) | ExprKind::Tuple(items) => items.iter().collect(),
         ExprKind::Dict(pairs) => pairs.iter().flat_map(|(k, v)| [k, v]).collect(),
         ExprKind::Unary { rhs, .. } => vec![rhs],
         ExprKind::Binary { lhs, rhs, .. } | ExprKind::Logical { lhs, rhs, .. } => vec![lhs, rhs],

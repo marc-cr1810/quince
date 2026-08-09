@@ -1,0 +1,3 @@
+# §3.5 — the pattern names every element, or ends in a `...` name that takes
+# whatever is left.
+let (a, b) = (1, 2, 3)

@@ -203,7 +203,9 @@ fn matched(param: &Param, rep: &str) -> Option<u8> {
         return Some(fit::ANYTHING);
     };
     match &ty.name {
-        TypeName::Any => Some(fit::ANYTHING),
+        // A pack is what a variadic constructor writes, and it admits
+        // whatever arrives — the same answer the top type gets.
+        TypeName::Any | TypeName::Pack(_) => Some(fit::ANYTHING),
         // A value where a type goes, which no argument fits. See
         // `Interp::fits`, which scores the same question at run time.
         TypeName::Const(_) => None,

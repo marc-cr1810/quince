@@ -313,17 +313,30 @@ impl Interp {
 /// each statement runs, because a `private fn` in a branch that never executed
 /// is still not exported.
 fn unexported(program: &[Stmt]) -> HashSet<String> {
+    // `flat_map` rather than `filter_map`, because one statement may withhold
+    // several names: a destructuring binding takes one visibility word and
+    // binds however many the pattern names.
     program
         .iter()
-        .filter_map(|stmt| match &stmt.kind {
+        .flat_map(|stmt| match &stmt.kind {
             StmtKind::Let {
                 name, visibility, ..
-            } if !visibility.exported() => Some(name.clone()),
+            } if !visibility.exported() => vec![name.clone()],
             StmtKind::Class {
                 name, visibility, ..
-            } if !visibility.exported() => Some(name.clone()),
-            StmtKind::Fn { decl, .. } if !decl.visibility.exported() => Some(decl.name.clone()),
-            _ => None,
+            } if !visibility.exported() => vec![name.clone()],
+            StmtKind::Destructure {
+                names,
+                rest,
+                visibility,
+                ..
+            } if !visibility.exported() => names
+                .iter()
+                .chain(rest.as_ref())
+                .map(|bound| bound.name.clone())
+                .collect(),
+            StmtKind::Fn { decl, .. } if !decl.visibility.exported() => vec![decl.name.clone()],
+            _ => Vec::new(),
         })
         .collect()
 }

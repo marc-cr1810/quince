@@ -291,6 +291,11 @@ impl Interp {
             // self-reference this can answer. See the note above.
             (Value::List(a), Value::List(b)) if a == b => true,
             (Value::List(a), Value::List(b)) => return self.lists_equal(*a, *b),
+            // Elementwise, exactly as a list is — and never equal to a list,
+            // because the arity that makes a tuple a tuple would then be a
+            // property two equal values disagreed about. §3.5.
+            (Value::Tuple(a), Value::Tuple(b)) if a == b => true,
+            (Value::Tuple(a), Value::Tuple(b)) => return self.tuples_equal(*a, *b),
             // Order is not part of a dict's identity, only its contents:
             // `{"a": 1, "b": 2}` equals `{"b": 2, "a": 1}`.
             (Value::Dict(a), Value::Dict(b)) if a == b => true,
@@ -355,6 +360,26 @@ impl Interp {
             }
             i += 1;
         }
+    }
+
+    /// Elementwise, and by index for the reason [`Interp::lists_equal`] is:
+    /// comparing an element can run a program's `op eq`, which cannot hold a
+    /// borrow of the heap across it.
+    ///
+    /// Arity is checked once at the top and not again at the bottom, which is
+    /// the one way this differs from the list version — a tuple cannot shrink
+    /// under a comparison, because nothing in the language can write to one.
+    pub(super) fn tuples_equal(&mut self, a: ObjId, b: ObjId) -> Result<bool> {
+        if self.heap.tuple(a).len() != self.heap.tuple(b).len() {
+            return Ok(false);
+        }
+        for i in 0..self.heap.tuple(a).len() {
+            let (x, y) = (self.heap.tuple(a)[i].clone(), self.heap.tuple(b)[i].clone());
+            if !self.equals(&x, &y)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// By key, which cannot ask a class anything — a [`Key`] holds no handle, so
@@ -781,6 +806,21 @@ impl Interp {
                 let mut found = false;
                 let mut i = 0;
                 while let Some(item) = self.heap.list(id).get(i).cloned() {
+                    if self.equals(&item, needle)? {
+                        found = true;
+                        break;
+                    }
+                    i += 1;
+                }
+                found
+            }
+            // As for a list, and by index for the same reason — `op eq` can
+            // run anything, though it cannot shorten the tuple it is searching.
+            Value::Tuple(id) => {
+                let id = *id;
+                let mut found = false;
+                let mut i = 0;
+                while let Some(item) = self.heap.tuple(id).get(i).cloned() {
                     if self.equals(&item, needle)? {
                         found = true;
                         break;

@@ -378,6 +378,10 @@ pub fn stated(ty: &TypeExpr) -> Type {
         // only ever reports a type back to an editor. §3.3, and it is the one
         // place a const argument is answered less precisely than it is checked.
         TypeName::Const(_) => Type::Unknown,
+        // Several types where one goes, and this pass has one answer to give.
+        // A pack is only ever `Unknown` *unsubstituted*: once a class is built
+        // its arguments are ordinary types, and it is those the editor sees.
+        TypeName::Pack(_) => Type::Unknown,
         TypeName::Named(name) => {
             let stated = Type::generic(name, ty.args.iter().map(stated).collect());
             match ty.nullable {
@@ -429,6 +433,10 @@ pub fn holds(ty: &TypeExpr, value: &Value, heap: &Heap) -> bool {
         // argument list, and this is asked of the head — but "no value holds as
         // `16`" is the honest answer if it ever is.
         TypeName::Const(_) => return false,
+        // An unsubstituted pack — a `Ts...` outside any binding, which is what
+        // a bare `CustomTuple()` leaves. Unconstrained, like the `any?` an
+        // unbound type parameter stands for: §3.1's defaulting, one arity up.
+        TypeName::Pack(_) => return true,
         TypeName::Named(name) => name.as_str(),
     };
 
@@ -439,6 +447,16 @@ pub fn holds(ty: &TypeExpr, value: &Value, heap: &Heap) -> bool {
     }
     if actual != name && !descends_from(heap, value, name) {
         return false;
+    }
+
+    // A tuple is answered from its elements and never from its header, which is
+    // the one place §3.5's "arity is part of the type" parts company with every
+    // other container. A `list[int]` can be empty and still be a list of ints,
+    // so only the header knows what it was built to hold; a tuple's elements
+    // *are* its type, all of them, always. There is nothing a header could add
+    // and nothing it could correct.
+    if let ("tuple", Value::Tuple(id)) = (name, value.base(heap)) {
+        return tuple_holds(ty, heap.tuple(*id), heap);
     }
 
     // The reified header first, where the allocation carries one. A container
@@ -478,6 +496,36 @@ pub fn holds(ty: &TypeExpr, value: &Value, heap: &Heap) -> bool {
     }
 }
 
+/// Whether `items` hold as the tuple annotation `ty` — v0.9 §3.5.
+///
+/// Two rules, and the first is the one that makes a tuple a product type rather
+/// than a short list: **the arity has to match exactly**, because
+/// `tuple[int, int]` and `tuple[int, int, int]` are unrelated types and neither
+/// admits the other. The second is positional — argument `i` against element
+/// `i` — with no padding and no elision, for the same reason. A `dict[K]` may
+/// leave the values unconstrained because a dict has two arguments whatever it
+/// holds; a tuple with one argument written is a tuple of one thing.
+///
+/// A bare `tuple` admits any tuple, and `tuple[]` admits only the empty one.
+/// [`TypeExpr::applied`] is what tells the two apart.
+fn tuple_holds(ty: &TypeExpr, items: &[Value], heap: &Heap) -> bool {
+    if !ty.applied {
+        return true;
+    }
+    // A `tuple[Ts...]` nothing has expanded: the arity is not merely unmatched,
+    // it is unknown, so there is no arity to compare against. The same answer
+    // an unsubstituted pack gets everywhere — unconstrained. §3.4.
+    if ty.args.iter().any(|arg| matches!(arg.name, TypeName::Pack(_))) {
+        return true;
+    }
+    ty.args.len() == items.len()
+        && ty
+            .args
+            .iter()
+            .zip(items)
+            .all(|(arg, item)| holds(arg, item, heap))
+}
+
 /// The type an elided argument stands for: `any?`, the top type.
 ///
 /// §3.10's `dict[K]` is shorthand for `dict[K, _?]`, and v0.9 §3.1 says the same
@@ -491,6 +539,7 @@ fn unconstrained() -> TypeExpr {
     TypeExpr {
         name: TypeName::Any,
         args: Vec::new(),
+        applied: false,
         nullable: true,
         frozen: false,
         span: Span::new(0, 0),
@@ -542,7 +591,10 @@ fn admits((want, has): (&TypeExpr, &TypeExpr)) -> bool {
         // `Const(Int(32))`. That single line is the whole of §3.3's promise
         // that the two are different types, and it is why a const argument was
         // put where a name goes rather than beside it.
-        TypeName::Named(_) | TypeName::Const(_) => want.same_as(has),
+        // A pack compares by equality like a const argument does, and for the
+        // same reason: by the time two headers are compared both sides have
+        // been substituted, so an unexpanded pack here is one nothing bound.
+        TypeName::Named(_) | TypeName::Const(_) | TypeName::Pack(_) => want.same_as(has),
     }
 }
 
@@ -583,6 +635,10 @@ pub fn satisfies(
         // be here is a const argument reaching a *type* parameter — which is
         // the mismatch `built_generic` reports in its own words.
         TypeName::Const(_) => return false,
+        // A pack stands for a number of types, and a bound is a claim about
+        // one. §3.4 gives a pack no bound, so this is only reachable through a
+        // `Ts...` written where a bound goes — which no parameter accepts.
+        TypeName::Pack(_) => return false,
         TypeName::Named(name) => name.as_str(),
     };
     let TypeName::Named(arg_name) = &arg.name else {
@@ -656,7 +712,7 @@ pub fn refusal(ty: &TypeExpr, value: &Value, heap: &Heap, what: &str) -> (String
                 // `any` is the stated top type *minus* `nil`, so the fix is the
                 // same character and the resulting type has its own name.
                 TypeName::Any => "write `any?` for the type that admits everything".to_string(),
-                TypeName::Named(_) | TypeName::Const(_) => {
+                TypeName::Named(_) | TypeName::Const(_) | TypeName::Pack(_) => {
                     format!("write `{written}?` if it may be absent")
                 }
             }),
@@ -674,7 +730,20 @@ pub fn refusal(ty: &TypeExpr, value: &Value, heap: &Heap, what: &str) -> (String
         .handle()
         .and_then(|id| heap.descriptor(id))
         .filter(|held| !held.args.is_empty())
-        .map(|held| format!("`{}`", held.written()));
+        .map(|held| format!("`{}`", held.written()))
+        // A tuple says its length instead, and says it whether or not anything
+        // described it. "this is a tuple" is a useless answer to "why is this
+        // not a `tuple[int, string]`" when the reason is that it has one
+        // element — the arity is the type, per §3.5, so it is what the sentence
+        // has to name.
+        .or_else(|| match value.base(heap) {
+            Value::Tuple(id) => {
+                let len = heap.tuple(*id).len();
+                let plural = if len == 1 { "" } else { "s" };
+                Some(format!("a tuple of {len} element{plural}"))
+            }
+            _ => None,
+        });
     let precise = described.clone().unwrap_or_else(|| an(actual).to_string());
     let message = format!("{what} is `{written}`, but this is {precise}");
     // The specific advice where there is some, and the general shape of the fix

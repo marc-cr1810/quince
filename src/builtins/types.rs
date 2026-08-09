@@ -79,6 +79,17 @@ pub static DICT: BuiltinType = BuiltinType {
     ],
     init: Some(&DICT_INIT),
 };
+/// The arbitrary-arity product of v0.9 §3.5.
+///
+/// No methods and no `init`. A tuple is immutable and its arity is part of its
+/// type, so every question anyone asks of one — how long it is, what is at a
+/// position, whether it holds a value — is a language operation rather than a
+/// method, and there is no value with an arity for a conversion to read.
+pub static TUPLE: BuiltinType = BuiltinType {
+    name: "tuple",
+    methods: &[],
+    init: None,
+};
 /// No `init`: there is no value a function could be made *from*. `fn` is how one
 /// comes into being, and it is a declaration rather than a conversion.
 pub static FUNCTION: BuiltinType = BuiltinType {

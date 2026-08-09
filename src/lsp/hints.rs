@@ -77,6 +77,15 @@ fn one(stmt: &Stmt, types: &Types, found: &mut Vec<(u32, String)>) {
                 found.push((name_span.end, label));
             }
         }
+        // One hint per name, since a destructuring binding never writes an
+        // annotation and each element has a type of its own.
+        StmtKind::Destructure { names, rest, .. } => {
+            for declared in names.iter().chain(rest.as_ref()) {
+                if let Some(label) = hint(&types.of_name(&declared.name, declared.span.start)) {
+                    found.push((declared.span.end, label));
+                }
+            }
+        }
         StmtKind::Class { methods, fields, .. } => {
             for field in fields {
                 if field.ty.is_some() {

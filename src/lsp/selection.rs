@@ -64,6 +64,11 @@ fn visit_stmt_selection(source: &str, stmt: &Stmt, offset: u32, spans: &mut Vec<
                 visit_expr_selection(source, value, offset, spans);
             }
         }
+        StmtKind::Destructure { value, .. } => {
+            if value.span.start <= offset && offset <= value.span.end {
+                visit_expr_selection(source, value, offset, spans);
+            }
+        }
         StmtKind::Fn { decl, .. } => {
             collect_containing_spans(source, &decl.body.stmts, offset, spans);
         }

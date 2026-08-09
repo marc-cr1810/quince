@@ -233,6 +233,18 @@ fn one(stmt: &Stmt, types: &Types, bound: &mut Bindings, found: &mut Vec<Raised>
             expression(value, types, bound, found);
             bound.declare(name, *bind, ty.clone());
         }
+        StmtKind::Destructure {
+            names,
+            rest,
+            value,
+            bind,
+            ..
+        } => {
+            expression(value, types, bound, found);
+            for declared in names.iter().chain(rest.as_ref()) {
+                bound.declare(&declared.name, *bind, None);
+            }
+        }
         StmtKind::Class { name, parent, parent_span, fields, methods, .. } => {
             if let Some(parent) = parent {
                 let pspan = parent_span.unwrap_or(stmt.span);
@@ -1285,6 +1297,18 @@ fn against(
             }
             return;
         }
+        // `tuple[A, B]` over a tuple literal — fixed arity, positional, one
+        // argument per element. Only where the two lengths agree: a tuple of
+        // the wrong length is the whole value being wrong, and it is reported
+        // as that below rather than as an element that is missing.
+        (ExprKind::Tuple(items), args)
+            if names(ty, "tuple") && ty.applied && args.len() == items.len() =>
+        {
+            for (index, (arg, item)) in args.iter().zip(items).enumerate() {
+                against(arg, item, &format!("item {index}"), types, found);
+            }
+            return;
+        }
         // `dict[K, V]` over a dict literal. The `dict[K]` shorthand leaves
         // values unconstrained, so only the keys are asked about there.
         (ExprKind::Dict(pairs), [key] | [key, _]) if names(ty, "dict") => {
@@ -1356,6 +1380,21 @@ fn disagrees(
         // since a literal that says nothing about its elements answers with the
         // bare `list` and there is nothing to compare.
         let (want, have) = (annotated.args(), held.args());
+        // A tuple's arity is part of its type, so two lengths that differ are a
+        // disagreement rather than a comparison this cannot make — the one head
+        // where `want.len() != have.len()` is an answer instead of a reason to
+        // stay quiet. §3.5.
+        if wanted == "tuple" && ty.applied && want.len() != have.len() {
+            let (asked, got) = (want.len(), have.len());
+            return Some(refusal(
+                format!("{what} is `{}`, but this is `{held}`", ty.written()),
+                format!(
+                    "a tuple's length is part of its type — `{}` holds {asked}, and this is {got}",
+                    ty.written()
+                ),
+                span,
+            ));
+        }
         if want.is_empty() || have.is_empty() || want.len() != have.len() {
             return None;
         }

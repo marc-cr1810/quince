@@ -1,0 +1,24 @@
+(12.5, 45.0, "GPS_COORD_1")
+3
+12.5 GPS_COORD_1 GPS_COORD_1
+(101, "Alice", true, 3.14)
+(42,) ()
+1 0
+true
+false
+false
+true
+true
+true
+false
+false
+true
+false
+1
+two
+true
+tuple
+(1.0, 2.0)
+((1, 2), [3, 4])
+[1, "two", true]
+() is falsy

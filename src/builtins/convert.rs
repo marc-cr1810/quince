@@ -155,6 +155,15 @@ pub static LIST_INIT: Native = Native {
                 let items = interp.heap.list(id).clone();
                 Ok(Value::List(interp.heap.alloc(Object::List(items))))
             }
+            // A tuple is a sequence and iterates as one, so the list of what
+            // it holds is a thing to ask for. It is the one direction that
+            // exists: `tuple(xs)` is not a conversion, because a tuple's arity
+            // is part of its type and a list does not say what its own is.
+            // v0.9 §3.5.
+            Value::Tuple(id) => {
+                let items = interp.heap.tuple(id).clone();
+                Ok(Value::List(interp.heap.alloc(Object::List(items))))
+            }
             Value::Str(_) => Err(not_convertible(&interp.heap, "list", only, span)
                 .with_help("`chars` splits a string into its characters")),
             Value::Dict(_) => Err(not_convertible(&interp.heap, "list", only, span)

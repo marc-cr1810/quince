@@ -1,0 +1,3 @@
+# §3.5 — arity is part of the type, so a one-element tuple is not a short
+# `tuple[int, string]`, it is a different type.
+let short: tuple[int, string] = (1,)

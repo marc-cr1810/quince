@@ -332,8 +332,9 @@ impl Parser {
                 // `any` is wider than the contract, so it is a claim that the op
                 // may answer with something it may not.
                 TypeName::Any => true,
-                // A value is not the type the contract names, whatever it is.
-                TypeName::Const(_) => true,
+                // A value is not the type the contract names, whatever it is,
+                // and neither is a run of them.
+                TypeName::Const(_) | TypeName::Pack(_) => true,
                 TypeName::Named(name) => name != contract,
             };
             // `op string(): string?` is refused too: the contract is a string,
@@ -580,6 +581,35 @@ impl Parser {
                 )));
             }
             Self::refuse_duplicate_param(&params, &name, span, whose)?;
+            // `[Ts...]` — a pack rather than a parameter. §3.4. Read before the
+            // bound, because a pack has none: what it stands for is a number of
+            // arguments, and there is no one type for a bound to be about.
+            if self.eat(&TokenKind::DotDotDot) {
+                let end = self.tokens[self.pos - 1].span;
+                params.push(TypeParam {
+                    name,
+                    span: span.to(end),
+                    kind: ParamKind::Pack,
+                });
+                let _ = self.eat(&TokenKind::Comma);
+                // Last, and the only one. Two packs could not be told apart
+                // when the arguments arrive — there is no rule that would say
+                // where the first stops — and anything after one has nothing
+                // left to take. §3.4.
+                if !self.check(&TokenKind::RBracket) {
+                    return Err(declaration(
+                        format!("`{whose}` writes a type parameter after `{}...`", params
+                            .last()
+                            .expect("just pushed")
+                            .name),
+                        self.peek().span,
+                    )
+                    .with_help(
+                        "a pack takes however many arguments are left, so it goes last and                          there is one of it — two of them could not be told apart",
+                    ));
+                }
+                break;
+            }
             // `[T: float]`. The same `:` every annotation in the language is
             // introduced by, and what follows is an ordinary type — v0.9 §3.2
             // is emphatic that a bound is not a second kind of thing.
@@ -689,6 +719,14 @@ impl Parser {
                 self.advance();
                 TypeName::Any
             }
+            // `Ts...` — the pack named `Ts`, expanded here. Whether `Ts` is a
+            // pack the enclosing declaration declared is not a question this
+            // can answer; it is asked where the parameter list is in hand.
+            TokenKind::Ident(word) if matches!(self.peek_ahead(), TokenKind::DotDotDot) => {
+                self.advance();
+                self.advance();
+                TypeName::Pack(word)
+            }
             TokenKind::Ident(word) => {
                 self.advance();
                 TypeName::Named(word)
@@ -727,15 +765,16 @@ impl Parser {
         };
 
         let mut args = Vec::new();
-        if self.eat(&TokenKind::LBracket) {
-            loop {
+        // Whether the brackets were written, which `args` alone cannot say —
+        // `tuple[]` is the empty product and `tuple` admits any tuple. §3.5.
+        let applied = self.eat(&TokenKind::LBracket);
+        if applied {
+            // `tuple[]`, and nothing else empty is written anywhere: the loop is
+            // skipped rather than made to read a first argument that is not
+            // there.
+            while !self.check(&TokenKind::RBracket) {
                 args.push(self.type_expr()?);
                 if !self.eat(&TokenKind::Comma) {
-                    break;
-                }
-                // A trailing comma before the `]`, as the argument lists and
-                // collection literals already allow.
-                if self.check(&TokenKind::RBracket) {
                     break;
                 }
             }
@@ -758,6 +797,7 @@ impl Parser {
         Ok(TypeExpr {
             name,
             args,
+            applied,
             nullable,
             frozen,
             span: start.to(end),

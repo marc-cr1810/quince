@@ -63,6 +63,7 @@ static LEN: Native = Native {
         match args[0].base(&interp.heap) {
             Value::Str(s) => Ok(Value::Int(s.chars().count() as i64)),
             Value::List(id) => Ok(Value::Int(interp.heap.list(*id).len() as i64)),
+            Value::Tuple(id) => Ok(Value::Int(interp.heap.tuple(*id).len() as i64)),
             Value::Dict(id) => Ok(Value::Int(interp.heap.dict(*id).len() as i64)),
             _ => Err(QuinceError::new(
                 format!(

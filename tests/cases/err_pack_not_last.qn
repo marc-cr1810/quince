@@ -1,0 +1,5 @@
+# §3.4 — one pack per parameter list, in last position. Two of them could not
+# be told apart when the arguments arrive.
+class Bad[Ts..., U] {
+    op init() {}
+}

@@ -528,13 +528,41 @@ impl Parser {
                 });
             }
 
+            // Grouping and the tuple literal, told apart by a comma — v0.9 §3.5.
+            //
+            // `()` is the empty tuple, because there is no expression for the
+            // parentheses to be grouping. `(e)` stays the grouping it has been
+            // since v0.1, and `(e,)` is the one-element tuple: the comma is what
+            // makes a tuple, so the trailing one is required exactly where the
+            // grouping would otherwise claim the form.
             TokenKind::LParen => {
-                let inner = self.expression()?;
-                let close = self.expect(TokenKind::RParen, "after the expression")?;
-                // Reuse the inner node but widen its span to include the parens,
-                // so errors underline what the reader sees.
+                if self.check(&TokenKind::RParen) {
+                    let close = self.advance();
+                    return Ok(Expr {
+                        kind: ExprKind::Tuple(Vec::new()),
+                        span: token.span.to(close.span),
+                    });
+                }
+                let first = self.expression()?;
+                if !self.eat(&TokenKind::Comma) {
+                    let close = self.expect(TokenKind::RParen, "after the expression")?;
+                    // Reuse the inner node but widen its span to include the
+                    // parens, so errors underline what the reader sees.
+                    return Ok(Expr {
+                        kind: first.kind,
+                        span: token.span.to(close.span),
+                    });
+                }
+                let mut items = vec![first];
+                while !self.check(&TokenKind::RParen) {
+                    items.push(self.expression()?);
+                    if !self.eat(&TokenKind::Comma) {
+                        break;
+                    }
+                }
+                let close = self.expect(TokenKind::RParen, "after the tuple elements")?;
                 return Ok(Expr {
-                    kind: inner.kind,
+                    kind: ExprKind::Tuple(items),
                     span: token.span.to(close.span),
                 });
             }
